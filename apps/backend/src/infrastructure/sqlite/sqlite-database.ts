@@ -1,4 +1,6 @@
 import BetterSqlite3 from "better-sqlite3"
+import { mkdirSync } from "node:fs"
+import { dirname } from "node:path"
 import { Kysely, SqliteDialect } from "kysely"
 
 import type { ProjectDatabase, RegistryDatabase } from "./database-types.js"
@@ -9,6 +11,9 @@ import { registryMigrations } from "./migrations/registry-migrations.js"
 export const SQLITE_BUSY_TIMEOUT_MS = 5000
 
 function createSqliteDatabase<Database>(path: string): Kysely<Database> {
+  if (path !== ":memory:") {
+    mkdirSync(dirname(path), { recursive: true })
+  }
   const nativeDatabase = new BetterSqlite3(path)
   nativeDatabase.pragma("foreign_keys = ON")
   nativeDatabase.pragma(`busy_timeout = ${String(SQLITE_BUSY_TIMEOUT_MS)}`)
