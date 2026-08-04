@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import {
   BackendContainer,
   BackendFacade,
+  FakeAiModelAdapter,
   MessagePortTransport,
   type BackendMessagePort,
 } from "../src/index.js"
@@ -35,6 +36,7 @@ describe("backend utility runtime", () => {
     const facade = new BackendFacade(await BackendContainer.open({
       applicationDataRoot: join(root, "application-data"),
       promptPackageRoot,
+      model: new FakeAiModelAdapter(randomUUID),
     }))
     openFacades.push(facade)
     const projectId = randomUUID()

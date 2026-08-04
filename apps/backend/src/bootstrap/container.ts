@@ -9,7 +9,7 @@ import {
 } from "../application/index.js"
 import type { InternalProjectStore, ProjectRepositoryFactory, WorkspaceDefaultDocuments, WorkspacePort } from "../application/workspace/index.js"
 import { NodeInternalStoreAdapter, NodeWorkspaceAdapter } from "../infrastructure/filesystem/index.js"
-import { FakeAiModelAdapter } from "../infrastructure/models/index.js"
+import { createModelFromEnvironment } from "../infrastructure/models/index.js"
 import { NodePromptResourceAdapter } from "../infrastructure/prompts/index.js"
 import {
   SqliteProjectRegistryRepository,
@@ -48,7 +48,10 @@ export class BackendContainer {
   ) {
     this.registryDatabase = registryDatabase
     this.internalStore = new NodeInternalStoreAdapter(options.applicationDataRoot)
-    this.model = options.model ?? new FakeAiModelAdapter(options.createId ?? randomUUID)
+    this.model = options.model ?? createModelFromEnvironment(
+      options.promptPackageRoot,
+      options.createId ?? randomUUID,
+    )
     this.createId = options.createId ?? randomUUID
     this.now = options.now ?? Date.now
     this.promptPackageRoot = resolve(options.promptPackageRoot)

@@ -46,6 +46,7 @@ import type {
   TaskScopeRepository,
   TurnPersistencePort,
   TurnPhaseInput,
+  TurnReadEvidence,
 } from "./ports/index.js"
 import type { InternalProjectStore, InternalStorePort, WorkspacePort } from "../workspace/index.js"
 
@@ -161,6 +162,7 @@ export class TurnOrchestrator {
     const phaseRunIds: string[] = []
     const phaseRuns = new Map<AIPhase, string>()
     let sourceUnitIds: string[] = []
+    let readEvidence: TurnReadEvidence[] = []
     let usage = { modelCalls: 0, inputTokens: 0, outputTokens: 0, cacheHits: 0, cacheMisses: 0 }
 
     try {
@@ -178,10 +180,12 @@ export class TurnOrchestrator {
           phaseRunIds,
           context,
           artifacts,
+          readEvidence,
           budget,
           usage,
         })
         context = result.context
+        readEvidence = [...result.readEvidence]
         phaseRuns.set(phase, result.phaseRunId)
         artifacts[phase] = result.artifact
         usage = {
@@ -267,6 +271,7 @@ export class TurnOrchestrator {
     let currentPhaseRunId = input.phaseRunId
     let attempt = 1
     let phaseUsage = emptyPhaseUsage()
+    let currentEvidence = [...input.readEvidence]
 
     for (;;) {
       const phaseInput: TurnPhaseInput = {
@@ -275,6 +280,7 @@ export class TurnOrchestrator {
         sourceId: input.sourceId,
         sourceUnitIds: input.sourceUnitIds,
         phaseRunIds: input.phaseRunIds,
+        readEvidence: currentEvidence,
         artifacts: input.artifacts,
       }
       const request: PhaseRequestEnvelope = {
@@ -355,6 +361,7 @@ export class TurnOrchestrator {
         return {
           phaseRunId: currentPhaseRunId,
           context: currentContext,
+          readEvidence: currentEvidence,
           artifact: parsePhaseArtifact(input.phase, parsedResult.artifact),
           usage: phaseUsage,
         }
@@ -363,12 +370,14 @@ export class TurnOrchestrator {
       if (attempt >= 3) {
         throw new Error(`Phase ${input.phase} exceeded the read expansion limit`)
       }
-      currentContext = (await this.executeReads(
+      const readResult = await this.executeReads(
         currentContext,
         parsedResult.requestedReads,
         input.input.projectId,
         input.inputScopeId,
-      )).context
+      )
+      currentContext = readResult.context
+      currentEvidence = [...currentEvidence, ...readResult.evidence]
       await this.dependencies.persistence.saveContext(currentContext, this.dependencies.now())
       currentPhaseRunId = this.dependencies.createId()
       input.phaseRunIds.push(currentPhaseRunId)
@@ -381,8 +390,10 @@ export class TurnOrchestrator {
     requests: PhaseResultEnvelope["requestedReads"],
     projectId: ProjectId,
     scopeId: string,
-  ): Promise<{ context: TurnContext }> {
+  ): Promise<{ context: TurnContext; evidence: readonly TurnReadEvidence[] }> {
     const returned = [] as Array<{ readId: string; reason: string; segment: TurnContext["segments"][number] }>
+    const evidence: TurnReadEvidence[] = []
+    const seenReadIds = new Set<string>()
     for (const request of requests) {
       const exact = await this.dependencies.retrieval.searchExact(
         { projectId, pendingScopeId: scopeId }, request.query.exactKeys, request.query.maxCandidates,
@@ -393,6 +404,8 @@ export class TurnOrchestrator {
       const projections = [...exact, ...semantic.flat()].slice(0, request.query.maxCandidates)
       for (const projection of projections) {
         if (projection.visibility === "retired") continue
+        if (seenReadIds.has(projection.projectionId)) continue
+        seenReadIds.add(projection.projectionId)
         returned.push({
           readId: projection.projectionId,
           reason: request.reason,
@@ -406,6 +419,16 @@ export class TurnOrchestrator {
             sequence: context.segments.length + returned.length,
           },
         })
+        evidence.push({
+          readId: projection.projectionId,
+          visibility: projection.visibility,
+          ownerKind: projection.ownerKind,
+          ownerId: projection.ownerId,
+          exactKeys: projection.exactKeys,
+          semanticText: projection.semanticText,
+          sourceRefs: projection.sourceRefs,
+          digest: projection.digest,
+        })
       }
     }
     return {
@@ -414,6 +437,7 @@ export class TurnOrchestrator {
         returned,
         rejectedReadIds: [],
       }),
+      evidence,
     }
   }
 
@@ -650,6 +674,7 @@ type ExecutePhaseInput = Readonly<{
   phaseRunIds: string[]
   context: TurnContext
   artifacts: Partial<Record<AIPhase, unknown>>
+  readEvidence: readonly TurnReadEvidence[]
   budget: ModelCallBudget
   usage: { modelCalls: number; inputTokens: number; outputTokens: number; cacheHits: number; cacheMisses: number }
 }>
@@ -657,6 +682,7 @@ type ExecutePhaseInput = Readonly<{
 type ExecutePhaseResult = Readonly<{
   phaseRunId: string
   context: TurnContext
+  readEvidence: readonly TurnReadEvidence[]
   artifact: unknown
   usage: { modelCalls: number; inputTokens: number; outputTokens: number; cacheHits: number; cacheMisses: number }
 }>
@@ -675,7 +701,7 @@ function emptyPhaseUsage(): PhaseUsage {
 
 function phaseUsageFromExecution(phase: AIPhase, execution: PhaseModelExecution): PhaseUsage {
   return {
-    modelCalls: phase === "source_retrieval" ? 0 : 1,
+    modelCalls: phase === "source_retrieval" ? 0 : execution.usage.modelCalls ?? 1,
     inputTokens: execution.usage.inputTokens,
     outputTokens: execution.usage.outputTokens,
     cacheHits: execution.usage.cacheHitInputTokens ?? 0,

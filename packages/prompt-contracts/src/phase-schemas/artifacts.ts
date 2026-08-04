@@ -215,6 +215,10 @@ export const phaseArtifactSchemas: Record<AIPhase, z.ZodType> = {
   commit_review: commitReviewArtifactSchema,
 }
 
+export function phaseArtifactJsonSchema(phase: AIPhase): unknown {
+  return z.toJSONSchema(phaseArtifactSchemas[phase])
+}
+
 export type InterpretArtifact = z.infer<typeof interpretArtifactSchema>
 export type RuleAssemblyArtifact = z.infer<typeof ruleAssemblyArtifactSchema>
 export type RetrievalArtifact = z.infer<typeof retrievalArtifactSchema>

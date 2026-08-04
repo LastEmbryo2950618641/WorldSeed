@@ -5,11 +5,14 @@ import type {
 } from "@worldseed/contracts"
 
 export type PhaseModelUsage = Readonly<{
+  modelCalls?: number
   inputTokens: number
   outputTokens: number
   latencyMs: number
   cacheHitInputTokens?: number
   cacheMissInputTokens?: number
+  provider?: string
+  model?: string
 }>
 
 export type PhaseModelExecution = Readonly<{
@@ -39,5 +42,17 @@ export type TurnPhaseInput = Readonly<{
   sourceId?: string
   sourceUnitIds: readonly string[]
   phaseRunIds: readonly string[]
+  readEvidence: readonly TurnReadEvidence[]
   artifacts: Partial<Record<AIPhase, unknown>>
+}>
+
+export type TurnReadEvidence = Readonly<{
+  readId: string
+  visibility: "committed" | "pending"
+  ownerKind: string
+  ownerId: string
+  exactKeys: readonly string[]
+  semanticText: string
+  sourceRefs: readonly unknown[]
+  digest: string
 }>
