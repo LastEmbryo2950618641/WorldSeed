@@ -212,7 +212,8 @@ type EmergenceReviewArtifact = {
 ```ts
 type InternalDraftArtifact = {
   draftId: string
-  contentRef: string
+  contentMarkdown: string
+  contentRef?: string
   adoptedEmergenceDecisionIds: string[]
   citedReadIds: string[]
   currentTimeAnchorIds: string[]
@@ -221,7 +222,7 @@ type InternalDraftArtifact = {
 }
 ```
 
-`draft` 是应用内部产物，不进入用户文件树，不直接成为世界事实，也不要求用户审批。
+`draft` 通过 JSON Mode 返回 `contentMarkdown`；应用层先把它写入内部不可变对象存储，再补充 `contentRef`。模型不能自行伪造文件引用。该产物不进入用户文件树，不直接成为世界事实，也不要求用户审批。
 
 ### 5.7 chapter_naming
 
@@ -276,15 +277,45 @@ type GraphGovernanceArtifact = {
   proposalId: string
   sourceUnitIds: string[]
   mutations: GraphMutation[]
-  retrievalProjectionIds: string[]
-  settlementRecordIds: string[]
-  continuityProofIds: string[]
+  retrievalProjections: Array<{
+    projectionId: string
+    ownerKind: string
+    ownerId: string
+    ownerMutationIndex?: number
+    ownerRevisionId?: string
+    exactKeys: string[]
+    semanticText: string
+    sourceRefs: SourceRef[]
+  }>
+  settlementRecords: Array<{
+    settlementRecordId: string
+    sourceUnitId: string
+    graphRefs: Array<{
+      targetKind: "node" | "link"
+      targetId: string
+      mutationIndex?: number
+    }>
+    reason: string
+    status: string
+  }>
+  continuityProofs: Array<{
+    continuityProofId: string
+    payload: unknown
+  }>
   archiveOutletIds: string[]
-  decisionRecordIds: string[]
+  decisionRecords: Array<{
+    decisionRecordId: string
+    decisionKind: string
+    mutationIndexes: number[]
+    reason: string
+    evidenceIds: string[]
+    payload: unknown
+    selfReview: string
+  }>
 }
 ```
 
-归档通过普通 committed 节点与连接实现，不使用 `retired` 代替世界历史。
+`ownerMutationIndex` 和 `mutationIndex` 引用同一提案中的 mutation；应用层在执行批准 mutation 并生成不可变修订 ID 后解析为真实引用。已有修订可以直接使用 `ownerRevisionId`。归档通过普通 committed 节点与连接实现，不使用 `retired` 代替世界历史。
 
 ### 5.11 semantic_review
 

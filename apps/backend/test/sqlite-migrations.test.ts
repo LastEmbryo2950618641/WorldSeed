@@ -43,7 +43,7 @@ describe("SQLite migrations", () => {
     await reopened.destroy()
   })
 
-  it("applies project migrations 001 through 007 with required SQLite pragmas", async () => {
+  it("applies project migrations 001 through 009 with required SQLite pragmas", async () => {
     const path = temporaryDatabasePath("project.sqlite")
     const database = await openProjectDatabase(path)
     const migrations = await database.selectFrom("schema_migrations").selectAll().orderBy("version").execute()
@@ -55,7 +55,7 @@ describe("SQLite migrations", () => {
     const foreignKeys = await sql<{ foreign_keys: number }>`PRAGMA foreign_keys`.execute(database)
     const busyTimeout = await sql<{ timeout: number }>`PRAGMA busy_timeout`.execute(database)
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7])
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
     expect(tableNames).toEqual(expect.objectContaining(new Set([
       "projects",
       "project_manifests",

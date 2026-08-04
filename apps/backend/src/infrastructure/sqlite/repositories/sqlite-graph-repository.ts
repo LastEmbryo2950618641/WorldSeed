@@ -181,6 +181,9 @@ async function stageRevision(
     before_json: revision.before === null ? null : encodeJson(revision.before),
     after_json: revision.after === null ? null : encodeJson(revision.after),
     reason: revision.reason,
+    self_review: revision.selfReview,
+    predecessor_revision_id: revision.predecessorRevisionId ?? null,
+    archive_outlet_ids_json: encodeJson(revision.archiveOutletIds),
     evidence_ids_json: encodeJson(revision.evidenceIds),
     created_at: revision.createdAtMs,
   }).executeTakeFirstOrThrow()
@@ -370,8 +373,10 @@ function mapRevision(row: GraphRevisionRow): PersistedGraphRevision {
     operation: row.operation,
     before: row.before_json === null ? null : decodeJson(row.before_json) as GraphNode | GraphLink,
     after: row.after_json === null ? null : decodeJson(row.after_json) as GraphNode | GraphLink,
-    archiveOutletIds: [],
+    ...(row.predecessor_revision_id === null ? {} : { predecessorRevisionId: row.predecessor_revision_id }),
+    archiveOutletIds: decodeJson(row.archive_outlet_ids_json) as string[],
     reason: row.reason,
+    selfReview: row.self_review,
     evidenceIds: decodeJson(row.evidence_ids_json) as string[],
     createdAtMs: row.created_at,
   }

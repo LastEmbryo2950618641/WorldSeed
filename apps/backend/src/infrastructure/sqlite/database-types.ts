@@ -98,6 +98,7 @@ export type TurnContextRow = {
   ledger_digest: string
   token_usage_json: JsonText
   kv_usage_json: JsonText
+  context_json: JsonText
   created_at: Timestamp
   updated_at: Timestamp
 }
@@ -189,6 +190,9 @@ export type GraphRevisionRow = {
   before_json: JsonText | null
   after_json: JsonText | null
   reason: string
+  self_review: string
+  predecessor_revision_id: string | null
+  archive_outlet_ids_json: JsonText
   evidence_ids_json: JsonText
   created_at: Timestamp
 }

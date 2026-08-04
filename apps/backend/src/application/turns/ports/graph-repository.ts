@@ -23,7 +23,7 @@ export type GraphSlice = Readonly<{
   truncated: boolean
 }>
 
-export type PersistedGraphRevision = Readonly<Omit<GraphRevision, "selfReview">>
+export type PersistedGraphRevision = Readonly<GraphRevision>
 
 export interface GraphRepository {
   stageRevisions(projectId: ProjectId, scopeId: ScopeId, revisions: readonly GraphRevision[]): Promise<void>

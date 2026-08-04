@@ -316,4 +316,12 @@ export const projectMigrations = Object.freeze([
     "CREATE INDEX ai_decision_records_scope_kind ON ai_decision_records(scope_id, decision_kind)",
     "CREATE INDEX frontier_refs_schedule ON frontier_refs(project_id, status, next_attempt_at)",
   ]),
+  defineSqlMigration<ProjectDatabase>(8, "008_turn_context_snapshot", [
+    "ALTER TABLE turn_contexts ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'",
+  ]),
+  defineSqlMigration<ProjectDatabase>(9, "009_graph_revision_audit_fields", [
+    "ALTER TABLE graph_revisions ADD COLUMN self_review TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE graph_revisions ADD COLUMN predecessor_revision_id TEXT",
+    "ALTER TABLE graph_revisions ADD COLUMN archive_outlet_ids_json TEXT NOT NULL DEFAULT '[]'",
+  ]),
 ])

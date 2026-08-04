@@ -4,6 +4,7 @@ import {
   aiPhaseSchema,
   graphMutationSchema,
   idSchema,
+  sourceRefSchema,
   unresolvedDependencySchema,
   type AIPhase,
 } from "@worldseed/contracts"
@@ -75,7 +76,8 @@ export const emergenceReviewArtifactSchema = z.object({
 
 export const internalDraftArtifactSchema = z.object({
   draftId: idSchema,
-  contentRef: z.string().min(1),
+  contentMarkdown: z.string().min(1),
+  contentRef: z.string().min(1).optional(),
   adoptedEmergenceDecisionIds: z.array(idSchema),
   citedReadIds: z.array(idSchema),
   currentTimeAnchorIds: z.array(idSchema),
@@ -117,11 +119,44 @@ export const graphGovernanceArtifactSchema = z.object({
   proposalId: idSchema,
   sourceUnitIds: z.array(idSchema),
   mutations: z.array(graphMutationSchema),
-  retrievalProjectionIds: z.array(idSchema),
-  settlementRecordIds: z.array(idSchema),
-  continuityProofIds: z.array(idSchema),
+  retrievalProjections: z.array(z.object({
+    projectionId: idSchema,
+    ownerKind: z.string().min(1),
+    ownerId: idSchema,
+    ownerMutationIndex: z.number().int().nonnegative().optional(),
+    ownerRevisionId: idSchema.optional(),
+    exactKeys: z.array(z.string().min(1)),
+    semanticText: z.string().min(1),
+    sourceRefs: z.array(sourceRefSchema),
+  }).refine(
+    (projection) => projection.ownerMutationIndex !== undefined || projection.ownerRevisionId !== undefined,
+    { message: "projection must reference a proposed mutation or an existing revision" },
+  )),
+  settlementRecords: z.array(z.object({
+    settlementRecordId: idSchema,
+    sourceUnitId: idSchema,
+    graphRefs: z.array(z.object({
+      targetKind: z.enum(["node", "link"]),
+      targetId: idSchema,
+      mutationIndex: z.number().int().nonnegative().optional(),
+    })),
+    reason: z.string().min(1),
+    status: z.string().min(1),
+  })),
+  continuityProofs: z.array(z.object({
+    continuityProofId: idSchema,
+    payload: z.unknown(),
+  })),
   archiveOutletIds: z.array(idSchema),
-  decisionRecordIds: z.array(idSchema),
+  decisionRecords: z.array(z.object({
+    decisionRecordId: idSchema,
+    decisionKind: z.string().min(1),
+    mutationIndexes: z.array(z.number().int().nonnegative()),
+    reason: z.string().min(1),
+    evidenceIds: z.array(idSchema),
+    payload: z.unknown(),
+    selfReview: z.string().min(1),
+  })),
 })
 
 export const semanticReviewArtifactSchema = z.object({
@@ -179,3 +214,18 @@ export const phaseArtifactSchemas: Record<AIPhase, z.ZodType> = {
   frontier_settlement: frontierSettlementArtifactSchema,
   commit_review: commitReviewArtifactSchema,
 }
+
+export type InterpretArtifact = z.infer<typeof interpretArtifactSchema>
+export type RuleAssemblyArtifact = z.infer<typeof ruleAssemblyArtifactSchema>
+export type RetrievalArtifact = z.infer<typeof retrievalArtifactSchema>
+export type EmergencePlanningArtifact = z.infer<typeof emergencePlanningArtifactSchema>
+export type EmergenceReviewArtifact = z.infer<typeof emergenceReviewArtifactSchema>
+export type InternalDraftArtifact = z.infer<typeof internalDraftArtifactSchema>
+export type ChapterNamingArtifact = z.infer<typeof chapterNamingArtifactSchema>
+export type DependencyAuditArtifact = z.infer<typeof dependencyAuditArtifactSchema>
+export type ResponseReviewArtifact = z.infer<typeof responseReviewArtifactSchema>
+export type GraphGovernanceArtifact = z.infer<typeof graphGovernanceArtifactSchema>
+export type SemanticReviewArtifact = z.infer<typeof semanticReviewArtifactSchema>
+export type SettlementReviewArtifact = z.infer<typeof settlementReviewArtifactSchema>
+export type FrontierSettlementArtifact = z.infer<typeof frontierSettlementArtifactSchema>
+export type CommitReviewArtifact = z.infer<typeof commitReviewArtifactSchema>
