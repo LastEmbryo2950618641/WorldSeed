@@ -94,6 +94,7 @@ export type TurnExecutionResult = Readonly<{
   modelCalls: number
   inputTokens: number
   outputTokens: number
+  graphAnchorIds: readonly string[]
   kvCacheHitRate?: number
 }>
 
@@ -247,6 +248,7 @@ export class TurnOrchestrator {
       await this.dependencies.workspace.publishChapter(input.workspaceRootRef, chapterPath, chapterContent)
       await this.dependencies.persistence.updateTask(taskId, "completed", "commit_review", this.dependencies.now())
       const totalCacheTokens = usage.cacheHits + usage.cacheMisses
+      const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
       return {
         taskId,
         turnId,
@@ -257,6 +259,7 @@ export class TurnOrchestrator {
         modelCalls: usage.modelCalls,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
+        graphAnchorIds: governance.mutations.flatMap((mutation) => mutation.operation === "create_node" ? [mutation.node.id] : []),
         ...(totalCacheTokens === 0 ? {} : { kvCacheHitRate: usage.cacheHits / totalCacheTokens }),
       }
     } catch (error) {

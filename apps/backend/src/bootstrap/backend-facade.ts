@@ -14,9 +14,12 @@ import type {
 } from "@worldseed/contracts"
 import {
   projectCreatePayloadSchema,
+  graphNeighborhoodPayloadSchema,
   projectWorkspacePayloadSchema,
   taskPayloadSchema,
   turnStartPayloadSchema,
+  workspaceReadPayloadSchema,
+  workspaceSavePayloadSchema,
 } from "@worldseed/contracts"
 import { digest } from "../core/index.js"
 import type { TurnExecutionResult } from "../application/index.js"
@@ -86,6 +89,32 @@ export class BackendFacade {
         const payload = projectWorkspacePayloadSchema.parse(request.payload)
         return this.container.validateProject(payload.workspaceRootRef)
       }
+      case "workspace.list": {
+        const payload = projectWorkspacePayloadSchema.parse(request.payload)
+        return this.container.validateProject(payload.workspaceRootRef)
+      }
+      case "workspace.read": {
+        const payload = workspaceReadPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return { relativePath: payload.relativePath, content: await runtime.readMarkdown(payload.relativePath) }
+      }
+      case "workspace.save": {
+        const payload = workspaceSavePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.saveMarkdown(payload.relativePath, payload.content)
+        return { relativePath: payload.relativePath, saved: true }
+      }
+      case "graph.neighborhood": {
+        const payload = graphNeighborhoodPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.readGraphNeighborhood({
+          anchorIds: payload.anchorIds,
+          direction: payload.direction,
+          maxDepth: payload.maxDepth,
+          maxNodes: payload.maxNodes,
+          maxLinks: payload.maxLinks,
+        })
+      }
       case "turn.start": {
         const payload = turnStartPayloadSchema.parse(request.payload)
         return this.startTurn(payload)
@@ -139,7 +168,7 @@ export class BackendFacade {
 
   private async readTask(taskId: string): Promise<unknown> {
     const inMemory = this.tasks.get(taskId)
-    if (inMemory !== undefined) {
+    if (inMemory?.status === "completed" || inMemory?.status === "failed") {
       return inMemory
     }
     const stored = await this.container.getCurrentRuntime()?.taskScopes.findTask(taskId)
@@ -152,8 +181,10 @@ export class BackendFacade {
           status: stored.status,
         },
         status: stored.status,
+        lastPhase: stored.lastPhase,
       }
     }
+    if (inMemory !== undefined) return inMemory
     throw new Error(`Task is not loaded in the current backend runtime: ${taskId}`)
   }
 

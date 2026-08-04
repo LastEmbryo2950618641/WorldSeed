@@ -76,6 +76,27 @@ export class ProjectRuntime {
     return this.workspace.validate(this.workspaceRootRef)
   }
 
+  public async readMarkdown(relativePath: string): Promise<string> {
+    return this.workspace.readMarkdown(this.workspaceRootRef, relativePath)
+  }
+
+  public async saveMarkdown(relativePath: string, content: string): Promise<void> {
+    await this.workspace.saveUserMarkdown(this.workspaceRootRef, relativePath, content)
+  }
+
+  public async readGraphNeighborhood(input: {
+    anchorIds: readonly string[]
+    direction: "out" | "in" | "both"
+    maxDepth: number
+    maxNodes: number
+    maxLinks: number
+  }): Promise<Awaited<ReturnType<SqliteGraphRepository["getNeighborhood"]>>> {
+    return new SqliteGraphRepository(this.database).getNeighborhood({
+      scope: { projectId: this.projectId },
+      ...input,
+    })
+  }
+
   public async close(): Promise<void> {
     await this.database.destroy()
   }

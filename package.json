@@ -6,6 +6,7 @@
   "packageManager": "pnpm@11.9.0",
   "scripts": {
     "backend:stdio": "pnpm --filter @worldseed/backend start:stdio",
+    "dev": "pnpm --filter @worldseed/backend build && pnpm --filter @worldseed/desktop dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint .",

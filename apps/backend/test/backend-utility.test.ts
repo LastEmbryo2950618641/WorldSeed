@@ -49,6 +49,34 @@ describe("backend utility runtime", () => {
     })
     expect(created.ok).toBe(true)
 
+    const listed = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "workspace.list",
+      payload: { workspaceRootRef },
+    })
+    expect(listed.ok).toBe(true)
+
+    const saved = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "workspace.save",
+      payload: {
+        projectId,
+        workspaceRootRef,
+        relativePath: "设定集/测试设定.md",
+        content: "# 测试设定\n",
+      },
+    })
+    expect(saved.ok).toBe(true)
+    const read = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "workspace.read",
+      payload: { projectId, workspaceRootRef, relativePath: "设定集/测试设定.md" },
+    })
+    expect(read.ok && read.data).toMatchObject({ content: "# 测试设定\n" })
+
     const started = await facade.handle({
       protocolVersion: PROTOCOL_VERSION,
       requestId: randomUUID(),
@@ -60,6 +88,22 @@ describe("backend utility runtime", () => {
     const completed = await waitForCompletedTask(facade, taskId)
     expect(completed.ok).toBe(true)
     expect(existsSync(join(workspaceRootRef, "章节正文", "第一章 世界种子.md"))).toBe(true)
+    const graphAnchorIds = readGraphAnchorIds(completed)
+    const neighborhood = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "graph.neighborhood",
+      payload: {
+        projectId,
+        workspaceRootRef,
+        anchorIds: graphAnchorIds,
+        direction: "both",
+        maxDepth: 2,
+        maxNodes: 48,
+        maxLinks: 96,
+      },
+    })
+    expect(neighborhood.ok && neighborhood.data).toMatchObject({ truncated: false })
 
     const responses: ClientResponse[] = []
     const port: BackendMessagePort = {
@@ -94,6 +138,17 @@ function readTaskId(response: ClientResponse): string {
   const taskId = response.data.taskId
   if (typeof taskId !== "string") throw new Error("task handle has no taskId")
   return taskId
+}
+
+function readGraphAnchorIds(response: ClientResponse): string[] {
+  if (!response.ok || typeof response.data !== "object" || response.data === null || !("result" in response.data)) {
+    throw new Error("turn.status did not return a completed result")
+  }
+  const result = response.data.result
+  if (typeof result !== "object" || result === null || !("graphAnchorIds" in result) || !Array.isArray(result.graphAnchorIds)) {
+    throw new Error("completed turn has no graph anchors")
+  }
+  return result.graphAnchorIds.filter((value): value is string => typeof value === "string")
 }
 
 async function waitForCompletedTask(facade: BackendFacade, taskId: string): Promise<ClientResponse> {
