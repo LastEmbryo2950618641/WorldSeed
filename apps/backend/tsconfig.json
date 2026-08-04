@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "types": ["node"],
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/backend.tsbuildinfo"
+  },
+  "references": [
+    { "path": "../../packages/contracts" },
+    { "path": "../../packages/config" },
+    { "path": "../../packages/prompt-contracts" }
+  ],
+  "include": ["src/**/*.ts"]
+}

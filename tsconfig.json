@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/contracts" },
+    { "path": "./packages/config" },
+    { "path": "./packages/prompt-contracts" },
+    { "path": "./apps/backend" }
+  ]
+}

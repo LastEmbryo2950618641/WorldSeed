@@ -1,0 +1,35 @@
+import { z } from "zod"
+
+export const backendMethodValues = [
+  "project.create",
+  "project.open",
+  "project.validate",
+  "workspace.list",
+  "workspace.read",
+  "workspace.save",
+  "workspace.importFiles",
+  "workspace.importFolder",
+  "workspace.archive",
+  "workspace.restore",
+  "turn.start",
+  "turn.resume",
+  "turn.pause",
+  "turn.cancel",
+  "turn.status",
+  "world.query",
+  "world.evolve",
+  "chapter.list",
+  "chapter.read",
+  "chapter.startRevision",
+  "chapter.submitRevision",
+  "chapter.retireRevision",
+  "graph.search",
+  "graph.neighborhood",
+  "graph.revisions",
+  "operation.get",
+  "operation.listActive",
+  "events.subscribe",
+] as const
+
+export const backendMethodSchema = z.enum(backendMethodValues)
+export type BackendMethod = z.infer<typeof backendMethodSchema>
