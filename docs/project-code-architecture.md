@@ -422,9 +422,15 @@ prompt-contracts -> no app dependency
 ```text
 pnpm dev
   -> electron-vite 启动 Main / Preload / Renderer
+  -> Renderer 使用 Vite 开发地址，启用 React Fast Refresh / HMR
   -> 构建并启动 Backend Utility Process
   -> Renderer HMR
 ```
+
+开发模式必须通过 `pnpm dev` 或 `pnpm --filter @worldseed/desktop dev` 启动。不要使用
+`electron .`、`electron apps/desktop` 或直接打开 `apps/desktop/out/renderer/index.html`，
+这些方式会加载构建产物，不会建立 Renderer HMR 连接。开发 CSP 同时放行 localhost 和
+127.0.0.1 的 Vite HTTP / WebSocket 地址，避免回环地址变化导致 HMR 被浏览器拦截。
 
 生产构建：
 
