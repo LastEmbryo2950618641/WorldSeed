@@ -10,6 +10,9 @@ type Props = Readonly<{
   prompt: string
   descriptionRule: string
   proseRule: string
+  minimumWordCount: string
+  maximumWordCount: string
+  wordCountValid: boolean
   descriptionRules: readonly string[]
   proseRules: readonly string[]
   onContentChange(value: string): void
@@ -17,6 +20,8 @@ type Props = Readonly<{
   onPromptChange(value: string): void
   onDescriptionRuleChange(value: string): void
   onProseRuleChange(value: string): void
+  onMinimumWordCountChange(value: string): void
+  onMaximumWordCountChange(value: string): void
   onSave(): void
   onRun(): void
 }>
@@ -58,7 +63,14 @@ export function EditorArea(props: Props): React.JSX.Element {
       <div className="composer-controls">
         <label>描写规则<select value={props.descriptionRule} onChange={(event) => { props.onDescriptionRuleChange(event.target.value); }}><option value="">自动</option>{props.descriptionRules.map((rule) => <option key={rule} value={rule}>{rule.split("/").at(-1)}</option>)}</select></label>
         <label>笔风规则<select value={props.proseRule} onChange={(event) => { props.onProseRuleChange(event.target.value); }}><option value="">保持当前笔风</option>{props.proseRules.map((rule) => <option key={rule} value={rule}>{rule.split("/").at(-1)}</option>)}</select></label>
-        <button className="run-command" disabled={props.running || props.prompt.trim().length === 0} onClick={props.onRun}><Play size={16} fill="currentColor" />{props.running ? "推演中" : "开始推演"}</button>
+        <label className={`word-count-control${props.wordCountValid ? "" : " invalid"}`} title="正文主体字数范围，标题不计入">
+          <span>字数</span>
+          <input aria-label="正文最少字数" type="number" min="1" step="100" value={props.minimumWordCount} onChange={(event) => { props.onMinimumWordCountChange(event.target.value); }} />
+          <span>—</span>
+          <input aria-label="正文最多字数" type="number" min="1" step="100" value={props.maximumWordCount} onChange={(event) => { props.onMaximumWordCountChange(event.target.value); }} />
+          <span>字</span>
+        </label>
+        <button className="run-command" disabled={props.running || props.prompt.trim().length === 0 || !props.wordCountValid} onClick={props.onRun}><Play size={16} fill="currentColor" />{props.running ? "推演中" : "开始推演"}</button>
       </div>
     </div>
   </section>

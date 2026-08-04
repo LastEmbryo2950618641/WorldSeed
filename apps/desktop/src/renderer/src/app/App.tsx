@@ -24,9 +24,16 @@ export function App(): React.JSX.Element {
   const [prompt, setPrompt] = useState("")
   const [descriptionRule, setDescriptionRule] = useState("")
   const [proseRule, setProseRule] = useState("")
+  const [minimumWordCount, setMinimumWordCount] = useState("2000")
+  const [maximumWordCount, setMaximumWordCount] = useState("3000")
   const [task, setTask] = useState<TaskSnapshot>()
   const [graphSlice, setGraphSlice] = useState<GraphSlice>()
   const [error, setError] = useState<string>()
+  const parsedMinimumWordCount = parseWordCount(minimumWordCount)
+  const parsedMaximumWordCount = parseWordCount(maximumWordCount)
+  const wordCountValid = parsedMinimumWordCount !== undefined
+    && parsedMaximumWordCount !== undefined
+    && parsedMinimumWordCount <= parsedMaximumWordCount
 
   const refreshWorkspace = useCallback(async (): Promise<void> => {
     if (project === undefined) return
@@ -72,11 +79,15 @@ export function App(): React.JSX.Element {
   }
 
   const startTurn = async (): Promise<void> => {
-    if (project === undefined || prompt.trim().length === 0 || task?.status === "running") return
+    if (project === undefined || prompt.trim().length === 0 || task?.status === "running" || !wordCountValid) return
     setError(undefined)
     try {
       const presentation = [descriptionRule, proseRule].filter(Boolean)
-      const userInput = presentation.length === 0 ? prompt : `${prompt}\n\n本轮表现规则引用：\n${presentation.map((path) => `- ${path}`).join("\n")}`
+      const userInput = [
+        prompt,
+        `本轮正文长度约束：正文主体控制在 ${String(parsedMinimumWordCount)}-${String(parsedMaximumWordCount)} 字之间，标题不计入字数。`,
+        ...(presentation.length === 0 ? [] : [`本轮表现规则引用：\n${presentation.map((path) => `- ${path}`).join("\n")}`]),
+      ].join("\n\n")
       const started = await invokeBackend<{ taskId: string }>("turn.start", {
         projectId: project.projectId,
         workspaceRootRef: project.workspaceRootRef,
@@ -148,6 +159,9 @@ export function App(): React.JSX.Element {
           prompt={prompt}
           descriptionRule={descriptionRule}
           proseRule={proseRule}
+          minimumWordCount={minimumWordCount}
+          maximumWordCount={maximumWordCount}
+          wordCountValid={wordCountValid}
           descriptionRules={descriptionRules}
           proseRules={proseRules}
           onContentChange={setContent}
@@ -155,6 +169,8 @@ export function App(): React.JSX.Element {
           onPromptChange={setPrompt}
           onDescriptionRuleChange={setDescriptionRule}
           onProseRuleChange={setProseRule}
+          onMinimumWordCountChange={setMinimumWordCount}
+          onMaximumWordCountChange={setMaximumWordCount}
           onSave={() => void saveFile()}
           onRun={() => void startTurn()}
         />
@@ -174,4 +190,11 @@ export function App(): React.JSX.Element {
 
 function chapterCount(report: WorkspaceReport): number {
   return report.inventory.filter((entry) => entry.kind === "file" && entry.path.startsWith("章节正文/")).length
+}
+
+function parseWordCount(value: string): number | undefined {
+  const normalized = value.trim()
+  if (!/^\d+$/.test(normalized)) return undefined
+  const parsed = Number(normalized)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
 }

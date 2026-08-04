@@ -67,6 +67,9 @@ button { color: inherit; }
 .composer-controls { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .composer-controls label { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #5c6570; min-width: 0; }
 .composer-controls select { max-width: 155px; height: 29px; border: 1px solid #cdd1d6; border-radius: 3px; background: #fff; font-size: 11px; }
+.word-count-control { flex: 0 0 auto; }
+.word-count-control input { width: 64px; height: 29px; border: 1px solid #cdd1d6; border-radius: 3px; padding: 0 5px; background: #fff; font-size: 11px; }
+.word-count-control.invalid input { border-color: #c27b70; background: #fff7f6; }
 .run-command { margin-left: auto; height: 31px; border: 0; border-radius: 4px; background: var(--accent); color: #fff; padding: 0 15px; display: flex; align-items: center; gap: 7px; font-weight: 650; font-size: 12px; }
 .run-command:hover { background: var(--accent-hover); }
 .run-command:disabled { opacity: .5; }
