@@ -13,6 +13,7 @@ type Props = Readonly<{
   descriptionRules: readonly string[]
   proseRules: readonly string[]
   onContentChange(value: string): void
+  onHome(): void
   onPromptChange(value: string): void
   onDescriptionRuleChange(value: string): void
   onProseRuleChange(value: string): void
@@ -23,7 +24,7 @@ type Props = Readonly<{
 export function EditorArea(props: Props): React.JSX.Element {
   return <section className="editor-area">
     <div className="editor-tabs">
-      <button className={props.selectedPath === undefined ? "active" : ""}><BookOpenText size={15} /> 创作台</button>
+      <button className={props.selectedPath === undefined ? "active" : ""} onClick={props.onHome}><BookOpenText size={15} /> 创作台</button>
       {props.selectedPath === undefined ? null : <button className="active"><span>{props.selectedPath.split("/").at(-1)}</span>{props.dirty ? <i /> : null}</button>}
       <div className="editor-tab-actions"><button title="保存" disabled={!props.dirty || props.readOnly} onClick={props.onSave}><Save size={15} /></button></div>
     </div>

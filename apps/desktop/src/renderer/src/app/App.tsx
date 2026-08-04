@@ -120,6 +120,12 @@ export function App(): React.JSX.Element {
 
   const readOnly = selectedPath?.startsWith("世界推演规则/基础规则/") === true || selectedPath?.startsWith("章节正文/") === true
   const dirty = content !== savedContent
+  const openWorkspaceHome = (): void => {
+    if (dirty && !window.confirm("当前 Markdown 尚未保存，确定返回创作台吗？")) return
+    setSelectedPath(undefined)
+    setContent("")
+    setSavedContent("")
+  }
   return <main className="app-shell">
     <header className="topbar">
       <div className="topbar-brand"><Sprout size={18} /><strong>Worldseed</strong></div>
@@ -145,6 +151,7 @@ export function App(): React.JSX.Element {
           descriptionRules={descriptionRules}
           proseRules={proseRules}
           onContentChange={setContent}
+          onHome={openWorkspaceHome}
           onPromptChange={setPrompt}
           onDescriptionRuleChange={setDescriptionRule}
           onProseRuleChange={setProseRule}
