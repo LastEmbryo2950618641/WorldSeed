@@ -33,3 +33,14 @@ Worldseed 是一个由 AI 完全自治治理的动态世界图实验项目。
 完整底层设计见 [docs/system-design.md](docs/system-design.md)，项目技术栈、Monorepo 和 Electron 进程边界见 [docs/project-code-architecture.md](docs/project-code-architecture.md)，后端模块、端口、存储和执行管线见 [docs/backend-architecture.md](docs/backend-architecture.md)，后端复用、隔离和依赖约束见 [docs/backend-coding-principles.md](docs/backend-coding-principles.md)，单轮上下文、选择性读取和 KV 缓存复用见 [docs/context-and-kv-cache.md](docs/context-and-kv-cache.md)，AI 阶段输入输出与回流契约见 [docs/ai-phase-contracts.md](docs/ai-phase-contracts.md)，世界内容何时复用、扩展、揭示、创建、延后或拒绝见 [docs/world-emergence-rules.md](docs/world-emergence-rules.md)，规则与资料层级见 [docs/rule-and-source-layers.md](docs/rule-and-source-layers.md)，IDE 工作台见 [docs/ui-design.md](docs/ui-design.md)。
 
 编码前冻结基线见 [docs/v1-freeze.md](docs/v1-freeze.md)，其中集中定义 V1 最小闭环、接口契约、SQLite 迁移、DeepSeek 代理与缓存配置、默认参数以及基础 Prompt 资源。
+
+## Backend 冒烟运行
+
+当前 Backend Utility Process 已支持 Fake AI、项目创建、异步回合推演、任务状态查询和 MessagePort/stdio 两种协议入口。
+
+```bash
+pnpm build
+pnpm backend:stdio
+```
+
+stdio 每行接收一个 `ClientRequest` JSON，并输出一个 `ClientResponse` JSON。默认内部数据位于仓库根目录的 `.worldseed-data`；可通过 `WORLDSEED_APP_DATA_ROOT` 修改。该入口用于后端集成和桌面容器接入，真实 DeepSeek 适配器将在下一阶段替换 Fake AI 端口。

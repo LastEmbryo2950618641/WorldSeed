@@ -70,6 +70,11 @@ export type TurnOrchestratorInput = Readonly<{
   internalStore: InternalProjectStore
   userInput: string
   chapterSequence: number
+  taskId?: string
+  turnId?: string
+  scopeId?: string
+  contextId?: string
+  sourceId?: string
   maxModelCalls?: number
   maxContextTokens?: number
   maxInputTokens?: number
@@ -110,11 +115,11 @@ export class TurnOrchestrator {
   public constructor(private readonly dependencies: TurnOrchestratorDependencies) {}
 
   public async execute(input: TurnOrchestratorInput): Promise<TurnExecutionResult> {
-    const taskId = this.dependencies.createId()
-    const turnId = this.dependencies.createId()
-    const scopeId = this.dependencies.createId()
-    const contextId = this.dependencies.createId()
-    const sourceId = this.dependencies.createId()
+    const taskId = input.taskId ?? this.dependencies.createId()
+    const turnId = input.turnId ?? this.dependencies.createId()
+    const scopeId = input.scopeId ?? this.dependencies.createId()
+    const contextId = input.contextId ?? this.dependencies.createId()
+    const sourceId = input.sourceId ?? this.dependencies.createId()
     const createdAtMs = input.nowMs ?? this.dependencies.now()
     const baseRules = await this.dependencies.prompts.loadBaseRules()
     const budget = createBudget(input, createdAtMs)
