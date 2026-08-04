@@ -17,6 +17,8 @@
   "dependencies": {
     "@worldseed/config": "workspace:*",
     "@worldseed/contracts": "workspace:*",
-    "@worldseed/prompt-contracts": "workspace:*"
+    "@worldseed/prompt-contracts": "workspace:*",
+    "better-sqlite3": "^13.0.2",
+    "kysely": "^0.29.4"
   }
 }
