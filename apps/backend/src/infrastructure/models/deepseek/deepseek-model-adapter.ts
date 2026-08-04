@@ -52,6 +52,7 @@ export class DeepSeekModelError extends Error {
 
 export class DeepSeekAiModelAdapter implements AIModelPort {
   private readonly clientPromise: Promise<DeepSeekCompletionClient>
+  public readonly info
 
   public constructor(
     private readonly config: DeepSeekRuntimeConfig,
@@ -59,6 +60,11 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
     private readonly prompts: PromptResourcePort,
     client?: DeepSeekCompletionClient,
   ) {
+    this.info = {
+      provider: config.provider,
+      model: config.model,
+      available: true,
+    } as const
     this.clientPromise = client === undefined ? this.createClient() : Promise.resolve(client)
   }
 

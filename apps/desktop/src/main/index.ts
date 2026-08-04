@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs"
+import { loadEnvFile } from "node:process"
 import { join, resolve } from "node:path"
 
 import { app, BrowserWindow, screen, session } from "electron"
@@ -44,6 +46,7 @@ async function createWindow(): Promise<BrowserWindow> {
 }
 
 void app.whenReady().then(async () => {
+  loadDevelopmentEnvironment()
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => { callback(false); })
   const applicationDataRoot = resolve(process.env.WORLDSEED_APP_DATA_ROOT ?? join(app.getPath("userData"), "runtime"))
   const promptPackageRoot = resolve(
@@ -64,3 +67,9 @@ app.on("before-quit", () => {
   unregisterIpcRouter()
   backend.close()
 })
+
+function loadDevelopmentEnvironment(): void {
+  if (app.isPackaged) return
+  const envPath = resolve(app.getAppPath(), "..", "..", ".env")
+  if (existsSync(envPath)) loadEnvFile(envPath)
+}

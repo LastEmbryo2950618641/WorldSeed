@@ -33,6 +33,8 @@
 
 DeepSeek 适配器使用 `DEEPSEEK_API_KEY`，密钥只从运行环境或操作系统安全存储读取，不能写入项目 Markdown、SQLite、日志或前端代码。
 
+开发模式允许 Electron Main 从仓库根目录 `.env` 加载 `DEEPSEEK_API_KEY`，随后仅通过子进程环境注入 Backend Utility Process。没有密钥时正式推演必须返回模型配置错误，不得静默使用 Fake AI；Fake 适配器只允许由自动化测试显式注入。
+
 ## 2. 运行进程
 
 ```mermaid

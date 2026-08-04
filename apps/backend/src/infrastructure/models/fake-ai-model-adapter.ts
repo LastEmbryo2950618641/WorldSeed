@@ -19,6 +19,12 @@ import type {
 } from "../../application/index.js"
 
 export class FakeAiModelAdapter implements AIModelPort {
+  public readonly info = {
+    provider: "fake",
+    model: "deterministic-contract-fixture",
+    available: true,
+  } as const
+
   public constructor(private readonly createId: () => string) {}
 
   public execute(request: PhaseRequestEnvelope): Promise<PhaseModelExecution> {
@@ -54,6 +60,8 @@ export class FakeAiModelAdapter implements AIModelPort {
         latencyMs: Math.max(0, Date.now() - startedAt),
         cacheHitInputTokens: Math.floor(inputTokens / 2),
         cacheMissInputTokens: inputTokens - Math.floor(inputTokens / 2),
+        provider: this.info.provider,
+        model: this.info.model,
       },
     })
   }

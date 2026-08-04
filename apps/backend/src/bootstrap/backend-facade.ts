@@ -135,6 +135,10 @@ export class BackendFacade {
     chapterSequence: number
     maxModelCalls?: number | undefined
   }): Promise<TaskHandle> {
+    const modelInfo = this.container.model.info
+    if (modelInfo?.available === false) {
+      throw new Error(modelInfo.detail ?? `AI model is unavailable: ${modelInfo.provider}/${modelInfo.model}`)
+    }
     const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
     const taskId = this.container.createId()
     const handle: TaskHandle = {

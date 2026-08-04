@@ -49,6 +49,7 @@ function ProcessPanel({ task }: { task: TaskSnapshot | undefined }): React.JSX.E
   const result = task?.result
   return <div className="process-panel">
     <div className="usage-grid">
+      <span className="model-identity"><small>实际运行模型</small><strong>{result === undefined ? "-" : `${result.modelProvider} / ${result.modelName}`}</strong></span>
       <span><small>模型调用</small><strong>{result?.modelCalls ?? "-"}</strong></span>
       <span><small>输入 Token</small><strong>{result?.inputTokens.toLocaleString() ?? "-"}</strong></span>
       <span><small>输出 Token</small><strong>{result?.outputTokens.toLocaleString() ?? "-"}</strong></span>

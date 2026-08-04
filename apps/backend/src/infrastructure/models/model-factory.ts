@@ -7,16 +7,15 @@ import {
 
 import type { AIModelPort } from "../../application/index.js"
 import { EnvironmentSecretProvider, DeepSeekAiModelAdapter } from "./deepseek/deepseek-model-adapter.js"
-import { FakeAiModelAdapter } from "./fake-ai-model-adapter.js"
+import { UnavailableAiModelAdapter } from "./unavailable-ai-model-adapter.js"
 import { NodePromptResourceAdapter } from "../prompts/index.js"
 
 export function createModelFromEnvironment(
   promptPackageRoot: string,
-  createId: () => string,
   values: DeepSeekEnvironment = process.env,
 ): AIModelPort {
   const config = deepSeekRuntimeConfigFromEnvironment(values)
-  if (config === undefined) return new FakeAiModelAdapter(createId)
+  if (config === undefined) return new UnavailableAiModelAdapter()
 
   return new DeepSeekAiModelAdapter(
     config,

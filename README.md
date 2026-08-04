@@ -36,13 +36,15 @@ Worldseed 是一个由 AI 完全自治治理的动态世界图实验项目。
 
 ## Backend 冒烟运行
 
-当前 Backend Utility Process 已支持 Fake AI、DeepSeek JSON Mode、项目创建、异步回合推演、任务状态查询和 MessagePort/stdio 两种协议入口。
+当前 Backend Utility Process 已支持测试显式注入的 Fake AI、DeepSeek JSON Mode、项目创建、异步回合推演、任务状态查询和 MessagePort/stdio 两种协议入口。桌面应用运行时不会自动使用 Fake AI。
 
 ```bash
 pnpm build
 pnpm backend:stdio
 ```
 
-stdio 每行接收一个 `ClientRequest` JSON，并输出一个 `ClientResponse` JSON。默认内部数据位于仓库根目录的 `.worldseed-data`；可通过 `WORLDSEED_APP_DATA_ROOT` 修改。未设置 `DEEPSEEK_API_KEY` 时使用离线 Fake AI；设置后自动使用 DeepSeek。
+stdio 每行接收一个 `ClientRequest` JSON，并输出一个 `ClientResponse` JSON。默认内部数据位于仓库根目录的 `.worldseed-data`；可通过 `WORLDSEED_APP_DATA_ROOT` 修改。未设置 `DEEPSEEK_API_KEY` 时，正式推演会明确失败，不生成伪造章节；设置后使用 DeepSeek。
+
+开发模式可将 `.env.example` 复制为仓库根目录 `.env` 并填写 `DEEPSEEK_API_KEY`。`pnpm dev` 启动的 Electron Main 会在创建 Backend Utility Process 前加载该文件；`.env` 已被 Git 忽略，不得提交真实密钥。
 
 DeepSeek 开发环境支持 `WORLDSEED_DEEPSEEK_BASE_URL`、`WORLDSEED_DEEPSEEK_MODEL`、`WORLDSEED_DEEPSEEK_PROXY_URL`、`WORLDSEED_DEEPSEEK_TIMEOUT_MS`、`WORLDSEED_DEEPSEEK_MAX_ATTEMPTS` 和 `WORLDSEED_DEEPSEEK_MAX_SCHEMA_REPAIR_ATTEMPTS`。代理只作用于模型适配器，不修改进程全局网络配置。

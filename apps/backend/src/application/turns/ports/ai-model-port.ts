@@ -20,7 +20,15 @@ export type PhaseModelExecution = Readonly<{
   usage: PhaseModelUsage
 }>
 
+export type AIModelInfo = Readonly<{
+  provider: string
+  model: string
+  available: boolean
+  detail?: string
+}>
+
 export interface AIModelPort {
+  readonly info?: AIModelInfo
   execute(request: PhaseRequestEnvelope): Promise<PhaseModelExecution>
 }
 

@@ -12,6 +12,7 @@ import {
   BackendFacade,
   FakeAiModelAdapter,
   MessagePortTransport,
+  UnavailableAiModelAdapter,
   type BackendMessagePort,
 } from "../src/index.js"
 
@@ -28,6 +29,40 @@ afterEach(async () => {
 })
 
 describe("backend utility runtime", () => {
+  it("rejects a formal turn when DeepSeek is not configured", async () => {
+    const root = mkdtempSync(join(tmpdir(), "worldseed-no-model-"))
+    temporaryDirectories.push(root)
+    const workspaceRootRef = join(root, "workspace")
+    const promptPackageRoot = fileURLToPath(new URL("../../../packages/prompt-contracts/", import.meta.url))
+    const facade = new BackendFacade(await BackendContainer.open({
+      applicationDataRoot: join(root, "application-data"),
+      promptPackageRoot,
+      model: new UnavailableAiModelAdapter(),
+    }))
+    openFacades.push(facade)
+    const projectId = randomUUID()
+
+    await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "project.create",
+      payload: { projectId, displayName: "No Model Test", workspaceRootRef },
+    })
+    const started = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "turn.start",
+      payload: { projectId, workspaceRootRef, userInput: "必须调用真实模型。", chapterSequence: 1 },
+    })
+
+    expect(started.ok).toBe(false)
+    if (!started.ok) {
+      expect(started.error.code).toBe("model_failure")
+      expect(started.error.message).toContain("DEEPSEEK_API_KEY")
+    }
+    expect(existsSync(join(workspaceRootRef, "章节正文", "第一章 世界种子.md"))).toBe(false)
+  })
+
   it("creates a project, runs a turn asynchronously, and serves the same protocol over MessagePort", async () => {
     const root = mkdtempSync(join(tmpdir(), "worldseed-utility-"))
     temporaryDirectories.push(root)

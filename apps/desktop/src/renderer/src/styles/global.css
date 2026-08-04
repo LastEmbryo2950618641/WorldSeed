@@ -85,6 +85,7 @@ button { color: inherit; }
 .process-panel, .evolution-panel, .graph-view { height: 100%; overflow: auto; }
 .usage-grid { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--border); }
 .usage-grid span { padding: 9px 10px; border-right: 1px solid #e0e3e5; border-bottom: 1px solid #e0e3e5; display: grid; gap: 4px; }
+.usage-grid .model-identity { grid-column: 1 / -1; }
 .usage-grid small { font-size: 10px; color: var(--muted); }
 .usage-grid strong { font-size: 14px; font-weight: 650; }
 .phase-list { padding: 8px 9px 20px; }

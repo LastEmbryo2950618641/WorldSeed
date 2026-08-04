@@ -50,7 +50,6 @@ export class BackendContainer {
     this.internalStore = new NodeInternalStoreAdapter(options.applicationDataRoot)
     this.model = options.model ?? createModelFromEnvironment(
       options.promptPackageRoot,
-      options.createId ?? randomUUID,
     )
     this.createId = options.createId ?? randomUUID
     this.now = options.now ?? Date.now

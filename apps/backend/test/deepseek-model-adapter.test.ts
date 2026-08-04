@@ -9,6 +9,7 @@ import {
   DeepSeekAiModelAdapter,
   FakeAiModelAdapter,
   NodePromptResourceAdapter,
+  UnavailableAiModelAdapter,
   createModelFromEnvironment,
   type DeepSeekCompletionClient,
 } from "../src/index.js"
@@ -16,9 +17,13 @@ import {
 const promptRoot = fileURLToPath(new URL("../../../packages/prompt-contracts/", import.meta.url))
 
 describe("DeepSeekAiModelAdapter", () => {
-  it("selects DeepSeek only when an API key is present", () => {
-    expect(createModelFromEnvironment(promptRoot, randomUUID, {})).toBeInstanceOf(FakeAiModelAdapter)
-    expect(createModelFromEnvironment(promptRoot, randomUUID, {
+  it("never silently falls back to Fake AI when the API key is missing", async () => {
+    const unavailable = createModelFromEnvironment(promptRoot, {})
+    expect(unavailable).toBeInstanceOf(UnavailableAiModelAdapter)
+    expect(unavailable.info?.available).toBe(false)
+    await expect(unavailable.execute(createRequest())).rejects.toThrow("DEEPSEEK_API_KEY")
+
+    expect(createModelFromEnvironment(promptRoot, {
       DEEPSEEK_API_KEY: "test-key",
       WORLDSEED_DEEPSEEK_PROXY_URL: "http://127.0.0.1:7890",
     })).toBeInstanceOf(DeepSeekAiModelAdapter)
@@ -51,6 +56,7 @@ describe("DeepSeekAiModelAdapter", () => {
     expect(execution.usage.cacheHitInputTokens).toBe(80)
     expect(execution.usage.cacheMissInputTokens).toBe(40)
     expect(execution.usage.provider).toBe("deepseek")
+    expect(adapter.info).toMatchObject({ provider: "deepseek", model: "deepseek-chat", available: true })
   })
 
   it("repairs a schema-invalid response within the configured limit", async () => {

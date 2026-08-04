@@ -94,6 +94,8 @@ export type TurnExecutionResult = Readonly<{
   modelCalls: number
   inputTokens: number
   outputTokens: number
+  modelProvider: string
+  modelName: string
   graphAnchorIds: readonly string[]
   kvCacheHitRate?: number
 }>
@@ -259,6 +261,8 @@ export class TurnOrchestrator {
         modelCalls: usage.modelCalls,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
+        modelProvider: this.dependencies.model.info?.provider ?? "unknown",
+        modelName: this.dependencies.model.info?.model ?? "unknown",
         graphAnchorIds: governance.mutations.flatMap((mutation) => mutation.operation === "create_node" ? [mutation.node.id] : []),
         ...(totalCacheTokens === 0 ? {} : { kvCacheHitRate: usage.cacheHits / totalCacheTokens }),
       }

@@ -20,6 +20,8 @@ export type TurnResult = Readonly<{
   modelCalls: number
   inputTokens: number
   outputTokens: number
+  modelProvider: string
+  modelName: string
   kvCacheHitRate?: number
 }>
 
@@ -110,6 +112,8 @@ async function demoInvoke(method: BackendMethod): Promise<unknown> {
           modelCalls: 11,
           inputTokens: 18420,
           outputTokens: 3720,
+          modelProvider: "demo",
+          modelName: "browser-prototype",
           kvCacheHitRate: 0.68,
         },
       }

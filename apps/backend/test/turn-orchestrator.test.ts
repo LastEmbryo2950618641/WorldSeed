@@ -45,6 +45,7 @@ describe("TurnOrchestrator", () => {
     let modelCalls = 0
     const fake = new FakeAiModelAdapter(randomUUID)
     const model: AIModelPort = {
+      info: fake.info,
       execute: (request) => {
         modelCalls += 1
         return fake.execute(request)
@@ -76,6 +77,8 @@ describe("TurnOrchestrator", () => {
 
     expect(modelCalls).toBe(12)
     expect(result.modelCalls).toBe(12)
+    expect(result.modelProvider).toBe("fake")
+    expect(result.modelName).toBe("deterministic-contract-fixture")
     expect(result.kvCacheHitRate).toBeCloseTo(0.5, 2)
     expect(observedPending).toBe(true)
     expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual(["第一章 世界种子.md"])
