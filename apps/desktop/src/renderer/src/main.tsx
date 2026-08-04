@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 
 import { App } from "./app/App.js"
+import "./monaco.js"
 import "./styles/global.css"
 
 const root = document.getElementById("root")
