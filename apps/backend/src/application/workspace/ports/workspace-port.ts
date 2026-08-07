@@ -9,6 +9,8 @@ import type { ProjectRepository } from "../../projects/index.js"
 
 export type WorkspaceDefaultDocuments = Readonly<{
   baseRules: string
+  settingsReadme: string
+  referencesReadme: string
   descriptionRules: string
   proseStyleRules: string
 }>

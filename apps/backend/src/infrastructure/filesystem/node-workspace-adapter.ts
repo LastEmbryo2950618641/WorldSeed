@@ -48,6 +48,14 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       encoding: "utf8",
       flag: "wx",
     })
+    await writeFile(resolveInside(root, "设定集/readme.md"), defaults.settingsReadme, {
+      encoding: "utf8",
+      flag: "wx",
+    })
+    await writeFile(resolveInside(root, "参考文件/readme.md"), defaults.referencesReadme, {
+      encoding: "utf8",
+      flag: "wx",
+    })
     await writeFile(resolveInside(root, "表现输出/描写规则/默认描写规则.md"), defaults.descriptionRules, {
       encoding: "utf8",
       flag: "wx",
@@ -63,6 +71,7 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     const root = await realpath(resolve(workspaceRootRef))
     const { inventory, issues: scanIssues } = await scanWorkspace(root)
     const issues = [...scanIssues, ...validateWorkspaceInventory(inventory)]
+    issues.push(...await validateFixedWorkspaceEntries(root, issues))
     const baseRulesPath = resolveInside(root, "世界推演规则/基础规则/base-rules.md")
     let baseRulesDigest = "missing"
     try {
@@ -237,6 +246,39 @@ async function scanWorkspace(root: string): Promise<{
 
   await visit(root)
   return { inventory, issues }
+}
+
+async function validateFixedWorkspaceEntries(
+  root: string,
+  existingIssues: readonly WorkspaceValidationIssue[],
+): Promise<WorkspaceValidationIssue[]> {
+  const issueKeys = new Set(existingIssues.map((issue) => `${issue.code}:${issue.path}`))
+  const missingIssues: WorkspaceValidationIssue[] = []
+  for (const entry of fixedWorkspaceEntries) {
+    const issueKey = `missing_fixed_entry:${entry.relativePath}`
+    if (issueKeys.has(issueKey)) {
+      continue
+    }
+    try {
+      const stats = await lstat(resolveInside(root, entry.relativePath))
+      if (entry.entryKind === "directory" && stats.isDirectory()) {
+        continue
+      }
+      if (entry.entryKind === "file" && stats.isFile()) {
+        continue
+      }
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+        throw error
+      }
+    }
+    missingIssues.push({
+      code: "missing_fixed_entry",
+      path: entry.relativePath,
+      message: "Required fixed workspace entry is missing",
+    })
+  }
+  return missingIssues
 }
 
 async function scanImportFolder(root: string, directory: string): Promise<string[]> {

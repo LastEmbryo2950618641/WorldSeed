@@ -1,4 +1,4 @@
-import type { ProjectId } from "@worldseed/contracts"
+import type { ProjectId, ProjectSettings } from "@worldseed/contracts"
 
 import {
   TurnOrchestrator,
@@ -6,19 +6,23 @@ import {
   type PromptResourcePort,
 } from "../application/index.js"
 import type { InternalProjectStore, WorkspacePort, InternalStorePort } from "../application/workspace/index.js"
-import { NodeWorkspaceAdapter } from "../infrastructure/filesystem/index.js"
+import { NodeWorkspaceAdapter, NodeWorkspaceCatalogAdapter } from "../infrastructure/filesystem/index.js"
 import {
   SqliteDocumentRepository,
+  SqliteEvidenceStore,
   SqliteGraphRepository,
+  SqliteProjectSettingsStore,
   SqliteRetrievalRepository,
   SqliteScopeCommitRepository,
   SqliteTaskScopeRepository,
   SqliteTurnPersistence,
+  SqliteWorkspaceCatalogSnapshotRepository,
   openProjectDatabase,
 } from "../infrastructure/sqlite/index.js"
 import { NodePromptResourceAdapter } from "../infrastructure/prompts/index.js"
 import type { Kysely } from "kysely"
 import type { ProjectDatabase } from "../infrastructure/sqlite/database-types.js"
+import { runtimeLog } from "../infrastructure/diagnostics/index.js"
 
 export class ProjectRuntime {
   private constructor(
@@ -60,16 +64,35 @@ export class ProjectRuntime {
       documents: new SqliteDocumentRepository(this.database),
       graph: new SqliteGraphRepository(this.database),
       retrieval: new SqliteRetrievalRepository(this.database),
+      catalog: new NodeWorkspaceCatalogAdapter(this.workspace),
+      catalogSnapshots: new SqliteWorkspaceCatalogSnapshotRepository(this.database),
+      evidence: new SqliteEvidenceStore(this.database, this.internalStorePort, this.internalStore),
       commit: new SqliteScopeCommitRepository(this.database),
       internalStore: this.internalStorePort,
       workspace: this.workspace,
       createId,
       now,
+      diagnostics: {
+        log: (level, event, fields) => { runtimeLog(level, "turn-orchestrator", event, fields) },
+      },
     })
   }
 
   public get taskScopes(): SqliteTaskScopeRepository {
     return new SqliteTaskScopeRepository(this.database)
+  }
+
+  public readSettings(): Promise<ProjectSettings> {
+    return new SqliteProjectSettingsStore(this.database, Date.now).read(this.projectId)
+  }
+
+  public saveSettings(settings: ProjectSettings): Promise<ProjectSettings> {
+    return new SqliteProjectSettingsStore(this.database, Date.now).save(this.projectId, settings)
+  }
+
+  public async listPhaseRuns(taskId: string): Promise<readonly unknown[]> {
+    return new SqliteTurnPersistence(this.database, () => "phase-read")
+      .listPhaseRuns(taskId)
   }
 
   public async validate(): Promise<Awaited<ReturnType<WorkspacePort["validate"]>>> {

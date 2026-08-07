@@ -29,6 +29,65 @@ afterEach(async () => {
 })
 
 describe("backend utility runtime", () => {
+  it("persists model profiles and the active selection across backend restarts", async () => {
+    const root = mkdtempSync(join(tmpdir(), "worldseed-model-profiles-"))
+    temporaryDirectories.push(root)
+    const applicationDataRoot = join(root, "application-data")
+    const promptPackageRoot = fileURLToPath(new URL("../../../packages/prompt-contracts/", import.meta.url))
+    const firstFacade = new BackendFacade(await BackendContainer.open({
+      applicationDataRoot,
+      promptPackageRoot,
+      model: new FakeAiModelAdapter(randomUUID),
+    }))
+    const saved = await firstFacade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "model.profiles.save",
+      payload: {
+        profiles: [{
+          id: "deepseek-primary",
+          name: "DeepSeek Primary",
+          baseUrl: "https://api.deepseek.com",
+          model: "deepseek-v4-flash",
+          credentialRef: "model-profile:deepseek-primary",
+          thinkingModeEnabled: true,
+          reasoningEffort: "low",
+          jsonModeEnabled: false,
+        }],
+        activeProfileId: "deepseek-primary",
+      },
+    })
+    expect(saved.ok).toBe(true)
+    await firstFacade.close()
+
+    const reopenedFacade = new BackendFacade(await BackendContainer.open({
+      applicationDataRoot,
+      promptPackageRoot,
+      model: new FakeAiModelAdapter(randomUUID),
+    }))
+    openFacades.push(reopenedFacade)
+    const restored = await reopenedFacade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "model.profiles.read",
+      payload: {},
+    })
+
+    expect(restored.ok && restored.data).toEqual({
+      profiles: [{
+        id: "deepseek-primary",
+        name: "DeepSeek Primary",
+        baseUrl: "https://api.deepseek.com",
+        model: "deepseek-v4-flash",
+        credentialRef: "model-profile:deepseek-primary",
+        thinkingModeEnabled: true,
+        reasoningEffort: "low",
+        jsonModeEnabled: false,
+      }],
+      activeProfileId: "deepseek-primary",
+    })
+  })
+
   it("rejects a formal turn when DeepSeek is not configured", async () => {
     const root = mkdtempSync(join(tmpdir(), "worldseed-no-model-"))
     temporaryDirectories.push(root)
@@ -139,6 +198,56 @@ describe("backend utility runtime", () => {
       },
     })
     expect(neighborhood.ok && neighborhood.data).toMatchObject({ truncated: false })
+
+    const oversizedAnchorSet = Array.from({ length: 40 }, (_, index) => (
+      graphAnchorIds[index % graphAnchorIds.length]
+    ))
+    const firstWindow = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "graph.neighborhood",
+      payload: {
+        projectId,
+        workspaceRootRef,
+        anchorIds: oversizedAnchorSet,
+        anchorOffset: 0,
+        direction: "both",
+        maxDepth: 2,
+        maxNodes: 48,
+        maxLinks: 96,
+      },
+    })
+    expect(firstWindow.ok && firstWindow.data).toMatchObject({
+      truncated: true,
+      anchorWindow: {
+        requestedCount: 40,
+        processedCount: 32,
+        remainingCount: 8,
+        nextOffset: 32,
+      },
+    })
+    const finalWindow = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "graph.neighborhood",
+      payload: {
+        projectId,
+        workspaceRootRef,
+        anchorIds: oversizedAnchorSet,
+        anchorOffset: 32,
+        direction: "both",
+        maxDepth: 2,
+        maxNodes: 48,
+        maxLinks: 96,
+      },
+    })
+    expect(finalWindow.ok && finalWindow.data).toMatchObject({
+      anchorWindow: {
+        requestedCount: 40,
+        processedCount: 8,
+        remainingCount: 0,
+      },
+    })
 
     const responses: ClientResponse[] = []
     const port: BackendMessagePort = {

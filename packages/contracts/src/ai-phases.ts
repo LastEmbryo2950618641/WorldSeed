@@ -6,7 +6,7 @@ import { idSchema } from "./ids.js"
 import { readRequestSchema, unresolvedDependencySchema } from "./reads.js"
 import { schemaVersionSchema } from "./version.js"
 
-export const phaseOutcomeValues = ["continue", "request_read", "approve", "revise", "reject", "retire"] as const
+export const phaseOutcomeValues = ["continue", "request_read", "blocked", "approve", "revise", "reject", "retire"] as const
 export const phaseOutcomeSchema = z.enum(phaseOutcomeValues)
 export type PhaseOutcome = z.infer<typeof phaseOutcomeSchema>
 

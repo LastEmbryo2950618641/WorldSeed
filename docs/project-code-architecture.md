@@ -29,7 +29,7 @@
 
 架构设计以此为前提，不再同时维护 Electron、Tauri、Web 服务等多套 V1 实现。
 
-第一阶段使用 [DeepSeek API](https://api-docs.deepseek.com/zh-cn/) 的 `chat/completions` 接口，默认模型为 `deepseek-chat`。`deepseek-reasoner` 只作为后续可配置模型，不在第一阶段默认混用，以便先建立可比较的系统基线。默认地址、代理、超时、重试、JSON Mode 和缓存 token 字段见 [V1 编码前冻结基线](v1-freeze.md)。
+第一阶段使用 [DeepSeek API](https://api-docs.deepseek.com/zh-cn/) 的 `chat/completions` 接口，默认模型为 `deepseek-v4-flash`。其他模型只通过配置启用，以便先建立可比较的系统基线。默认地址、代理、超时、重试、普通文本 JSON 契约和缓存 token 字段见 [V1 编码前冻结基线](v1-freeze.md)。
 
 DeepSeek 适配器使用 `DEEPSEEK_API_KEY`，密钥只从运行环境或操作系统安全存储读取，不能写入项目 Markdown、SQLite、日志或前端代码。
 

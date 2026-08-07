@@ -19,9 +19,25 @@ export type RegisteredProjectRow = {
   created_at: Timestamp
 }
 
+export type ModelProfileRow = {
+  id: string
+  name: string
+  base_url: string
+  model: string
+  credential_ref: string
+  is_active: number
+  position: number
+  created_at: Timestamp
+  updated_at: Timestamp
+  thinking_mode_enabled: number
+  reasoning_effort: string
+  json_mode_enabled: number
+}
+
 export type RegistryDatabase = {
   schema_migrations: SchemaMigrationRow
   registered_projects: RegisteredProjectRow
+  model_profiles: ModelProfileRow
 }
 
 export type ProjectRow = {
@@ -38,6 +54,12 @@ export type ProjectManifestRow = {
   schema_version: number
   fixed_entries_json: JsonText
   digest: string
+  updated_at: Timestamp
+}
+
+export type ProjectSettingsRow = {
+  project_id: string
+  settings_json: JsonText
   updated_at: Timestamp
 }
 
@@ -235,6 +257,48 @@ export type SettlementRecordRow = {
   created_at: Timestamp
 }
 
+export type SceneSpacetimeBindingRow = {
+  id: string
+  project_id: string
+  scope_id: string
+  source_id: string | null
+  scene_index: number
+  scene_anchor_id: string
+  source_unit_indexes_json: JsonText
+  temporal_reference_refs_json: JsonText
+  time_anchor_refs_json: JsonText
+  spatial_reference_refs_json: JsonText
+  location_anchor_refs_json: JsonText
+  predecessor_scene_indexes_json: JsonText
+  predecessor_scene_refs_json: JsonText
+  transition_path_refs_json: JsonText
+  correspondence_refs_json: JsonText
+  reason: string
+  self_review: string
+  visibility: "pending" | "committed" | "retired"
+  digest: string
+  created_at: Timestamp
+}
+
+export type GraphRevisionSpacetimeRow = {
+  id: string
+  project_id: string
+  scope_id: string
+  graph_revision_id: string
+  effect_disposition: "world_effect" | "representation_only"
+  effective_scene_binding_ids_json: JsonText
+  effective_existing_scene_refs_json: JsonText
+  current_entry_refs_json: JsonText
+  predecessor_revision_required: number
+  predecessor_revision_ids_json: JsonText
+  historical_return_refs_json: JsonText
+  reason: string
+  self_review: string
+  visibility: "pending" | "committed" | "retired"
+  digest: string
+  created_at: Timestamp
+}
+
 export type RetrievalProjectionRow = {
   id: string
   project_id: string
@@ -294,18 +358,50 @@ export type FrontierRefRow = {
   id: string
   project_id: string
   scope_id: string
-  anchor_id: string
-  last_effective_time: Timestamp
-  deferral_count: number
-  next_attempt_at: Timestamp
-  status: string
-  payload_json: JsonText
+  frontier_anchor_ref: string
+  disposition: "active" | "deferred" | "archived"
+  last_scene_anchor_refs_json: JsonText
+  last_time_anchor_refs_json: JsonText
+  last_location_anchor_refs_json: JsonText
+  correspondence_refs_json: JsonText
+  last_processed_at: Timestamp
+  reason: string
+  revisit_condition: string | null
+}
+
+export type WorkspaceCatalogSnapshotRow = {
+  id: string
+  project_id: string
+  generated_at: Timestamp
+  digest: string
+  entries_json: JsonText
+}
+
+export type TaskWorkspaceCatalogSnapshotRow = {
+  task_id: string
+  snapshot_id: string
+  attached_at: Timestamp
+}
+
+export type EvidenceObjectRow = {
+  id: string
+  project_id: string
+  context_id: string | null
+  source_kind: "workspace" | "graph" | "revision" | "chapter"
+  owner_id: string
+  version: string
+  digest: string
+  locator: string
+  content_ref: string
+  read_reason: string
+  created_at: Timestamp
 }
 
 export type ProjectDatabase = {
   schema_migrations: SchemaMigrationRow
   projects: ProjectRow
   project_manifests: ProjectManifestRow
+  project_settings: ProjectSettingsRow
   workspace_operations: WorkspaceOperationRow
   artifact_scopes: ArtifactScopeRow
   tasks: TaskRow
@@ -322,10 +418,15 @@ export type ProjectDatabase = {
   document_versions: DocumentVersionRow
   source_units: SourceUnitRow
   settlement_records: SettlementRecordRow
+  scene_spacetime_bindings: SceneSpacetimeBindingRow
+  graph_revision_spacetime: GraphRevisionSpacetimeRow
   retrieval_projections: RetrievalProjectionRow
   retrieval_exact_keys: RetrievalExactKeyRow
   retrieval_fts: RetrievalFtsRow
   rule_snapshots: RuleSnapshotRow
   ai_decision_records: AiDecisionRecordRow
   frontier_refs: FrontierRefRow
+  workspace_catalog_snapshots: WorkspaceCatalogSnapshotRow
+  task_workspace_catalog_snapshots: TaskWorkspaceCatalogSnapshotRow
+  evidence_objects: EvidenceObjectRow
 }

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
+import { defaultProjectSettings } from "@worldseed/config"
 
 import {
   digest,
@@ -13,6 +14,7 @@ import {
   SqliteGraphRepository,
   SqliteProjectRegistryRepository,
   SqliteProjectRepository,
+  SqliteProjectSettingsStore,
   SqliteRetrievalRepository,
   SqliteScopeCommitRepository,
   SqliteTaskScopeRepository,
@@ -106,6 +108,52 @@ describe("SQLite repository contract", () => {
     await database.destroy()
   })
 
+  it("persists project settings independently from the Markdown workspace", async () => {
+    const directory = temporaryDirectory()
+    const database = await openProjectDatabase(join(directory, "project-settings.sqlite"))
+    const workspaceRootRef = join(directory, "workspace")
+    const internalStoreRef = join(directory, "internal")
+    const projectRepository = new SqliteProjectRepository(database, workspaceRootRef, internalStoreRef)
+    const settingsStore = new SqliteProjectSettingsStore(database, () => 100)
+    const manifest: ProjectManifest = {
+      id: ids.project,
+      protocolVersion: "worldseed.v1",
+      manifestVersion: 1,
+      displayName: "Settings Test",
+      workspaceRootRef,
+      fixedEntries: fixedWorkspaceEntries,
+      internalStoreRef,
+      manifestDigest: digest(fixedWorkspaceEntries),
+    }
+    await projectRepository.create({
+      projectId: ids.project,
+      name: "Settings Test",
+      manifestVersion: 1,
+      committedSequence: 0,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+    }, manifest)
+
+    expect(await settingsStore.read(ids.project)).toEqual(defaultProjectSettings)
+    const saved = await settingsStore.save(ids.project, {
+      ...defaultProjectSettings,
+      graph: {
+        ...defaultProjectSettings.graph,
+        maxDirectOutDegree: 20,
+        maxDirectInDegree: 18,
+        mergeWarningThreshold: 14,
+      },
+    })
+
+    expect(saved.graph.maxDirectOutDegree).toBe(20)
+    expect((await settingsStore.read(ids.project)).graph).toMatchObject({
+      maxDirectOutDegree: 20,
+      maxDirectInDegree: 18,
+      mergeWarningThreshold: 14,
+    })
+    await database.destroy()
+  })
+
   it("isolates pending artifacts and promotes one complete scope", async () => {
     const directory = temporaryDirectory()
     const database = await openProjectDatabase(join(directory, "project.sqlite"))
@@ -184,6 +232,18 @@ describe("SQLite repository contract", () => {
       sourceRefs: [],
       digest: "projection-digest",
     })
+    await retrievalRepository.stageProjection({
+      projectionId: "00000000-0000-4000-8000-000000000072",
+      projectId: ids.project,
+      scopeId: ids.scope1,
+      ownerKind: "node",
+      ownerId: ids.node2,
+      ownerRevisionId: ids.revision2,
+      exactKeys: ["旧桥"],
+      semanticText: "北港商会与旧桥钥匙",
+      sourceRefs: [],
+      digest: "chinese-projection-digest",
+    })
 
     expect(await graphRepository.getNode({ projectId: ids.project }, ids.node1)).toBeUndefined()
     expect((await graphRepository.getNode({ projectId: ids.project, pendingScopeId: ids.scope1 }, ids.node1))?.content)
@@ -216,6 +276,8 @@ describe("SQLite repository contract", () => {
     expect(await documentRepository.listCommittedChapters(ids.project)).toHaveLength(1)
     expect(await retrievalRepository.searchExact({ projectId: ids.project }, ["anchor-key"], 10)).toHaveLength(1)
     expect(await retrievalRepository.searchText({ projectId: ids.project }, "bridge", 10)).toHaveLength(1)
+    expect(await retrievalRepository.searchText({ projectId: ids.project }, "旧桥", 10)).toHaveLength(1)
+    expect(await retrievalRepository.searchText({ projectId: ids.project }, "旧桥钥匙现在位于哪里", 10)).toHaveLength(1)
     expect(await graphRepository.listRevisions(ids.project, "node", ids.node1)).toHaveLength(1)
 
     await scopeRepository.create({

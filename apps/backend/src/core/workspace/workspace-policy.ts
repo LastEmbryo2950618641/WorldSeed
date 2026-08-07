@@ -47,7 +47,7 @@ export function assertWorkspaceMutationAllowed(
   const normalized = normalizeWorkspacePath(path)
   const fixedEntry = fixedWorkspaceEntries.find((entry) => entry.relativePath === normalized)
 
-  if (fixedEntry !== undefined && fixedEntry.immutablePath && actor === "user") {
+  if (fixedEntry !== undefined && fixedEntry.immutablePath && actor === "user" && !fixedEntry.allowUserMarkdown) {
     throw new WorkspacePolicyError(`Fixed workspace entry cannot be changed: ${normalized}`)
   }
 

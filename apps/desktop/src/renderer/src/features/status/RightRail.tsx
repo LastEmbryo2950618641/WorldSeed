@@ -1,11 +1,15 @@
 import { Activity, Check, Circle, GitBranch, LoaderCircle, Network, Orbit } from "lucide-react"
-import { aiPhaseValues } from "@worldseed/contracts"
+import { aiPhaseValues, type ProjectSettings } from "@worldseed/contracts"
 
 import type { GraphSlice, TaskSnapshot } from "../../api/client.js"
 import { useWorkbenchStore, type RightTab } from "../../state/workbench-store.js"
 import { WorldGraph } from "./WorldGraph.js"
 
-type Props = Readonly<{ task: TaskSnapshot | undefined; graphSlice: GraphSlice | undefined }>
+type Props = Readonly<{
+  task: TaskSnapshot | undefined
+  graphSlice: GraphSlice | undefined
+  graphSettings?: ProjectSettings["graph"] | undefined
+}>
 
 const labels: Record<string, string> = {
   interpret: "理解用户输入",
@@ -16,14 +20,17 @@ const labels: Record<string, string> = {
   draft: "撰写正文",
   chapter_naming: "生成章节标题",
   dependency_audit: "检查依赖闭合",
+  response_review: "审查正文响应",
   graph_governance: "治理世界图",
   semantic_review: "语义一致性复核",
   settlement_review: "结算资料返回路径",
   frontier_settlement: "结算演化前沿",
   commit_review: "最终提交审查",
+  context_compaction: "压缩动态上下文",
+  context_compaction_review: "复核压缩结果",
 }
 
-export function RightRail({ task, graphSlice }: Props): React.JSX.Element {
+export function RightRail({ task, graphSlice, graphSettings }: Props): React.JSX.Element {
   const tab = useWorkbenchStore((state) => state.rightTab)
   const setTab = useWorkbenchStore((state) => state.setRightTab)
   return <aside className="right-rail">
@@ -33,7 +40,7 @@ export function RightRail({ task, graphSlice }: Props): React.JSX.Element {
       <Tab id="evolution" tab={tab} onChange={setTab} icon={<Orbit size={15} />} label="自洽演化" />
     </div>
     <div className="right-content">
-      {tab === "process" ? <ProcessPanel task={task} /> : tab === "graph" ? <WorldGraph slice={graphSlice} /> : <EvolutionPanel />}
+      {tab === "process" ? <ProcessPanel task={task} /> : tab === "graph" ? <WorldGraph slice={graphSlice} settings={graphSettings} /> : <EvolutionPanel />}
     </div>
     <div className="world-summary"><span>世界时间 <strong>当前章节锚点</strong></span><span>图局部 <strong>{graphSlice === undefined ? "未读取" : `${String(graphSlice.nodes.length)} 节点 / ${String(graphSlice.links.length)} 连接`}</strong></span><span>任务状态 <strong>{task?.status ?? "未运行"}</strong></span></div>
   </aside>
@@ -44,8 +51,6 @@ function Tab({ id, tab, onChange, icon, label }: { id: RightTab; tab: RightTab; 
 }
 
 function ProcessPanel({ task }: { task: TaskSnapshot | undefined }): React.JSX.Element {
-  const completed = task?.status === "completed"
-  const currentIndex = completed ? aiPhaseValues.length - 1 : Math.max(-1, aiPhaseValues.indexOf(task?.lastPhase as never))
   const result = task?.result
   return <div className="process-panel">
     <div className="usage-grid">
@@ -55,22 +60,62 @@ function ProcessPanel({ task }: { task: TaskSnapshot | undefined }): React.JSX.E
       <span><small>输出 Token</small><strong>{result?.outputTokens.toLocaleString() ?? "-"}</strong></span>
       <span><small>KV 命中率</small><strong>{result?.kvCacheHitRate === undefined ? "不可用" : `${String(Math.round(result.kvCacheHitRate * 100))}%`}</strong></span>
     </div>
-    <div className="phase-list">{aiPhaseValues.map((phase, index) => {
-      const isDone = completed || index < currentIndex
-      const isCurrent = !completed && index === currentIndex
-      return <div className={`phase-row ${isDone ? "done" : isCurrent ? "current" : ""}`} key={phase}>
-        <span className="phase-icon">{isDone ? <Check size={13} /> : isCurrent ? <LoaderCircle size={13} /> : <Circle size={10} />}</span>
-        <span><strong>{phase}</strong><small>{labels[phase]}</small></span>
-        <em>{isDone ? "已完成" : isCurrent ? "进行中" : "等待"}</em>
-      </div>
+    <div className="phase-list">{aiPhaseValues.map((phase) => {
+      const runs = task?.phaseRuns?.filter((run) => run.phase === phase) ?? []
+      const latest = runs.at(-1)
+      const isDone = latest?.status === "completed"
+      const isCurrent = latest?.status === "running" || latest?.status === "failed"
+      return <details className={`phase-detail ${isDone ? "done" : isCurrent ? "current" : ""}`} key={phase}>
+        <summary className={`phase-row ${isDone ? "done" : isCurrent ? "current" : ""}`}>
+          <span className="phase-icon">{isDone ? <Check size={13} /> : isCurrent ? <LoaderCircle size={13} /> : <Circle size={10} />}</span>
+          <span><strong>{phase}</strong><small>{labels[phase]}</small></span>
+          <em>{latest?.status === "failed" ? "失败" : isDone ? "已完成" : isCurrent ? "进行中" : "等待"}</em>
+        </summary>
+        {latest?.result === undefined ? <PhasePending latestStatus={latest?.status} /> : <PhaseDetails result={latest.result} />}
+      </details>
     })}</div>
     {task?.error?.message === undefined ? null : <p className="task-error">{task.error.message}</p>}
   </div>
+}
+
+function PhasePending({ latestStatus }: { latestStatus: string | undefined }): React.JSX.Element {
+  if (latestStatus === "running") {
+    return <p className="phase-empty">已向模型发起请求，等待 AI 返回结构化思考与输出。</p>
+  }
+  return <p className="phase-empty">尚未进入该阶段；进入后会先显示请求态，返回后再展开 AI 思考与 AI 输出。</p>
+}
+
+function PhaseDetails({ result }: { result: unknown }): React.JSX.Element {
+  const value = typeof result === "object" && result !== null ? result as Record<string, unknown> : {}
+  const thought = {
+    modelReasoning: value.modelReasoning,
+    reason: value.reason,
+    selfReview: value.selfReview,
+    requestedReads: value.requestedReads,
+    unresolvedDependencies: value.unresolvedDependencies,
+  }
+  const output = value.rawModelOutput ?? value.artifact ?? value
+  return <div className="phase-details">
+    <p className="phase-note">展开后可查看该阶段的 AI 思考摘要与原始输出，默认折叠，避免占满右侧面板。</p>
+    <details>
+      <summary className="sub-panel-summary">AI 思考</summary>
+      <pre>{formatJson(thought, "暂无结构化思考结果")}</pre>
+    </details>
+    <details>
+      <summary className="sub-panel-summary">AI 输出</summary>
+      <pre>{typeof output === "string" ? output : formatJson(output, "暂无输出")}</pre>
+    </details>
+  </div>
+}
+
+function formatJson(value: unknown, fallback: string): string {
+  return JSON.stringify(value, null, 2) || fallback
 }
 
 function EvolutionPanel(): React.JSX.Element {
   return <div className="evolution-panel">
     <div className="evolution-time"><small>当前世界时间</small><strong>随已提交章节推进</strong></div>
     <div className="evolution-entry"><GitBranch size={16} /><div><strong>当前没有可展示的演化投影</strong><p>后台不会为制造宏大感而补齐所有事实。出现与当前任务相关、可追溯的自主变化后，将在此显示影响路径和认知边界。</p></div></div>
+    <div className="evolution-entry muted"><GitBranch size={16} /><div><strong>显示逻辑</strong><p>这里不是事件列表，而是世界已到达、可追溯、可回写的自治变化投影。</p></div></div>
   </div>
 }

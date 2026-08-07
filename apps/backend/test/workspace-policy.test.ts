@@ -17,6 +17,7 @@ describe("workspace policy", () => {
 
     expect(validateWorkspaceInventory(inventory)).toEqual([])
     expect(assertWorkspaceMutationAllowed("设定集/局部/资料.md", "file", "user")).toBe("设定集/局部/资料.md")
+    expect(assertWorkspaceMutationAllowed("设定集/readme.md", "file", "user")).toBe("设定集/readme.md")
   })
 
   it("rejects a sixth root and non-Markdown files", () => {

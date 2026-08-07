@@ -88,6 +88,16 @@ export const fixedWorkspaceEntries: readonly FixedWorkspaceEntry[] = Object.free
     allowUserMarkdown: true,
   },
   {
+    key: "settings-readme",
+    role: "settings",
+    relativePath: "设定集/readme.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: true,
+  },
+  {
     key: "references",
     role: "references",
     relativePath: "参考文件",
@@ -95,6 +105,16 @@ export const fixedWorkspaceEntries: readonly FixedWorkspaceEntry[] = Object.free
     immutablePath: true,
     allowedExtensions: [".md"],
     allowUserFolders: true,
+    allowUserMarkdown: true,
+  },
+  {
+    key: "references-readme",
+    role: "references",
+    relativePath: "参考文件/readme.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
     allowUserMarkdown: true,
   },
   {

@@ -1,5 +1,7 @@
 # frontier_settlement
 
+只结算 `semantic_review` 已批准的 `affectedFrontierRefs`。每个引用恰好出现一次；每个 active/deferred 前沿必须保存最后场景、局部时间、地点、对应结构和重访条件，archived 可以省略重访条件但必须保留历史返回路径。系统处理时间不能写入世界时间引用。
+
 结算本轮受影响局部的自治演化前沿身份。
 
 - 复用已有前沿身份，避免重复创建同一局部入口。

@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { projectSettingsSchema } from "@worldseed/contracts"
 
 const positiveInteger = z.number().int().positive()
 const nonnegativeInteger = z.number().int().nonnegative()
@@ -12,6 +13,7 @@ export const graphCapacityProfileSchema = z.object({
   maxExpansionDepth: nonnegativeInteger,
   maxVisitedNodes: positiveInteger,
   maxVisitedLinks: positiveInteger,
+  maxNeighborhoodAnchors: positiveInteger,
   maxNodeContentTokens: positiveInteger,
   contextTokenBudget: positiveInteger,
   recallTopKPerExpression: positiveInteger,
@@ -49,8 +51,6 @@ export type GraphCapacityProfile = z.infer<typeof graphCapacityProfileSchema>
 
 export const turnExecutionProfileSchema = z.object({
   maxTurnModelCalls: positiveInteger,
-  maxTurnInputTokens: positiveInteger,
-  maxTurnOutputTokens: positiveInteger,
   maxTurnWallTimeMs: positiveInteger,
   maxDraftAuditRounds: positiveInteger,
   maxGraphGovernanceRounds: positiveInteger,
@@ -133,6 +133,7 @@ export const defaultGraphCapacityProfile = Object.freeze(graphCapacityProfileSch
   maxExpansionDepth: 4,
   maxVisitedNodes: 96,
   maxVisitedLinks: 192,
+  maxNeighborhoodAnchors: 32,
   maxNodeContentTokens: 512,
   contextTokenBudget: 12000,
   recallTopKPerExpression: 20,
@@ -144,15 +145,42 @@ export const defaultGraphCapacityProfile = Object.freeze(graphCapacityProfileSch
 }))
 
 export const defaultTurnExecutionProfile = Object.freeze(turnExecutionProfileSchema.parse({
-  maxTurnModelCalls: 12,
-  maxTurnInputTokens: 64000,
-  maxTurnOutputTokens: 16000,
-  maxTurnWallTimeMs: 120000,
+  maxTurnModelCalls: 63,
+  maxTurnWallTimeMs: 780000,
   maxDraftAuditRounds: 3,
   maxGraphGovernanceRounds: 3,
   maxSettlementReviewRounds: 2,
   maxForegroundAutonomyCandidates: 6,
   foregroundAutonomyContextTokenBudget: 6000,
+}))
+
+export const defaultProjectSettings = Object.freeze(projectSettingsSchema.parse({
+  version: 2,
+  execution: {
+    maxModelCalls: defaultTurnExecutionProfile.maxTurnModelCalls,
+    contextWindowTokens: 1_000_000,
+    contextCompactionThresholdRatio: 0.95,
+    outputTokenLimitMode: "model",
+    maxWallTimeMs: defaultTurnExecutionProfile.maxTurnWallTimeMs,
+    maxRetrievalRounds: 4,
+  },
+  retrieval: {
+    maxRequestsPerRound: 10,
+    maxCandidates: defaultGraphCapacityProfile.recallTopKPerExpression,
+    maxDepth: defaultGraphCapacityProfile.preferredExpansionDepth,
+    maxEvidenceTokens: defaultGraphCapacityProfile.contextTokenBudget,
+  },
+  graph: {
+    maxDirectOutDegree: defaultGraphCapacityProfile.maxDirectOutDegree,
+    maxDirectInDegree: defaultGraphCapacityProfile.maxDirectInDegree,
+    mergeWarningThreshold: defaultGraphCapacityProfile.mergeWarningThreshold,
+    preferredExpansionDepth: defaultGraphCapacityProfile.preferredExpansionDepth,
+    maxExpansionDepth: defaultGraphCapacityProfile.maxExpansionDepth,
+    maxVisitedNodes: defaultGraphCapacityProfile.maxVisitedNodes,
+    maxVisitedLinks: defaultGraphCapacityProfile.maxVisitedLinks,
+    maxNeighborhoodAnchors: defaultGraphCapacityProfile.maxNeighborhoodAnchors,
+    layoutMode: "layered_collision_avoidance",
+  },
 }))
 
 export const defaultWorldEmergenceProfile = Object.freeze(worldEmergenceProfileSchema.parse({

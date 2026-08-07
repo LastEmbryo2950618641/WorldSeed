@@ -278,7 +278,7 @@ DeepSeek API
 DeepSeek 适配器只负责：
 
 - API 认证和请求发送；
-- JSON Mode 参数转换；
+- JSON 文本提取与供应商响应转换；
 - 流式输出和 token 统计；
 - 超时、重试和供应商错误转换。
 

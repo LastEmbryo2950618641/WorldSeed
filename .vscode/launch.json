@@ -1,0 +1,72 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Worldseed: Electron Dev",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "${workspaceFolder}\\apps\\desktop\\node_modules\\.bin\\electron-vite.CMD",
+      "runtimeArgs": [
+        "--inspect=9229",
+        "--remoteDebuggingPort=9230",
+        "--sourcemap"
+      ],
+      "cwd": "${workspaceFolder}\\apps\\desktop",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "autoAttachChildProcesses": true,
+      "skipFiles": [
+        "<node_internals>/**",
+        "${workspaceFolder}/node_modules/**"
+      ],
+      "env": {
+        "WORLDSEED_PROMPT_ROOT": "${workspaceFolder}\\packages\\prompt-contracts",
+        "WORLDSEED_LOG_LEVEL": "debug",
+        "WORLDSEED_LOG_CONSOLE": "true",
+        "WORLDSEED_LOG_FILE_ENABLED": "true",
+        "WORLDSEED_LOG_FILE": "${workspaceFolder}\\.worldseed-data\\logs\\worldseed.log"
+      },
+      "sourceMaps": true,
+      "outFiles": [
+        "${workspaceFolder}/apps/desktop/out/**/*.js",
+        "${workspaceFolder}/apps/backend/dist/**/*.js",
+        "${workspaceFolder}/packages/*/dist/**/*.js"
+      ]
+    },
+    {
+      "name": "Worldseed: Attach Main Process",
+      "type": "node",
+      "request": "attach",
+      "port": 9229,
+      "restart": true,
+      "skipFiles": [
+        "<node_internals>/**",
+        "${workspaceFolder}/node_modules/**"
+      ],
+      "sourceMaps": true,
+      "outFiles": [
+        "${workspaceFolder}/apps/desktop/out/**/*.js",
+        "${workspaceFolder}/apps/backend/dist/**/*.js",
+        "${workspaceFolder}/packages/*/dist/**/*.js"
+      ]
+    },
+    {
+      "name": "Worldseed: Attach Renderer",
+      "type": "chrome",
+      "request": "attach",
+      "port": 9230,
+      "webRoot": "${workspaceFolder}\\apps\\desktop\\src\\renderer",
+      "sourceMaps": true
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Worldseed: Full Debug",
+      "configurations": [
+        "Worldseed: Electron Dev",
+        "Worldseed: Attach Renderer"
+      ],
+      "stopAll": true
+    }
+  ]
+}

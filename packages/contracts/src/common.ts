@@ -40,6 +40,8 @@ export const aiPhaseValues = [
   "settlement_review",
   "frontier_settlement",
   "commit_review",
+  "context_compaction",
+  "context_compaction_review",
 ] as const
 export const aiPhaseSchema = z.enum(aiPhaseValues)
 export type AIPhase = z.infer<typeof aiPhaseSchema>

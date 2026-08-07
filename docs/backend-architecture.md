@@ -2,7 +2,7 @@
 
 ## 1. 目标与边界
 
-本文把 [底层动态图设计](system-design.md) 转换为可实现的后端代码结构。它定义进程边界、模块职责、依赖方向、端口接口、持久化布局、执行管线、并发策略和测试边界，不重新定义世界语义。所有后端实现还必须遵守 [后端编码原则](backend-coding-principles.md)，该文档规定复用边界、业务隔离、依赖方向、契约版本和架构测试要求。V1 的冻结值、Migration、DeepSeek 配置和编码入口见 [V1 编码前冻结基线](v1-freeze.md)。单轮上下文、选择性读取和 DeepSeek KV 缓存复用见 [单轮上下文与 KV 缓存设计](context-and-kv-cache.md)，阶段 JSON 契约见 [AI 阶段契约](ai-phase-contracts.md)。
+本文把 [底层动态图设计](system-design.md) 转换为可实现的后端代码结构。它定义进程边界、模块职责、依赖方向、端口接口、持久化布局、执行管线、并发策略和测试边界，不重新定义世界语义。所有后端实现还必须遵守 [后端编码原则](backend-coding-principles.md)，该文档规定复用边界、业务隔离、依赖方向、契约版本和架构测试要求。V1 的冻结值、Migration、DeepSeek 配置和编码入口见 [V1 编码前冻结基线](v1-freeze.md)。单轮上下文、选择性读取和 DeepSeek KV 缓存复用见 [单轮上下文与 KV 缓存设计](context-and-kv-cache.md)，阶段 JSON 契约见 [AI 阶段契约](ai-phase-contracts.md)，场景、多时间流和动态空间见 [通用时空锚点设计](spacetime-anchor-design.md)。
 
 后端只负责机械能力：
 
@@ -68,7 +68,7 @@ bootstrap ───────> transport + infrastructure + application
 
 - Node.js LTS、TypeScript 严格模式和 pnpm workspace；
 - SQLite WAL、Kysely、`better-sqlite3`；
-- SQLite FTS5 和 `sqlite-vec` 适配器；
+- SQLite FTS5；`sqlite-vec` 只作为独立端口后的可选扩展，V1 首个闭环默认关闭；
 - Zod 校验跨进程 DTO 和 AI 结构化输出；
 - Vitest、Pino；
 - Electron MessagePort 作为 V1 传输层。
@@ -214,7 +214,7 @@ interface GraphRepository {
 }
 ```
 
-`getNeighborhood` 只执行 ID、方向、数量、访问集合和容量限制，不判断哪个邻接具有语义价值。语义选择由 AI 在实际读取集合中完成。
+`getNeighborhood` 只执行 ID、方向、数量、访问集合和容量限制，不判断哪个邻接具有语义价值。语义选择由 AI 在实际读取集合中完成；AI还可以根据已有局部图自主理解和重构查询组织，机械方向和深度不能演变为固定出口规则。
 
 ### 7.3 当前图与修订历史
 
@@ -226,6 +226,14 @@ SQLite 中同时维护：
 - 双向邻接索引：`from_node_id` 和 `to_node_id` 均可快速查询。
 
 归档仍然由 AI 组合普通 committed 节点和连接完成。后端没有 `archive_type` 或领域化归档表；`retired` 只表示未提交或放弃的 pending 作用域，不表示已提交世界中的历史归档。当前设计不物理删除已提交图结构，历史通过修订、原文来源和归档出口继续可追溯。
+
+### 7.4 时空绑定是普通图的机械投影
+
+后端不建立 `WorldClock`、`MapCoordinate`、`PortalType` 或其他世界领域对象。时间参照、空间参照、同步点、通道、比例和不确定性仍是普通节点、连接及其修订。
+
+应用层只保存 AI提交的 `SceneSpacetimeBinding`、`MutationSpacetimeSettlement` 和逐前沿 `FrontierSpacetimeSettlement`。这些记录只包含场景或修改索引、普通图与修订引用、作用域、来源、原因和自审，用于快速恢复场景局部与执行机械门禁，不复制图载荷，也不成为第二套世界事实。
+
+数据库系统时间统一命名为 `created_at`、`updated_at`、`last_processed_at` 或 `next_attempt_at`。这些字段只参与任务排序、调度和诊断，禁止作为世界时间锚点进入模型事实上下文。
 
 ## 8. 原文与章节模块
 
@@ -256,7 +264,7 @@ type DocumentVersion = {
 <internalStore>/<projectId>/documents/<sourceId>.md
 ```
 
-pending 文档只在应用内部存储和任务恢复视图中存在，不进入用户的 `章节正文` 文件树；用户工作目录中的 committed Markdown 不被普通保存覆盖。只有 `commit_review` 批准后，发布器才把该 `sourceId` 投影到 `publishWorkspacePath`。
+pending 文档只在应用内部存储和任务恢复视图中存在，不进入用户的 `章节正文` 文件树；用户工作目录中的 committed Markdown 不被普通保存覆盖。完成结构、图修订、原文结算、检索投影和时空连续性门禁后，发布器把该 `sourceId` 投影到 `publishWorkspacePath`；`commit_review` 只保存 AI 的连续性审查建议，不拥有拒绝提交的权限。
 
 这同时满足：
 
@@ -375,7 +383,6 @@ type ModelExecutionRequest<TOutput> = {
   promptDigest: string
   messages: ModelMessage[]
   outputSchema: Schema<TOutput>
-  responseFormat: "json_object"
   budget: ModelCallBudget
 }
 
@@ -394,7 +401,9 @@ type ModelExecutionResult<TOutput> = {
 }
 ```
 
-`DeepSeekAdapter` 使用 `openai` SDK 的兼容客户端，把 `responseFormat: "json_object"` 转换为 DeepSeek [JSON Output](https://api-docs.deepseek.com/zh-cn/guides/json_mode) 的 `response_format: { type: "json_object" }`。AI 阶段的真实 JSON 仍需通过 Zod `outputSchema` 校验；JSON 合法不代表语义已经被后端批准。
+`DeepSeekAdapter` 使用 `openai` SDK 的兼容客户端发送请求。统一运行配置分别控制 `thinkingModeEnabled`、`reasoningEffort` 与 `jsonModeEnabled`：思考开启时发送 `thinking.enabled` 和 `reasoning_effort: low | high | max`，关闭时发送 `thinking.disabled` 且不发送强度；JSON Mode 默认关闭。模型仍由末尾输出契约要求返回单个 JSON 对象，适配器提取首个完整对象后通过 Zod `outputSchema` 校验；JSON 合法不代表语义已经被后端批准。一次真实同请求对照表明 `high`、`low`、`disabled` 都能返回最终 `content`，因此空 `content` 不能简单归因于某个固定思考强度，必须保留响应通道日志与有限重试。
+
+轮次 deadline 生成的 `AbortSignal` 只能作为 OpenAI SDK 的请求选项传入，不能混入 HTTP JSON body。单请求默认超时为 `300000ms`，且始终受轮次剩余 deadline 的更小值约束；这是为了容纳图治理等复杂阶段，同时避免请求越过整轮预算。模型只返回 `reasoning_content` 而最终 `content` 为空时，适配器将其分类为供应商响应不完整，并以完整的 `user -> assistant -> user` 消息结构进行有限修复，不把空字符串交给 JSON 解析器。
 
 V1 不依赖 Tool Calling。模型需要查询或提出修改时，先返回 Worldseed 自己的结构化 JSON，应用层执行 `request_read` 或暂存 mutation，再把结果放入下一次模型输入。未来接入 Tool Calling 时，只能在 `DeepSeekAdapter` 内转换为相同的 `AIPhaseResult`，不能改变应用层协议。
 
@@ -408,7 +417,7 @@ apps/backend/src/infrastructure/models/deepseek/
 └── deepseek-errors.ts
 ```
 
-第一阶段默认所有 AI 阶段使用 `deepseek-chat`，保持模型变量单一。模型、base URL、超时、最大调用次数和 token 上限都进入项目运行配置与任务预算快照。
+第一阶段默认所有 AI 阶段使用 `deepseek-v4-flash`，保持模型变量单一。模型、base URL、超时、最大调用次数和 token 上限都进入项目运行配置与任务预算快照。应用不设置整轮累计输出截止线；对已知模型传递其供应商允许的单次输出上限，未知模型不硬编码供应商能力。
 
 ### 11.2 Prompt 注册表
 
@@ -424,15 +433,27 @@ interface PromptRegistry {
 
 ### 11.3 结构验证
 
+所有阶段共用 `packages/prompt-contracts` 中唯一的语义 artifact schema。应用层内部使用完整的阶段 envelope，但模型适配器发送的是去除项目、任务、作用域、阶段运行、内部来源和检索请求等技术字段后的模型引用视图：真实 UUID只能被临时 `read-*`、`node-*`、`link-*`别名替代。返回结果先通过模型别名 Schema，再恢复真实引用并进入统一内部 Schema 和阶段校验。模型不接触持久化技术 ID，也不维护第二套 artifact。共享契约校验器只要求已有图引用来自本轮已读 owner、工作区选择来自本轮已读文件、`graph_governance` 中的所有 `local:*` 都在当前治理 artifact 明确声明；规划、草稿和审查阶段不得提前发明局部句柄。该校验器不比较规划与治理的数量，也不根据语义动作强制 AI采用某种图操作。应用层负责一次性将 `graph_governance` 的 `local:*` 映射为 UUID，将数组索引解析到本轮 source unit 或 mutation，并为章节、修订、投影、结算、时空绑定和决定记录生成技术 ID；content、metadata 与时空绑定中精确匹配局部句柄的引用值也使用同一映射递归物化。详见 [模型协议边界设计](model-protocol-boundary.md)。
+
 后端只验证：
 
 - 阶段结果是否符合结构 schema；
 - 引用 ID 是否存在于实际读取集合或本作用域新产物；
 - `request_read`、`revise`、`approve` 等结果是否沿允许的阶段回流；
 - 预算是否超限；
-- 必需产物是否存在。
+- 必需产物是否存在；
+- 场景清单索引是否连续唯一，图治理是否按该索引恰好覆盖一次，AI 声明需要前置或跨参照时相应引用是否非空；
+- 每个图修改索引是否恰好进入一条 `MutationSpacetimeSettlement`，`world_effect` 是否至少引用本轮或已读既有场景；
+- 图治理声明的每个受影响前沿是否恰好结算一次，活跃或推迟前沿是否分别具有最后场景、时间、地点锚点和重访条件；
+- 系统处理时间是否与世界时空引用严格分离。
+
+已有图引用必须出现在本轮实际读取的 node/link 证据中；模型发明的 UUID 或未读取引用直接拒绝。`predecessorRevisionRefs` 中的已读别名解析到该次证据冻结的具体修订，而不是提交时再追随最新 head。该校验只证明引用可见，不判断其世界语义是否合理。
 
 后端不验证 AI 的语义理由是否正确。
+
+一句话就是世界生成的起点。资料不存在或设定需要补全时，AI应依据已读上下文、规则和用户输入直接推演新事物，并用时间、地点、因果和不确定性保持连续；不能把资料缺失直接当作拒绝正文的理由。正文出现的万事万物都必须进入图。草稿阶段允许 AI 创作本轮首次出现的新事物。应用层只拒绝明显的等待或拒绝占位正文，例如“等待读取资料”“尚未开始撰写正文”，避免把空壳内容送入章节和图结算；这不是对世界语义的判断，也不要求新事物先在旧图中存在。
+
+后端也不生成语义兜底：不得从图内容自动派生检索投影，不得为缺少决定记录的修改补写默认理由或自审。检索入口和修改说明属于 AI 图治理产物；代码只物化并校验其引用与索引。
 
 ## 12. 推演执行器
 
@@ -464,10 +485,11 @@ flowchart TD
     H --> I["dependency_audit"]
     I -->|补充读取或修订| D
     I -->|通过| J["内部存储 pending 原文与原文单元"]
-    J --> K["graph_governance"]
-    K --> L["semantic / settlement review"]
+    J --> K["graph_governance：图、投影、原文结算与场景时空绑定"]
+    K --> KA["物化 pending overlay 并执行局部时空/检索门禁"]
+    KA --> L["semantic / settlement review"]
     L -->|修订| K
-    L -->|通过| M["frontier_settlement"]
+    L -->|通过| M["frontier_settlement：逐前沿结算最后时空"]
     M --> N["commit_review"]
     N -->|批准| O["提升作用域并发布 committed 章节"]
     N -->|继续修订| K
@@ -575,6 +597,8 @@ graph_revisions
 document_versions
 source_units
 settlement_records
+scene_spacetime_bindings
+graph_revision_spacetime
 
 retrieval_projections
 retrieval_exact_keys
@@ -586,6 +610,12 @@ operation_events
 ```
 
 表名表示基础设施职责，不表示世界领域类型。
+
+`scene_spacetime_bindings` 只保存 `scene_index`、`scene_anchor_id`、直接覆盖的原文单元索引、时间与空间参照引用、时间与地点锚点引用、本轮前置场景索引、已读旧场景引用、过渡路径引用、跨参照对应引用、来源、原因、自审、作用域和可见性。它不保存第二份时间、地图或场景事实；`(scope_id, scene_index)` 用于和审计场景清单执行机械全集比对。正式正文记录 `source_id` 和非空原文单元集合，无正文后台演化允许两者为空，但必须保留任务与作用域来源。
+
+`graph_revision_spacetime` 是批准后的 `MutationSpacetimeSettlement` 投影。应用层把临时 `mutationIndexes` 物化为图修订 ID，再保存其生效场景绑定、已读既有场景、当前入口、前置修订声明与具体 revision ID、历史返回引用。模型使用的 `predecessorRevisionReadRefs` 必须解析到读取证据冻结的具体修订，不能在提交时追随最新 head。该表不保存世界语义载荷，也不能脱离普通图独立回答世界问题。结构化验证探针保存在 `phase_runs.result_json`，由提交门禁按场景和修改结算全集检查，不复制成世界事实表。
+
+`frontier_refs` 为每个前沿分别保存 `last_scene_anchor_refs`、`last_time_anchor_refs`、`last_location_anchor_refs` 和 `correspondence_refs`。原 `last_effective_time` 不得继续表示世界时间，应拆为世界图引用和纯系统调度字段 `last_processed_at`。不同前沿没有已读对应结构时，调度器不能仅凭系统时间比较其世界进度。
 
 ### 16.2 内部目录
 
@@ -668,6 +698,12 @@ interface BackendFacade {
 
 修改图的内部命令不直接暴露给 UI。只有推演执行器和经过 Prompt Contract 的图治理用例可以调用 `stageMutations`。
 
+### 18.1 世界图分批查询
+
+`graph.neighborhood` 的入口数量是局部图读取容量，不是节点出度。客户端可以提交本轮完整的锚点列表和 `anchorOffset`；后端按照项目的 `graph.maxNeighborhoodAnchors` 选择当前窗口，单批最多处理 `64` 个入口，并在结果中返回 `anchorWindow`：请求总数、当前偏移、已处理数、剩余数和可选的 `nextOffset`。
+
+入口数量超过单批容量属于正常的可继续状态，不返回 `validation_error`，也不改变正文任务的 `completed` 状态。UI 只有在用户确认后才使用 `nextOffset` 读取下一批，并按技术 ID 合并去重。图展示查询、工作区刷新或正文打开失败均属于提交后的只读投影失败，不能回写任务失败、撤销已提交章节或丢弃已提交图。
+
 ## 19. 事件与进度
 
 后端通过统一事件流向 UI 推送：
@@ -707,6 +743,8 @@ type BackendEvent =
 3. 不将 pending 投影加入普通检索；
 4. 为可恢复错误提供 `resume`；
 5. 用户放弃后转为 `retired`，不删除不可变历史。
+
+机械容量达到单批上限但存在 `nextOffset` 时不进入上述失败流程。后端返回可继续结果，前端显示已提交状态和剩余工作，由用户选择继续读取或停止展示；“停止展示”不等于取消、回滚或退休正文任务。
 
 ## 21. 配置
 
@@ -785,8 +823,9 @@ KV 缓存命中率使用 `cacheHitInputTokens / totalInputTokens` 计算；当�
 1. 实现 Prompt Registry 和模型端口；
 2. 实现阶段状态机、实际读取集合和预算；
 3. 实现 pending overlay、检索隔离和任务恢复；
-4. 实现正式正文与查询两条执行管线；
-5. 实现章节内部暂存与 committed 发布。
+4. 实现场景时空绑定、逐前沿时空结算和系统时间隔离；
+5. 实现正式正文与查询两条执行管线；
+6. 实现章节内部暂存与 committed 发布。
 
 ### 阶段三：自治与 UI 接入
 
@@ -808,7 +847,10 @@ KV 缓存命中率使用 `cacheHitInputTokens / totalInputTokens` 计算；当�
 9. 前台正文、后台演化、查询和章节修订复用同一核心端口；
 10. 项目内写任务串行，跨项目任务相互隔离；
 11. 失败任务保留可恢复状态，不污染 committed 世界；
-12. UI 只通过 Facade 和事件流访问后端，不能直接写图数据库或内部对象存储。
+12. 每个正式场景都能从绑定直接恢复局部时间、地点、前置场景和过渡路径；
+13. 多时间流和动态空间只在存在已读对应结构时比较，未知对应不会被机械换算成精确结果；
+14. 每个活跃或推迟前沿分别保存最后场景、时间和地点锚点，系统调度时间不参与世界推理；
+15. UI 只通过 Facade 和事件流访问后端，不能直接写图数据库或内部对象存储。
 
 ## 26. 最终定义
 

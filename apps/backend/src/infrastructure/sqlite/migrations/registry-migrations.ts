@@ -17,4 +17,22 @@ export const registryMigrations = Object.freeze([
       created_at INTEGER NOT NULL
     )`,
   ]),
+  defineSqlMigration<RegistryDatabase>(2, "r002_model_profiles", [
+    `CREATE TABLE model_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      base_url TEXT NOT NULL,
+      model TEXT NOT NULL,
+      credential_ref TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 0,
+      position INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
+  ]),
+  defineSqlMigration<RegistryDatabase>(3, "r003_model_protocol_settings", [
+    `ALTER TABLE model_profiles ADD COLUMN thinking_mode_enabled INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE model_profiles ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'high'`,
+    `ALTER TABLE model_profiles ADD COLUMN json_mode_enabled INTEGER NOT NULL DEFAULT 0`,
+  ]),
 ])

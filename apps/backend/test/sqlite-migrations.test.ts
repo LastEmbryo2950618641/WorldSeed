@@ -34,16 +34,16 @@ describe("SQLite migrations", () => {
     `.execute(first)
     const migrations = await first.selectFrom("schema_migrations").selectAll().execute()
 
-    expect(tables.rows.map((row) => row.name)).toEqual(["registered_projects", "schema_migrations"])
-    expect(migrations).toHaveLength(1)
+    expect(tables.rows.map((row) => row.name)).toEqual(["model_profiles", "registered_projects", "schema_migrations"])
+    expect(migrations).toHaveLength(3)
     await first.destroy()
 
     const reopened = await openRegistryDatabase(path)
-    expect(await reopened.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(1)
+    expect(await reopened.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(3)
     await reopened.destroy()
   })
 
-  it("applies project migrations 001 through 009 with required SQLite pragmas", async () => {
+  it("applies project migrations 001 through 012 with required SQLite pragmas", async () => {
     const path = temporaryDatabasePath("project.sqlite")
     const database = await openProjectDatabase(path)
     const migrations = await database.selectFrom("schema_migrations").selectAll().orderBy("version").execute()
@@ -54,11 +54,13 @@ describe("SQLite migrations", () => {
     const journalMode = await sql<{ journal_mode: string }>`PRAGMA journal_mode`.execute(database)
     const foreignKeys = await sql<{ foreign_keys: number }>`PRAGMA foreign_keys`.execute(database)
     const busyTimeout = await sql<{ timeout: number }>`PRAGMA busy_timeout`.execute(database)
+    const frontierColumns = await sql<{ name: string }>`PRAGMA table_info(frontier_refs)`.execute(database)
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
     expect(tableNames).toEqual(expect.objectContaining(new Set([
       "projects",
       "project_manifests",
+      "project_settings",
       "workspace_operations",
       "artifact_scopes",
       "tasks",
@@ -75,16 +77,35 @@ describe("SQLite migrations", () => {
       "document_versions",
       "source_units",
       "settlement_records",
+      "scene_spacetime_bindings",
+      "graph_revision_spacetime",
       "retrieval_projections",
       "retrieval_exact_keys",
       "retrieval_fts",
       "rule_snapshots",
       "ai_decision_records",
       "frontier_refs",
+      "workspace_catalog_snapshots",
+      "task_workspace_catalog_snapshots",
+      "evidence_objects",
     ])))
     expect(journalMode.rows[0]?.journal_mode).toBe("wal")
     expect(foreignKeys.rows[0]?.foreign_keys).toBe(1)
     expect(busyTimeout.rows[0]?.timeout).toBe(5000)
+    expect(frontierColumns.rows.map((column) => column.name)).toEqual([
+      "id",
+      "project_id",
+      "scope_id",
+      "frontier_anchor_ref",
+      "disposition",
+      "last_scene_anchor_refs_json",
+      "last_time_anchor_refs_json",
+      "last_location_anchor_refs_json",
+      "correspondence_refs_json",
+      "last_processed_at",
+      "reason",
+      "revisit_condition",
+    ])
 
     await sql`INSERT INTO retrieval_fts(projection_id, project_id, scope_id, visibility, semantic_text)
       VALUES ('projection', 'project', 'scope', 'committed', 'old bridge hidden key')`.execute(database)

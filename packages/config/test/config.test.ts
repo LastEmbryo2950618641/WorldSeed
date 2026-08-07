@@ -5,12 +5,14 @@ import {
   deepSeekRuntimeConfigSchema,
   defaultDeepSeekRuntimeConfig,
   defaultGraphCapacityProfile,
+  defaultProjectSettings,
   defaultTurnExecutionProfile,
   defaultWorldEvolutionProfile,
   graphCapacityProfileSchema,
+  runtimeDiagnosticsConfigFromEnvironment,
 } from "../src/index.js"
 
-describe("frozen V1 configuration", () => {
+describe("current configuration", () => {
   it("keeps graph warning and expansion limits internally consistent", () => {
     expect(defaultGraphCapacityProfile.maxDirectOutDegree).toBe(12)
     expect(defaultGraphCapacityProfile.maxDirectInDegree).toBe(12)
@@ -24,6 +26,20 @@ describe("frozen V1 configuration", () => {
       ...defaultGraphCapacityProfile,
       preferredExpansionDepth: 5,
     }).success).toBe(false)
+    expect(defaultProjectSettings.graph).toMatchObject({
+      maxDirectOutDegree: 12,
+      maxDirectInDegree: 12,
+      mergeWarningThreshold: 10,
+      layoutMode: "layered_collision_avoidance",
+    })
+    expect(defaultProjectSettings.execution).toMatchObject({
+      maxModelCalls: 63,
+      contextWindowTokens: 1_000_000,
+      contextCompactionThresholdRatio: 0.95,
+      outputTokenLimitMode: "model",
+      maxWallTimeMs: 780000,
+      maxRetrievalRounds: 4,
+    })
   })
 
   it("matches the documented autonomy scaling at the default value", () => {
@@ -62,11 +78,39 @@ describe("frozen V1 configuration", () => {
     })
   })
 
-  it("accepts the frozen DeepSeek JSON Mode configuration", () => {
+  it("accepts the centralized DeepSeek protocol configuration", () => {
     expect(deepSeekRuntimeConfigSchema.parse(defaultDeepSeekRuntimeConfig)).toEqual(defaultDeepSeekRuntimeConfig)
+    expect(defaultDeepSeekRuntimeConfig.contextWindowTokens).toBe(1_000_000)
+    expect(defaultDeepSeekRuntimeConfig.jsonModeEnabled).toBe(false)
+    expect(defaultDeepSeekRuntimeConfig.thinkingModeEnabled).toBe(true)
+    expect(defaultDeepSeekRuntimeConfig.reasoningEffort).toBe("high")
+    expect(defaultDeepSeekRuntimeConfig.timeoutMs).toBe(300_000)
+    expect(deepSeekRuntimeConfigSchema.safeParse({
+      ...defaultDeepSeekRuntimeConfig,
+      model: "deepseek-v4-flash",
+    }).success).toBe(true)
     expect(deepSeekRuntimeConfigSchema.safeParse({
       ...defaultDeepSeekRuntimeConfig,
       baseUrl: "http://api.example.com",
     }).success).toBe(false)
+  })
+
+  it("centralizes development diagnostics at debug level", () => {
+    expect(runtimeDiagnosticsConfigFromEnvironment({}, "C:\\logs\\worldseed.log", true)).toEqual({
+      level: "debug",
+      consoleEnabled: true,
+      fileEnabled: true,
+      filePath: "C:\\logs\\worldseed.log",
+    })
+    expect(runtimeDiagnosticsConfigFromEnvironment({
+      WORLDSEED_LOG_LEVEL: "warn",
+      WORLDSEED_LOG_CONSOLE: "false",
+      WORLDSEED_LOG_FILE_ENABLED: "false",
+    }, "C:\\logs\\worldseed.log", true)).toEqual({
+      level: "warn",
+      consoleEnabled: false,
+      fileEnabled: false,
+      filePath: "C:\\logs\\worldseed.log",
+    })
   })
 })

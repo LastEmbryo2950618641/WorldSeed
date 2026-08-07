@@ -10,7 +10,7 @@ describe("DeepSeek environment configuration", () => {
     expect(deepSeekRuntimeConfigFromEnvironment({})).toBeUndefined()
   })
 
-  it("loads model, proxy, timeout, retry, and repair settings", () => {
+  it("loads model, thinking, JSON, proxy, timeout, retry, and repair settings", () => {
     expect(deepSeekRuntimeConfigFromEnvironment({
       DEEPSEEK_API_KEY: "test-key",
       WORLDSEED_DEEPSEEK_BASE_URL: "http://localhost:8787/v1",
@@ -19,6 +19,9 @@ describe("DeepSeek environment configuration", () => {
       WORLDSEED_DEEPSEEK_TIMEOUT_MS: "30000",
       WORLDSEED_DEEPSEEK_MAX_ATTEMPTS: "1",
       WORLDSEED_DEEPSEEK_MAX_SCHEMA_REPAIR_ATTEMPTS: "0",
+      WORLDSEED_DEEPSEEK_JSON_MODE_ENABLED: "true",
+      WORLDSEED_DEEPSEEK_THINKING_MODE_ENABLED: "false",
+      WORLDSEED_DEEPSEEK_REASONING_EFFORT: "max",
     })).toEqual({
       ...defaultDeepSeekRuntimeConfig,
       baseUrl: "http://localhost:8787/v1",
@@ -27,6 +30,9 @@ describe("DeepSeek environment configuration", () => {
       timeoutMs: 30000,
       maxAttempts: 1,
       maxSchemaRepairAttempts: 0,
+      jsonModeEnabled: true,
+      thinkingModeEnabled: false,
+      reasoningEffort: "max",
     })
   })
 
@@ -35,5 +41,19 @@ describe("DeepSeek environment configuration", () => {
       DEEPSEEK_API_KEY: "test-key",
       WORLDSEED_DEEPSEEK_TIMEOUT_MS: "slow",
     })).toThrow("must be an integer")
+  })
+
+  it("rejects malformed JSON Mode settings", () => {
+    expect(() => deepSeekRuntimeConfigFromEnvironment({
+      DEEPSEEK_API_KEY: "test-key",
+      WORLDSEED_DEEPSEEK_JSON_MODE_ENABLED: "enabled",
+    })).toThrow("must be true or false")
+  })
+
+  it("rejects unsupported reasoning effort settings", () => {
+    expect(() => deepSeekRuntimeConfigFromEnvironment({
+      DEEPSEEK_API_KEY: "test-key",
+      WORLDSEED_DEEPSEEK_REASONING_EFFORT: "medium",
+    })).toThrow()
   })
 })

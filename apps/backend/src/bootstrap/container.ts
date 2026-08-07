@@ -4,15 +4,23 @@ import { randomUUID } from "node:crypto"
 import {
   ProjectLifecycleService,
   type AIModelPort,
+  type ModelCatalogPort,
+  type ModelProfileStorePort,
   type CreatedProject,
   type CreateProjectInput,
 } from "../application/index.js"
 import type { InternalProjectStore, ProjectRepositoryFactory, WorkspaceDefaultDocuments, WorkspacePort } from "../application/workspace/index.js"
 import { NodeInternalStoreAdapter, NodeWorkspaceAdapter } from "../infrastructure/filesystem/index.js"
-import { createModelFromEnvironment } from "../infrastructure/models/index.js"
+import {
+  createModelFromEnvironment,
+  createModelFromSelection,
+  DeepSeekModelCatalogAdapter,
+  type DeepSeekModelSelection,
+} from "../infrastructure/models/index.js"
 import { NodePromptResourceAdapter } from "../infrastructure/prompts/index.js"
 import {
   SqliteProjectRegistryRepository,
+  SqliteModelProfileStore,
   SqliteProjectRepositoryFactory,
   openRegistryDatabase,
 } from "../infrastructure/sqlite/index.js"
@@ -24,6 +32,8 @@ export type BackendContainerOptions = Readonly<{
   applicationDataRoot: string
   promptPackageRoot: string
   model?: AIModelPort
+  modelCatalog?: ModelCatalogPort
+  modelProfiles?: ModelProfileStorePort
   workspaceDefaults?: WorkspaceDefaultDocuments
   createId?: () => string
   now?: () => number
@@ -33,6 +43,8 @@ export class BackendContainer {
   public readonly workspace = new NodeWorkspaceAdapter()
   public readonly internalStore: NodeInternalStoreAdapter
   public readonly model: AIModelPort
+  public readonly modelCatalog: ModelCatalogPort
+  public readonly modelProfiles: ModelProfileStorePort
   public readonly createId: () => string
   public readonly now: () => number
   private readonly lifecycle: ProjectLifecycleService
@@ -51,8 +63,10 @@ export class BackendContainer {
     this.model = options.model ?? createModelFromEnvironment(
       options.promptPackageRoot,
     )
+    this.modelCatalog = options.modelCatalog ?? new DeepSeekModelCatalogAdapter()
     this.createId = options.createId ?? randomUUID
     this.now = options.now ?? Date.now
+    this.modelProfiles = options.modelProfiles ?? new SqliteModelProfileStore(this.registryDatabase, this.now)
     this.promptPackageRoot = resolve(options.promptPackageRoot)
     this.workspaceDefaults = options.workspaceDefaults
     this.projectRepositoryFactory = new SqliteProjectRepositoryFactory()
@@ -74,6 +88,8 @@ export class BackendContainer {
     const baseRules = await new NodePromptResourceAdapter(this.promptPackageRoot).loadBaseRules()
     const defaults = this.workspaceDefaults ?? {
       baseRules: baseRules.text,
+      settingsReadme: "# 设定集索引\n\n请在这里说明设定文件的内容、路径与适用条件，供 AI 按需选择读取。\n",
+      referencesReadme: "# 参考文件索引\n\n请在这里说明参考资料的内容、路径与使用条件，供 AI 按需选择读取。\n",
       descriptionRules: "# 默认描写规则\n\n由用户在表现输出目录中继续定义。\n",
       proseStyleRules: "# 默认笔风规则\n\n由用户在表现输出目录中继续定义。\n",
     }
@@ -112,6 +128,10 @@ export class BackendContainer {
 
   public getCurrentRuntime(): ProjectRuntime | undefined {
     return this.currentRuntime
+  }
+
+  public createModelFromSelection(selection: DeepSeekModelSelection): AIModelPort {
+    return createModelFromSelection(this.promptPackageRoot, selection)
   }
 
   public async close(): Promise<void> {

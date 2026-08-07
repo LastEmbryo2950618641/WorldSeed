@@ -2,6 +2,9 @@ import type {
   AIPhase,
   PhaseRequestEnvelope,
   PhaseResultEnvelope,
+  ProjectSettings,
+  ReadRequest,
+  WorkspaceCatalogSnapshot,
 } from "@worldseed/contracts"
 
 export type PhaseModelUsage = Readonly<{
@@ -13,6 +16,7 @@ export type PhaseModelUsage = Readonly<{
   cacheMissInputTokens?: number
   provider?: string
   model?: string
+  reasoningContent?: string
 }>
 
 export type PhaseModelExecution = Readonly<{
@@ -24,6 +28,7 @@ export type AIModelInfo = Readonly<{
   provider: string
   model: string
   available: boolean
+  contextWindowTokens: number
   detail?: string
 }>
 
@@ -47,10 +52,19 @@ export interface PromptResourcePort {
 export type TurnPhaseInput = Readonly<{
   userInput: string
   chapterSequence: number
+  presentation?: Readonly<{
+    descriptionRulePath?: string | undefined
+    proseStyleRulePath?: string | undefined
+    minimumWordCount: number
+    maximumWordCount: number
+  }>
   sourceId?: string
   sourceUnitIds: readonly string[]
   phaseRunIds: readonly string[]
   readEvidence: readonly TurnReadEvidence[]
+  retrievalGaps: readonly TurnRetrievalGap[]
+  workspaceCatalog?: WorkspaceCatalogSnapshot
+  projectSettings?: ProjectSettings
   artifacts: Partial<Record<AIPhase, unknown>>
 }>
 
@@ -59,8 +73,17 @@ export type TurnReadEvidence = Readonly<{
   visibility: "committed" | "pending"
   ownerKind: string
   ownerId: string
+  revisionId?: string
   exactKeys: readonly string[]
   semanticText: string
   sourceRefs: readonly unknown[]
   digest: string
+}>
+
+export type TurnRetrievalGap = Readonly<{
+  typeId: "system:retrieval-gap"
+  requestId: string
+  expectedEvidence: string
+  reason: string
+  query: ReadRequest["query"]
 }>

@@ -86,25 +86,14 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
     expression: string,
     limit: number,
   ): Promise<readonly RetrievalProjection[]> {
-    if (expression.trim().length === 0 || limit <= 0) {
+    const normalizedExpression = expression.trim()
+    if (normalizedExpression.length === 0 || limit <= 0) {
       return []
     }
-    const matches = scope.pendingScopeId === undefined
-      ? await sql<{ projection_id: string }>`
-          SELECT projection_id FROM retrieval_fts
-          WHERE retrieval_fts MATCH ${expression}
-            AND project_id = ${scope.projectId}
-            AND visibility = 'committed'
-          LIMIT ${limit}
-        `.execute(this.database)
-      : await sql<{ projection_id: string }>`
-          SELECT projection_id FROM retrieval_fts
-          WHERE retrieval_fts MATCH ${expression}
-            AND project_id = ${scope.projectId}
-            AND (visibility = 'committed' OR (visibility = 'pending' AND scope_id = ${scope.pendingScopeId}))
-          LIMIT ${limit}
-        `.execute(this.database)
-    const projectionIds = matches.rows.map((row) => row.projection_id)
+    const matches = codePointLength(normalizedExpression) <= 2
+      ? await this.searchShortText(scope, normalizedExpression, limit)
+      : await this.searchFts(scope, normalizedExpression, limit)
+    const projectionIds = matches.map((row) => row.projection_id)
     if (projectionIds.length === 0) {
       return []
     }
@@ -117,6 +106,77 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
       return projection === undefined ? [] : [projection]
     })
   }
+
+  private async searchFts(
+    scope: RetrievalSearchScope,
+    expression: string,
+    limit: number,
+  ): Promise<readonly { projection_id: string }[]> {
+    const semanticQuery = buildSemanticFtsQuery(expression)
+    if (semanticQuery.length === 0) return []
+    const matches = scope.pendingScopeId === undefined
+      ? await sql<{ projection_id: string }>`
+          SELECT projection_id FROM retrieval_fts
+          WHERE retrieval_fts MATCH ${semanticQuery}
+            AND project_id = ${scope.projectId}
+            AND visibility = 'committed'
+          ORDER BY bm25(retrieval_fts)
+          LIMIT ${limit}
+        `.execute(this.database)
+      : await sql<{ projection_id: string }>`
+          SELECT projection_id FROM retrieval_fts
+          WHERE retrieval_fts MATCH ${semanticQuery}
+            AND project_id = ${scope.projectId}
+            AND (visibility = 'committed' OR (visibility = 'pending' AND scope_id = ${scope.pendingScopeId}))
+          ORDER BY bm25(retrieval_fts)
+          LIMIT ${limit}
+        `.execute(this.database)
+    return matches.rows
+  }
+
+  private async searchShortText(
+    scope: RetrievalSearchScope,
+    expression: string,
+    limit: number,
+  ): Promise<readonly { projection_id: string }[]> {
+    const query = this.database.selectFrom("retrieval_projections")
+      .select("id as projection_id")
+      .where("project_id", "=", scope.projectId)
+      .where(sql<boolean>`instr(semantic_text, ${expression}) > 0`)
+    const visibleQuery = scope.pendingScopeId === undefined
+      ? query.where("visibility", "=", "committed")
+      : query.where((expressions) => expressions.or([
+          expressions("visibility", "=", "committed"),
+          expressions.and([
+            expressions("visibility", "=", "pending"),
+            expressions("scope_id", "=", scope.pendingScopeId as string),
+          ]),
+        ]))
+    return visibleQuery.limit(limit).execute()
+  }
+}
+
+function codePointLength(value: string): number {
+  return Array.from(value).length
+}
+
+function buildSemanticFtsQuery(expression: string): string {
+  const normalized = expression.normalize("NFKC").trim()
+  const phrases = new Set<string>([normalized])
+  for (const term of normalized.split(/[^\p{L}\p{N}_-]+/u).filter(Boolean)) {
+    const characters = Array.from(term)
+    if (characters.length <= 8) {
+      phrases.add(term)
+      continue
+    }
+    for (let index = 0; index <= characters.length - 3 && phrases.size < 18; index += 1) {
+      phrases.add(characters.slice(index, index + 3).join(""))
+    }
+  }
+  return [...phrases]
+    .filter((phrase) => codePointLength(phrase) >= 3)
+    .map((phrase) => `"${phrase.replaceAll('"', '""')}"`)
+    .join(" OR ")
 }
 
 async function assertPendingScope(

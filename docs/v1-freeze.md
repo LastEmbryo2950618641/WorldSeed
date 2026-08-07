@@ -11,7 +11,7 @@
 5. 图、推演、检索和上下文默认参数；
 6. 基础规则与阶段 Prompt 资源。
 
-本文不重新定义世界语义。世界节点、连接、信息、历史、状态和局部重构仍遵守 [底层动态图设计](system-design.md)；阶段详细产物仍遵守 [AI 阶段契约](ai-phase-contracts.md)。若实现文档与本文冲突，以本文的 V1 冻结值为准，并必须同时修订相关文档，不能在代码中隐藏另一套默认值。
+本文不重新定义世界语义。世界节点、连接、信息、历史、状态和局部重构仍遵守 [底层动态图设计](system-design.md)；多时间流、动态空间和场景锚点遵守 [通用时空锚点设计](spacetime-anchor-design.md)；阶段详细产物仍遵守 [AI 阶段契约](ai-phase-contracts.md)。若实现文档与本文冲突，以本文的 V1 冻结值为准，并必须同时修订相关文档，不能在代码中隐藏另一套默认值。
 
 ## 2. V1 最小闭环
 
@@ -44,7 +44,7 @@ Fake AI 必须先于真实 DeepSeek 接入，用于验证应用层、数据库�
 - 小说原文、章节版本、原文单元和图结算映射；
 - 精确键、FTS5 和双向邻接检索；
 - 单轮 `TurnContext`、选择性读取、上下文压缩和 KV 用量记录；
-- DeepSeek JSON Mode 适配器；
+- DeepSeek 普通文本 JSON 契约适配器；
 - 阶段状态、任务恢复、错误和进度事件；
 - committed 章节发布以及发布失败后的可恢复操作。
 
@@ -165,6 +165,8 @@ type PhaseRequestEnvelope = {
 
 阶段结果必须通过对应 Zod Schema；`request_read` 不增加事实权限，只有检索真实返回后才能追加到 `TurnContext`。修复 JSON 结构最多两次，超过后任务进入 `model_failure` 并保留 pending 状态。
 
+模型引用只允许本次请求映射出的 `read-*`、`node-*`、`link-*` 和当前 artifact声明的 `local:*`。实现不得提供 `owner-*`、`id-*`等兜底别名，也不得把出现规划中的数量或动作解释为图治理的代码级上限；图的创建、复用、编辑、重构和归档方案由 AI自审阶段决定。
+
 Zod Schema 的唯一来源为 `packages/contracts` 和 `packages/prompt-contracts`，禁止在 Renderer、应用用例或 DeepSeek 适配器中重复声明。
 
 ## 4. SQLite Schema 与迁移冻结
@@ -211,12 +213,16 @@ Zod Schema 的唯一来源为 `packages/contracts` 和 `packages/prompt-contract
 | `document_versions` | `id`, `project_id`, `scope_id`, `source_id`, `chapter_id`, `visibility`, `content_ref`, `heading`, `publish_path`, `digest`, `predecessor_source_id`, `created_at` | `(project_id, source_id)` 唯一，`(project_id, chapter_id, visibility)` |
 | `source_units` | `id`, `project_id`, `source_id`, `sequence_no`, `content_ref`, `digest`, `settlement_status`, `created_at` | `(source_id, sequence_no)` 唯一 |
 | `settlement_records` | `id`, `project_id`, `scope_id`, `source_unit_id`, `graph_refs_json`, `reason`, `status`, `digest`, `created_at` | `(scope_id, source_unit_id)` |
+| `scene_spacetime_bindings` | `id`, `project_id`, `scope_id`, `source_id`, `scene_index`, `scene_anchor_id`, `source_unit_indexes_json`, `temporal_reference_refs_json`, `time_anchor_refs_json`, `spatial_reference_refs_json`, `location_anchor_refs_json`, `predecessor_scene_indexes_json`, `predecessor_scene_refs_json`, `transition_path_refs_json`, `correspondence_refs_json`, `reason`, `self_review`, `visibility`, `digest`, `created_at` | `(scope_id, scene_index)` 唯一，`(scope_id, scene_anchor_id)`，`(project_id, visibility)` |
+| `graph_revision_spacetime` | `id`, `project_id`, `scope_id`, `graph_revision_id`, `effect_disposition`, `effective_scene_binding_ids_json`, `effective_existing_scene_refs_json`, `current_entry_refs_json`, `predecessor_revision_required`, `predecessor_revision_ids_json`, `historical_return_refs_json`, `reason`, `self_review`, `visibility`, `digest`, `created_at` | `(scope_id, graph_revision_id)` 唯一，`(project_id, visibility)` |
 | `retrieval_projections` | `id`, `project_id`, `scope_id`, `owner_kind`, `owner_id`, `owner_revision_id`, `visibility`, `exact_keys_json`, `semantic_text`, `source_refs_json`, `digest` | `(project_id, scope_id, owner_kind, owner_id, owner_revision_id, visibility)` 唯一 |
 | `retrieval_exact_keys` | `project_id`, `projection_id`, `exact_key`, `owner_id` | `(project_id, exact_key)` |
 | `retrieval_fts` | `projection_id`, `project_id`, `scope_id`, `visibility`, `semantic_text` | SQLite FTS5，按项目、scope 和可见性过滤 |
-| `frontier_refs` | `id`, `project_id`, `scope_id`, `anchor_id`, `last_effective_time`, `deferral_count`, `next_attempt_at`, `status`, `payload_json` | `(project_id, status, next_attempt_at)` |
+| `frontier_refs` | `id`, `project_id`, `scope_id`, `frontier_anchor_ref`, `disposition`, `last_scene_anchor_refs_json`, `last_time_anchor_refs_json`, `last_location_anchor_refs_json`, `correspondence_refs_json`, `last_processed_at`, `reason`, `revisit_condition` | `(project_id, disposition, last_processed_at)` |
 | `kv_usage` | `id`, `project_id`, `task_id`, `turn_id`, `phase_run_id`, `total_input_tokens`, `cache_hit_input_tokens`, `cache_miss_input_tokens`, `output_tokens`, `latency_ms`, `provider`, `model`, `created_at` | `(task_id, phase_run_id)` 唯一 |
 | `operation_events` | `id`, `project_id`, `task_id`, `sequence_no`, `event_type`, `payload_json`, `created_at` | `(task_id, sequence_no)` 唯一 |
+
+`scene_spacetime_bindings.source_id` 仅对无正文后台演化允许为空；此时任务和作用域来源仍必填。`frontier_refs.revisit_condition` 仅对 `archived` 允许为空，`active` 与 `deferred` 必须非空。
 
 `scope_key` 是非空机械键：committed 当前 head 固定为 `committed`，pending head 使用具体 `scope_id`。提升作用域时更新 committed head 指针并保留原 `graph_revisions`；更新或删除物化 head 指针不等于删除世界历史。
 
@@ -234,6 +240,8 @@ project 001 schema_migrations / projects / project_manifests / workspace_operati
 005 document_versions / source_units / settlement_records
 006 retrieval_projections / retrieval_exact_keys / retrieval_fts
 007 rule_snapshots / ai_decision_records / frontier_refs
+008-012 上下文快照、图修订审计、检索、证据和项目设置
+013 scene_spacetime_bindings / graph_revision_spacetime / frontier spacetime protocol
 ```
 
 迁移记录进入 SQLite `schema_migrations`。启动时若数据库版本高于当前程序，拒绝打开；若低于当前程序，只执行已登记的向前迁移，不自动重建或覆盖用户数据。向量表属于后续迁移，V1 首个闭环不依赖它。
@@ -249,7 +257,10 @@ DEEPSEEK_API_KEY                 # 仅开发环境回退读取
 WORLDSEED_DEEPSEEK_BASE_URL      # 默认 https://api.deepseek.com
 WORLDSEED_DEEPSEEK_MODEL         # 默认 deepseek-chat
 WORLDSEED_DEEPSEEK_PROXY_URL     # 可选 HTTP/HTTPS 代理
-WORLDSEED_DEEPSEEK_TIMEOUT_MS    # 默认 120000
+WORLDSEED_DEEPSEEK_TIMEOUT_MS    # 默认 300000
+WORLDSEED_DEEPSEEK_JSON_MODE_ENABLED      # 默认 false
+WORLDSEED_DEEPSEEK_THINKING_MODE_ENABLED  # 默认 true
+WORLDSEED_DEEPSEEK_REASONING_EFFORT       # low | high | max，默认 high
 ```
 
 代理密码不进入普通配置 JSON；通过 `safeStorage` 保存的 secret reference 读取。没有代理配置时使用系统网络。代理、模型和超时快照进入任务，不允许任务中途静默变化。
@@ -268,20 +279,24 @@ type DeepSeekRuntimeConfig = {
   timeoutMs: number
   maxAttempts: number
   maxSchemaRepairAttempts: number
-  responseFormat: "json_object"
+  jsonModeEnabled: boolean
+  thinkingModeEnabled: boolean
+  reasoningEffort: "low" | "high" | "max"
 }
 
 const defaultDeepSeekRuntimeConfig = {
   baseUrl: "https://api.deepseek.com",
   model: "deepseek-chat",
-  timeoutMs: 120000,
+  timeoutMs: 300000,
   maxAttempts: 2,
   maxSchemaRepairAttempts: 2,
-  responseFormat: "json_object",
+  jsonModeEnabled: false,
+  thinkingModeEnabled: true,
+  reasoningEffort: "high",
 }
 ```
 
-调用使用 OpenAI 兼容 `chat/completions` 接口和 `response_format: { type: "json_object" }`。V1 不使用 Tool Calling；模型需要读取或修改时返回 Worldseed JSON，应用层执行读取或暂存提案，再将实际结果追加到同一 `TurnContext`。
+调用使用 OpenAI 兼容 `chat/completions` 接口。`thinkingModeEnabled` 决定是否发送 DeepSeek `thinking.enabled/disabled`；开启时同时发送 `reasoning_effort`，强度只能是 `low`、`high` 或 `max`。`jsonModeEnabled` 默认 `false`；关闭时不发送 `response_format`，开启时附加 `response_format: { type: "json_object" }`。三项设置均随模型配置持久化并在每轮开始时冻结。模型按末尾契约返回 Worldseed JSON 文本，适配器提取第一个完整 JSON 对象并执行 Schema 校验。V1 不使用 Tool Calling；模型需要读取或修改时返回 Worldseed JSON，应用层执行读取或暂存提案，再将实际结果追加到同一 `TurnContext`。发送给模型的请求移除不需要的后端技术字段，并使用本次请求专属的临时引用别名；返回结果先校验别名契约，再恢复真实技术 ID。模型不生成 UUID，适配器不执行阶段专用字段移动或身份猜测。
 
 可选代理只在 DeepSeek 基础设施适配器内通过注入的 HTTP dispatcher 生效，不修改进程级全局代理，也不影响 SQLite、文件系统或其他网络适配器。
 
@@ -330,10 +345,8 @@ V1 沿用以下已经写入底层设计的默认值：
 
 ```ts
 const defaultTurnExecutionProfile = {
-  maxTurnModelCalls: 12,
-  maxTurnInputTokens: 64000,
-  maxTurnOutputTokens: 16000,
-  maxTurnWallTimeMs: 120000,
+  maxTurnModelCalls: 63,
+  maxTurnWallTimeMs: 780000,
   maxDraftAuditRounds: 3,
   maxGraphGovernanceRounds: 3,
   maxSettlementReviewRounds: 2,
@@ -424,7 +437,11 @@ packages/prompt-contracts/
 - 优先复用已有节点和局部结构，不以新名称代替身份判断；
 - 正文出现的内容必须获得持久表达并完成图结算；
 - 每轮只能使用实际读取的旧资料和本轮新产物；
-- 正式场景必须有时间与地点锚点；
+- 正式场景必须形成场景时空绑定，能够返回局部时间、地点、实际前置场景和过渡路径；
+- AI先形成连续唯一的场景索引，再由图治理逐项绑定；本轮第一个场景不自动免除前置连续性；
+- 每个图修改都必须具有唯一的修改时空结算，改变当前世界内容时连接完整生效场景、前置修订和历史返回路径；
+- 不假设唯一全局世界时间或绝对空间；跨参照比较必须读取 AI建立的对应或不确定性结构；
+- 每个活跃或推迟前沿分别保存自己的最后场景、时间和地点锚点，系统时间不冒充世界时间；
 - 当前有效状态不能无依据回退；
 - 用户输入是提案、意图或表现要求，不自动成为过去真相；
 - AI拥有图治理权限，但每次修改必须给出依据、原因和自审；

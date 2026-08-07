@@ -8,7 +8,7 @@
 
 - 使用同一个 `TurnContext`；
 - 只读取当前 `ContextView`；
-- 使用 DeepSeek JSON Mode；
+- 默认不启用供应商 JSON Mode，通过提示词要求 JSON 文本并由后端解析校验；供应商兼容性验证通过后可由统一模型配置开启；
 - 通过 Zod 校验；
 - 不依赖 Tool Calling；
 - 不输出隐藏思维链；
@@ -47,7 +47,9 @@ type PhaseRequest<TInput> = {
 }
 ```
 
-请求中的 ID 必须能够从同一项目、同一任务和允许的作用域解析。请求不直接嵌入整个持久化图。
+应用层内部请求中的 ID 必须能够从同一项目、同一任务和允许的作用域解析。发送给模型时，适配器移除模型不需要的技术字段，并将仍需引用的真实 ID 替换为本次请求专属别名；模型消息不直接暴露持久化 UUID，也不直接嵌入整个持久化图。
+
+每个阶段只有一套 artifact schema。模型直接返回该语义 artifact，应用层不再维护第二套“模型 artifact”并做字段翻译。模型不生成章节、原文、提案、修订、投影、结算或决定记录 UUID；这些技术身份由应用层在物化时创建。模型使用本次请求的 `read-*`、`node-*`、`link-*` 等临时别名引用已有证据；适配器先验证别名结果，再恢复真实 ID。只有 `graph_governance` 可以为新图对象声明 `local:*`；其他阶段只能引用本轮可读的已有图身份，尚未建立的新事物通过语义字段描述并将图引用留空。
 
 ## 3. 公共结果
 
@@ -80,11 +82,13 @@ type PhaseResult<TArtifact> = {
 结构规则：
 
 - `contextId` 必须与请求一致；
-- `citedReadIds` 必须是请求中的 `committedReadIds`、`visiblePendingIds` 或本阶段新产物；
+- `citedReadIds` 必须是请求中的 `committedReadIds` 或 `visiblePendingIds`；
 - `outcome = request_read` 时 `requestedReads` 不能为空；
 - `outcome = revise` 时必须指出修订目标和允许回流阶段；
 - `outcome = approve` 时该阶段必需产物必须存在；
 - `outcome = retire` 只表示放弃当前 pending 任务或产物，不表示归档已提交世界历史。
+
+以上 `PhaseResult` 是应用层恢复后的内部结果。模型实际返回的引用字段使用请求中展示的临时别名；模型不得输出 UUID、阶段运行 ID、请求 ID或数据库记录 ID。
 
 ## 4. 读取请求
 
@@ -112,7 +116,7 @@ type UnresolvedDependency = {
 }
 ```
 
-AI只提出搜索表达和原因。应用层执行检索并把真实返回内容追加到同一个 `TurnContext`；请求本身不能成为事实依据。
+AI只提出搜索表达和原因。应用层执行检索并把真实返回内容追加到同一个 `TurnContext`；请求本身不能成为事实依据。`directions`、`maxCandidates` 和 `maxDepth` 只是机械查询参数，不定义出口语义。AI读取返回局部后，必须理解该局部自身形成的组织方式，并自主决定下一步路径和停止位置。
 
 ## 5. 各阶段产物
 
@@ -141,26 +145,18 @@ type InterpretArtifact = {
 
 ```ts
 type RuleAssemblyArtifact = {
-  ruleSnapshotId: string
-  baseRuleVersion: string
-  userRuleVersionIds: string[]
-  settingSkillVersionIds: string[]
-  referenceSkillVersionIds: string[]
-  presentationRuleVersionIds: string[]
+  selectedWorkspacePaths: string[]
   selectionReasons: Record<string, string>
   unresolvedRuleConflicts: string[]
 }
 ```
 
-基础规则不可被用户规则覆盖；用户规则在明确适用范围内优先。
+基础规则不可被用户规则覆盖；用户规则在明确适用范围内优先。`selectedWorkspacePaths` 只能引用本轮 `readEvidence` 已实际返回的工作区文件。平台基础规则使用独立 `baseRuleVersion` 固定，不把用户目录中的只读镜像文件伪装成动态读取证据。
 
 ### 5.3 source_retrieval
 
 ```ts
 type RetrievalArtifact = {
-  executedRequestIds: string[]
-  returnedReadIds: string[]
-  rejectedCandidateIds: string[]
   missingEvidence: string[]
   nextExpansionHints: string[]
 }
@@ -172,14 +168,12 @@ type RetrievalArtifact = {
 
 ```ts
 type EmergenceDecision = {
-  decisionId: string
-  pressureEvidenceIds: string[]
+  pressureEvidenceRefs: string[]
   action: "reuse" | "extend" | "reveal" | "create_new" | "defer" | "reject"
-  existingAnchorIds: string[]
-  proposedAnchorCount: number
-  timeAnchorIds: string[]
-  locationAnchorIds: string[]
-  informationBoundaryIds: string[]
+  existingAnchorRefs: string[]
+  timeAnchorRefs: string[]
+  locationAnchorRefs: string[]
+  informationBoundaryRefs: string[]
   reason: string
 }
 
@@ -193,10 +187,9 @@ type EmergencePlanningArtifact = {
 
 ```ts
 type EmergenceReviewArtifact = {
-  reviewedDecisionIds: string[]
-  approvedDecisionIds: string[]
+  approvedDecisionIndexes: number[]
   revisionRequests: Array<{
-    decisionId: string
+    decisionIndex: number
     reason: string
     returnTo: "source_retrieval" | "emergence_planning"
   }>
@@ -211,29 +204,24 @@ type EmergenceReviewArtifact = {
 
 ```ts
 type InternalDraftArtifact = {
-  draftId: string
   contentMarkdown: string
-  contentRef?: string
-  adoptedEmergenceDecisionIds: string[]
-  citedReadIds: string[]
-  currentTimeAnchorIds: string[]
-  currentLocationAnchorIds: string[]
+  adoptedDecisionIndexes: number[]
+  currentTimeAnchorRefs: string[]
+  currentLocationAnchorRefs: string[]
   detectedUnplannedContent: string[]
 }
 ```
 
-`draft` 通过 JSON Mode 返回 `contentMarkdown`；应用层先把它写入内部不可变对象存储，再补充 `contentRef`。模型不能自行伪造文件引用。该产物不进入用户文件树，不直接成为世界事实，也不要求用户审批。
+`draft` 通过普通文本响应返回包含 `contentMarkdown` 的 JSON 对象；应用层把它写入内部不可变对象存储并自行生成 `contentRef`，该字段不属于模型 artifact。模型不能自行伪造文件引用。该产物不进入用户文件树，不直接成为世界事实，也不要求用户审批。
 
 ### 5.7 chapter_naming
 
 ```ts
 type ChapterNamingArtifact = {
-  chapterId: string
   chapterNumberText: string
   heading: string
   filename: string
-  predecessorSourceId?: string
-  continuityEvidenceIds: string[]
+  continuityEvidenceRefs: string[]
 }
 ```
 
@@ -243,24 +231,35 @@ type ChapterNamingArtifact = {
 
 ```ts
 type DependencyAuditArtifact = {
-  auditedDraftId: string
-  resolvedDependencyIds: string[]
   missingDependencies: UnresolvedDependency[]
   unplannedContent: Array<{
     description: string
     returnTo: "source_retrieval" | "emergence_planning" | "draft"
   }>
-  timeContinuity: "pass" | "revise" | "unknown"
-  locationContinuity: "pass" | "revise" | "unknown"
+  sceneContinuity: Array<{
+    sceneIndex: number
+    sceneDescription: string
+    predecessorSceneIndexes: number[]
+    predecessorSceneRefs: string[]
+    predecessorRequired: boolean
+    predecessorReason: string
+    correspondenceRequired: boolean
+    correspondenceReason: string
+    timeContinuity: "pass" | "revise" | "unknown"
+    locationContinuity: "pass" | "revise" | "unknown"
+    crossReferenceContinuity: "pass" | "revise" | "unknown"
+    reason: string
+  }>
   informationBoundary: "pass" | "revise" | "unknown"
 }
 ```
+
+`sceneContinuity` 只审计草稿实际形成的场景及其前置依赖。`sceneIndex` 必须从 `0` 开始连续且唯一；`predecessorSceneIndexes` 引用本清单中的场景，`predecessorSceneRefs` 只引用本轮已读的旧图入口。独立审查负责确认清单覆盖全部实际场景，代码只验证索引结构。`predecessorRequired` 和 `correspondenceRequired` 是 AI 对后续机械门禁的明确声明，不能根据“本轮第一个场景”或引用数组是否为空反向猜测。该阶段不能为本轮新场景发明 `local:*`；正式场景锚点和新时空结构在 `graph_governance` 中建立。无正文后台演化仍要枚举独立生效时空局部，只是不产生章节来源。多时间流、动态空间和跨参照连续性遵守 [通用时空锚点设计](spacetime-anchor-design.md)。
 
 ### 5.9 response_review
 
 ```ts
 type ResponseReviewArtifact = {
-  responseArtifactId: string
   evidenceClosed: boolean
   leaksUnobservedInformation: boolean
   requiresWorkflowUpgrade: boolean
@@ -273,108 +272,177 @@ type ResponseReviewArtifact = {
 ### 5.10 graph_governance
 
 ```ts
+type SemanticGraphMutation =
+  | { operation: "create_node"; ref: `local:${string}`; data: GraphData }
+  | { operation: "edit_node"; nodeRef: string; next: GraphData }
+  | { operation: "retire_node"; nodeRef: string; archiveOutletRefs: string[] }
+  | { operation: "create_link"; ref: `local:${string}`; fromRef: string; toRef: string; content?: unknown; metadata?: Record<string, unknown> }
+  | { operation: "edit_link"; linkRef: string; fromRef: string; toRef: string; content?: unknown; metadata?: Record<string, unknown> }
+  | { operation: "retire_link"; linkRef: string; archiveOutletRefs: string[] }
+
+type SceneSpacetimeBinding = {
+  sceneIndex: number
+  sceneAnchorRef: string
+  sourceUnitIndexes: number[]
+  temporalReferenceRefs: string[]
+  timeAnchorRefs: string[]
+  spatialReferenceRefs: string[]
+  locationAnchorRefs: string[]
+  predecessorSceneIndexes: number[]
+  predecessorSceneAnchorRefs: string[]
+  transitionPathRefs: string[]
+  correspondenceRefs: string[]
+  explanation: string
+  selfReview: string
+}
+
+type MutationSpacetimeSettlement = {
+  mutationIndexes: number[]
+  effectDisposition: "world_effect" | "representation_only"
+  effectiveSceneBindingIndexes: number[]
+  effectiveExistingSceneAnchorRefs: string[]
+  currentEntryRefs: string[]
+  predecessorRevisionRequired: boolean
+  predecessorRevisionReadRefs: string[]
+  historicalReturnRefs: string[]
+  reason: string
+  selfReview: string
+}
+
 type GraphGovernanceArtifact = {
-  proposalId: string
-  sourceUnitIds: string[]
-  mutations: GraphMutation[]
+  mutations: SemanticGraphMutation[]
   retrievalProjections: Array<{
-    projectionId: string
-    ownerKind: string
-    ownerId: string
+    ownerKind: "node" | "link"
     ownerMutationIndex?: number
-    ownerRevisionId?: string
+    ownerRef?: string
     exactKeys: string[]
     semanticText: string
-    sourceRefs: SourceRef[]
   }>
   settlementRecords: Array<{
-    settlementRecordId: string
-    sourceUnitId: string
+    sourceUnitIndex: number
     graphRefs: Array<{
       targetKind: "node" | "link"
-      targetId: string
+      targetRef: string
       mutationIndex?: number
     }>
     reason: string
     status: string
   }>
-  continuityProofs: Array<{
-    continuityProofId: string
-    payload: unknown
-  }>
-  archiveOutletIds: string[]
+  mutationSpacetimeSettlements: MutationSpacetimeSettlement[]
+  sceneSpacetimeBindings: SceneSpacetimeBinding[]
+  affectedFrontierRefs: string[]
+  archiveOutletRefs: string[]
   decisionRecords: Array<{
-    decisionRecordId: string
     decisionKind: string
     mutationIndexes: number[]
+    mutationSpacetimeSettlementIndexes: number[]
     reason: string
-    evidenceIds: string[]
     payload: unknown
     selfReview: string
   }>
 }
 ```
 
-`ownerMutationIndex` 和 `mutationIndex` 引用同一提案中的 mutation；应用层在执行批准 mutation 并生成不可变修订 ID 后解析为真实引用。已有修订可以直接使用 `ownerRevisionId`。归档通过普通 committed 节点与连接实现，不使用 `retired` 代替世界历史。
+新图对象必须使用 `local:*` 引用；同一 artifact 内重复引用同一对象时必须复用该引用。已有图对象只能使用本轮图证据中实际返回的 `ownerId`，不能使用 read ID、章节 evidence ID 或仅凭章节正文声称已经完成身份复用。`ownerMutationIndex`、`mutationIndex` 和 `sourceUnitIndex` 只引用当前 artifact 或当前章节中的数组位置。应用层在批准后一次性把 `local:*`、数组索引和技术记录转换为 UUID；任意 content、metadata 或时空绑定内精确匹配局部句柄的值也递归物化，持久层不得残留 `local:*`。归档通过普通 committed 节点与连接实现，不使用 `retired` 代替世界历史。
+
+`sceneSpacetimeBindings` 声明普通图结构在本轮承担的时空角色，不创建第二套世界 schema。它必须按 `dependency_audit.sceneContinuity.sceneIndex` 恰好覆盖一次，并保持相同的 `predecessorSceneIndexes`；本轮前置通过索引解析到对应新场景锚点，旧图前置继续使用本轮已读引用。正式正文场景的 `sourceUnitIndexes` 必须非空，全部原文单元至少被一个场景覆盖；无正文后台演化必须为空。只有对应场景声明 `predecessorRequired = false` 时两类前置和过渡路径才可以同时为空；声明 `correspondenceRequired = true` 时 `correspondenceRefs` 必须非空。无法精确换算时应引用 AI建立的明确不确定性结构，而不是伪造数值。
+
+`mutationSpacetimeSettlements` 必须恰好覆盖 `mutations` 的全部索引，并始终提供 `historicalReturnRefs`。`world_effect` 修改还必须绑定一个本轮场景或本轮已读既有场景，并提供 `currentEntryRefs`。声明 `predecessorRevisionRequired = true` 时 `predecessorRevisionReadRefs` 不能为空；这些引用只能指向本轮实际读取证据，由应用层解析成具体 revision/version，不能使用 owner 引用冒充修订引用。`representation_only` 只允许改变组织、查询、抽象或归档表达，不能改变被表达的当前世界含义。代码只检查索引、声明和引用，语义审查负责判断声明是否诚实以及历史返回路径是否充分。
+
+`decisionRecords.mutationSpacetimeSettlementIndexes` 只引用本 artifact 中的修改时空结算。决定记录说明治理原因并引用权威连续性映射，不得在 `payload` 中再复制另一套生效时间、地点或前置修订事实。
+
+出现规划只表达当时证据下的方向，不是图治理的数量许可证。是否复用、创建多少节点或连接、怎样组织出口、是否重构局部，都由 AI 根据后续实际读取和正式正文自主决定；偏离早期规划时由 AI 在决定记录和自审中解释。
+
+图治理可以自主形成、修改或替换局部图的组织与查询语义，不要求固定出口定义字段。治理产物必须完整表达正文事务的演化过程和当前有效状态，并使相关当前查询、历史查询和原文追溯能够在有限预算内准确、选择性地完成。语义变化时由 AI决定如何同步重构入口、投影、历史返回路径和归档结构。
 
 ### 5.11 semantic_review
 
 ```ts
 type SemanticReviewArtifact = {
-  proposalId: string
   approvedMutationIndexes: number[]
   rejectedMutationIndexes: number[]
+  approvedSpacetimeBindingIndexes: number[]
+  rejectedSpacetimeBindingIndexes: number[]
+  approvedMutationSpacetimeSettlementIndexes: number[]
+  rejectedMutationSpacetimeSettlementIndexes: number[]
+  approvedAffectedFrontierRefs: string[]
+  rejectedAffectedFrontierRefs: string[]
+  verificationProbes: Array<{
+    purpose: "scene_restore" | "current_state" | "history_return" | "source_return"
+    sceneBindingIndexes: number[]
+    mutationSpacetimeSettlementIndexes: number[]
+    query: string
+    observedReadRefs: string[]
+    observedGraphRefs: string[]
+    verdict: "pass" | "uncertain" | "fail"
+    reason: string
+  }>
+  sceneInventoryComplete: boolean
   revisionReason?: string
   returnTo?: "source_retrieval" | "graph_governance"
   graphStillDiscoverable: boolean
   graphStillConcise: boolean
   continuityPreserved: boolean
+  spacetimeContinuityPreserved: boolean
 }
 ```
+
+`graphStillDiscoverable` 不能只表示理论可达。AI必须按效果判断修改后的局部是否能在受限候选、深度和上下文预算内恢复相关当前状态、历史过程和原文；如何组织和解释出口仍由 AI决定。
+
+语义审批必须对 `graph_governance.mutations`、`sceneSpacetimeBindings`、`mutationSpacetimeSettlements` 和 `affectedFrontierRefs` 中的每个索引或引用分别恰好作出一次决定：每项只能出现在对应批准或拒绝集合之一，不能遗漏、重复或越界。存在任何拒绝项时必须返回 `graph_governance`，修订后原审批与前沿集合失效，不能部分沿用。`sceneInventoryComplete` 由 AI 复核场景清单是否覆盖草稿全部实际场景；代码不能从正文自行切场景。
+
+`verificationProbes` 必须引用本轮实际读取证据和图 owner。每个场景绑定至少由 `scene_restore` 覆盖；正式正文场景还由 `source_return` 覆盖；每个 `world_effect` 修改时空结算至少由 `current_state` 和 `history_return` 覆盖；每个 `representation_only` 至少由 `history_return` 覆盖。失败探针必须返回治理，`uncertain` 只能用于图中已经明确保存不确定性的跨参照结果，不能替代当前入口、历史路径或原文返回失败。
 
 ### 5.12 settlement_review
 
 ```ts
 type SettlementReviewArtifact = {
-  sourceUnitIds: string[]
-  settledSourceUnitIds: string[]
-  uncoveredSourceUnitIds: string[]
+  settledSourceUnitIndexes: number[]
+  uncoveredSourceUnitIndexes: number[]
   sourceReturnComplete: boolean
   retrievalProjectionComplete: boolean
   semanticCoverageComplete: boolean
+  spacetimeBindingsComplete: boolean
+  mutationSpacetimeSettlementsComplete: boolean
 }
 ```
 
-正式正文要求 `uncoveredSourceUnitIds` 为空。
+正式正文要求 `uncoveredSourceUnitIndexes` 为空，并且全部场景绑定能够返回相关图表达、原文单元和检索投影；所有修改时空结算还必须能够返回生效场景、前置修订和历史资料。无正文后台演化不检查原文单元，但仍检查场景清单、修改时空结算和检索投影。
 
 ### 5.13 frontier_settlement
 
 ```ts
+type FrontierSpacetimeSettlement = {
+  frontierAnchorRef: string
+  disposition: "active" | "deferred" | "archived"
+  lastSceneAnchorRefs: string[]
+  lastTimeAnchorRefs: string[]
+  lastLocationAnchorRefs: string[]
+  correspondenceRefs: string[]
+  reason: string
+  revisitCondition?: string
+}
+
 type FrontierSettlementArtifact = {
-  affectedAnchorIds: string[]
-  activeFrontierIds: string[]
-  deferredFrontierIds: string[]
-  archivedFrontierIds: string[]
-  lastWorldTimeAnchorIds: string[]
-  deferralReasons: Record<string, string>
+  frontiers: FrontierSpacetimeSettlement[]
 }
 ```
+
+`semantic_review.approvedAffectedFrontierRefs` 中每个引用必须恰好出现一次，不能增加、遗漏或重复；存在任何 rejected 前沿时不能进入本阶段。活跃或推迟前沿必须具有自己的最后场景、时间与地点锚点以及非空 `revisitCondition`；归档前沿继续保留返回路径，但可以省略重访条件。`disposition` 只用于调度，所有世界时空含义仍存在于普通图中。系统处理时间只能用于调度字段，不能写入 `lastTimeAnchorRefs`。
 
 ### 5.14 commit_review
 
 ```ts
 type CommitReviewArtifact = {
-  decision: "commit" | "revise" | "retire"
-  scopeId: string
-  requiredPhaseRunIds: string[]
-  approvedArtifactIds: string[]
-  unresolvedDependencyIds: string[]
+  recommendation: "commit" | "revise" | "retire"
   revisionTargetPhase?: AIPhase
   finalSelfReview: string
 }
 ```
 
-`commit_review` 是 AI自动执行的最终阶段，不是人工确认按钮。只有 `decision = commit` 且结构门禁完整时，代码才提升作用域并发布章节。
+`commit_review` 是 AI自动执行的最终建议阶段，不是人工确认按钮，也不拥有拒绝提交的权限。`recommendation`、`finalSelfReview` 和修订目标只作为连续性与一致性建议持久化并展示，不属于阶段 `outcome`，也不能触发通用 `revise/reject/retire` 停止语义。只要结构、图修订、原文结算、检索投影和时空连续性门禁完整，代码就直接提升作用域并发布章节；用户后续是否编辑正文不改变本轮已提交事实。
+
+一句话可以是世界生成的起点，而不是资料完整性检查。正文中首次出现的新事物可以没有旧图证据。资料不存在、设定未定义或需要补全时，AI必须依据已读上下文、规则和用户输入进行最小一致推演，降低确定性、缩小范围或保留不确定性，但不能直接拒绝正文。正文出现的万事万物都必须由本轮图治理建立或复用图表达。审查应检查它是否具有本轮建立的时间和地点连续锚点，以及是否与已提交世界的演化链和当前状态矛盾；不能把“未在旧资料中找到”本身当作拒绝提交理由。只有正文把内容当作过去已经存在、正在延续或被再次指代时，才要求旧身份召回；新内容应由本轮图治理建立局部身份、原文来源和查询入口。
 
 ## 6. 阶段流转
 
@@ -397,12 +465,15 @@ type CommitReviewArtifact = {
 
 状态机只允许表中流转。任何阶段不能直接跳到 `commit_review`。
 
-## 7. JSON Mode 与校验
+## 7. JSON 文本与校验
 
 每次请求必须：
 
 - 在提示词中明确要求只输出 JSON；
-- 设置 `response_format: { type: "json_object" }`；
+- `jsonModeEnabled` 默认 `false`；关闭时不发送供应商 `response_format`，避免 Thinking Mode 与 DeepSeek JSON Output 组合高频返回空 `content`；
+- `thinkingModeEnabled` 与 `reasoningEffort` 由模型配置统一控制；强度只允许 `low`、`high`、`max`，关闭思考时不发送强度；
+- `reasoning_content` 只作为思考观察数据，最终 `content` 为空时进入有限响应修复，不能直接当作阶段 JSON；
+- 从普通文本响应中提取第一个完整 JSON 对象；
 - 使用当前阶段固定的 Zod Schema；
 - 拒绝 Markdown 代码块、额外前后缀和无法规范解析的 JSON；
 - 保存原始响应摘要、schema 版本和校验结果；
@@ -418,5 +489,11 @@ type CommitReviewArtifact = {
 - `draft` 不进入用户文件树；
 - `commit_review` 无人工门禁且不能跳过必要阶段；
 - `retired` 不会被误用为已提交世界归档；
+- 场景清单索引连续唯一并由 AI确认覆盖全部实际场景，每个索引恰好具有一条时间、地点均非空的绑定；
+- AI 声明需要前置或跨参照时，相应的本轮场景索引、已读旧场景、过渡路径或对应结构满足门禁；
+- 每个图修改恰好具有一条修改时空结算，世界内容变化能够返回生效场景、前置修订和历史资料；
+- 多时间或空间参照之间没有对应结构时只能保留明确不确定性，不能伪造统一时间或坐标；
+- 图治理声明的每个受影响前沿恰好结算一次，活跃或推迟前沿分别保存自己的最后场景、时间、地点锚点和重访条件；
+- 系统处理时间不会进入世界时间引用；
 - 阶段回流次数受项目预算限制；
 - DeepSeek 缓存命中与否不改变阶段结果校验。

@@ -5,10 +5,8 @@ import type {
 } from "@worldseed/contracts"
 
 import {
-  chapterNamingArtifactSchema,
   emergencePlanningArtifactSchema,
   graphGovernanceArtifactSchema,
-  internalDraftArtifactSchema,
   type GraphGovernanceArtifact,
 } from "@worldseed/prompt-contracts"
 
@@ -23,18 +21,13 @@ export class FakeAiModelAdapter implements AIModelPort {
     provider: "fake",
     model: "deterministic-contract-fixture",
     available: true,
+    contextWindowTokens: 64_000,
   } as const
-
-  public constructor(private readonly createId: () => string) {}
 
   public execute(request: PhaseRequestEnvelope): Promise<PhaseModelExecution> {
     const startedAt = Date.now()
     const input = request.input as TurnPhaseInput
-    const artifact = this.createArtifact(request.phase, request, input)
-    const producedArtifactIds = artifactIds(request.phase, artifact)
-    const decisionRecordIds = request.phase === "graph_governance"
-      ? graphGovernanceArtifactSchema.parse(artifact).decisionRecords.map((record) => record.decisionRecordId)
-      : []
+    const artifact = this.createArtifact(request.phase, input)
     const result: PhaseResultEnvelope = {
       schemaVersion: 1,
       envelopeId: request.envelopeId,
@@ -44,8 +37,8 @@ export class FakeAiModelAdapter implements AIModelPort {
       artifact,
       requestedReads: [],
       citedReadIds: [...request.committedReadIds],
-      producedArtifactIds,
-      decisionRecordIds,
+      producedArtifactIds: [],
+      decisionRecordIds: [],
       unresolvedDependencies: [],
       reason: `Fake AI completed ${request.phase} using only the supplied turn state`,
       selfReview: "The result contains no hidden reasoning and cites no unreturned reads",
@@ -66,7 +59,7 @@ export class FakeAiModelAdapter implements AIModelPort {
     })
   }
 
-  private createArtifact(phase: AIPhase, request: PhaseRequestEnvelope, input: TurnPhaseInput): unknown {
+  private createArtifact(phase: AIPhase, input: TurnPhaseInput): unknown {
     switch (phase) {
       case "interpret":
         return {
@@ -81,95 +74,74 @@ export class FakeAiModelAdapter implements AIModelPort {
         }
       case "rule_assembly":
         return {
-          ruleSnapshotId: this.createId(),
-          baseRuleVersion: "v1",
-          userRuleVersionIds: [],
-          settingSkillVersionIds: [],
-          referenceSkillVersionIds: [],
-          presentationRuleVersionIds: [],
+          selectedWorkspacePaths: input.readEvidence.map((evidence) => evidence.ownerId),
           selectionReasons: { base: "The platform base rules are mandatory" },
           unresolvedRuleConflicts: [],
         }
       case "source_retrieval":
-        return {
-          executedRequestIds: [],
-          returnedReadIds: [],
-          rejectedCandidateIds: [],
-          missingEvidence: [],
-          nextExpansionHints: [],
-        }
-      case "emergence_planning": {
-        const decisionId = this.createId()
+        return { missingEvidence: [], nextExpansionHints: [] }
+      case "emergence_planning":
         return {
           decisions: [{
-            decisionId,
-            pressureEvidenceIds: [],
+            pressureEvidenceRefs: [],
             action: "create_new",
-            existingAnchorIds: [],
-            proposedAnchorCount: 3,
-            timeAnchorIds: [this.createId()],
-            locationAnchorIds: [this.createId()],
-            informationBoundaryIds: [this.createId()],
+            existingAnchorRefs: [],
+            timeAnchorRefs: [],
+            locationAnchorRefs: [],
+            informationBoundaryRefs: [],
             reason: "The first turn requires a minimal time, place, and occurrence structure",
           }],
         }
-      }
-      case "emergence_review": {
-        const planning = emergencePlanningArtifactSchema.parse(input.artifacts.emergence_planning)
-        const decisionIds = planning.decisions.map((decision) => decision.decisionId)
+      case "emergence_review":
         return {
-          reviewedDecisionIds: decisionIds,
-          approvedDecisionIds: decisionIds,
+          approvedDecisionIndexes: input.artifacts.emergence_planning === undefined ? [] : [0],
           revisionRequests: [],
           identityRecallComplete: true,
           temporalEntryComplete: true,
           spatialEntryComplete: true,
           informationBoundaryComplete: true,
         }
-      }
-      case "draft": {
-        const planning = emergencePlanningArtifactSchema.parse(input.artifacts.emergence_planning)
-        const decision = planning.decisions[0]
-        if (decision === undefined) {
-          throw new Error("Fake draft requires one approved emergence decision")
-        }
+      case "draft":
         return {
-          draftId: this.createId(),
           contentMarkdown: [
             "最初没有宏大的宣告，只有一处尚未被命名的所在，在某个能够继续向前的时刻安静地显现。",
             input.userInput,
             "变化留下了可以再次返回的痕迹。此后发生的一切，都将从这些已经写下的依据继续生长。",
           ].join("\n\n"),
-          adoptedEmergenceDecisionIds: [decision.decisionId],
-          citedReadIds: [],
-          currentTimeAnchorIds: decision.timeAnchorIds,
-          currentLocationAnchorIds: decision.locationAnchorIds,
+          adoptedDecisionIndexes: [0],
+          currentTimeAnchorRefs: [],
+          currentLocationAnchorRefs: [],
           detectedUnplannedContent: [],
         }
-      }
       case "chapter_naming":
         return {
-          chapterId: this.createId(),
           chapterNumberText: `第${chineseNumber(input.chapterSequence)}章`,
           heading: `第${chineseNumber(input.chapterSequence)}章 世界种子`,
           filename: `第${chineseNumber(input.chapterSequence)}章 世界种子.md`,
-          continuityEvidenceIds: [],
+          continuityEvidenceRefs: [],
         }
-      case "dependency_audit": {
-        const draft = internalDraftArtifactSchema.parse(input.artifacts.draft)
+      case "dependency_audit":
         return {
-          auditedDraftId: draft.draftId,
-          resolvedDependencyIds: [],
           missingDependencies: [],
           unplannedContent: [],
-          timeContinuity: "pass",
-          locationContinuity: "pass",
+          sceneContinuity: [{
+            sceneIndex: 0,
+            sceneDescription: "The chapter's initial continuous scene",
+            predecessorSceneIndexes: [],
+            predecessorSceneRefs: [],
+            predecessorRequired: false,
+            predecessorReason: "The deterministic fixture starts a new world",
+            correspondenceRequired: false,
+            correspondenceReason: "The fixture uses one local temporal and spatial reference",
+            timeContinuity: "pass",
+            locationContinuity: "pass",
+            crossReferenceContinuity: "pass",
+            reason: "The scene has explicit local time and location anchors",
+          }],
           informationBoundary: "pass",
         }
-      }
       case "response_review":
         return {
-          responseArtifactId: this.createId(),
           evidenceClosed: true,
           leaksUnobservedInformation: false,
           requiresWorkflowUpgrade: false,
@@ -178,142 +150,170 @@ export class FakeAiModelAdapter implements AIModelPort {
         return this.createGraphGovernanceArtifact(input)
       case "semantic_review": {
         const governance = graphGovernanceArtifactSchema.parse(input.artifacts.graph_governance)
+        const observedReadRefs = input.readEvidence.slice(0, 1).map((evidence) => evidence.readId)
         return {
-          proposalId: governance.proposalId,
           approvedMutationIndexes: governance.mutations.map((_, index) => index),
           rejectedMutationIndexes: [],
+          approvedSpacetimeBindingIndexes: governance.sceneSpacetimeBindings.map((_, index) => index),
+          rejectedSpacetimeBindingIndexes: [],
+          approvedMutationSpacetimeSettlementIndexes: governance.mutationSpacetimeSettlements.map((_, index) => index),
+          rejectedMutationSpacetimeSettlementIndexes: [],
+          approvedAffectedFrontierRefs: governance.affectedFrontierRefs,
+          rejectedAffectedFrontierRefs: [],
+          verificationProbes: [
+            {
+              purpose: "scene_restore",
+              sceneBindingIndexes: [0],
+              mutationSpacetimeSettlementIndexes: [],
+              query: "Restore the current scene from its local spacetime anchors",
+              observedReadRefs,
+              observedGraphRefs: ["local:occurrence"],
+              verdict: "pass",
+              reason: "The occurrence reaches both its time and location anchors",
+            },
+            {
+              purpose: "source_return",
+              sceneBindingIndexes: [0],
+              mutationSpacetimeSettlementIndexes: [],
+              query: "Return from the scene to its chapter source units",
+              observedReadRefs,
+              observedGraphRefs: ["local:occurrence"],
+              verdict: "pass",
+              reason: "Every source unit settles through the occurrence anchor",
+            },
+            {
+              purpose: "current_state",
+              sceneBindingIndexes: [],
+              mutationSpacetimeSettlementIndexes: [0],
+              query: "Recover the current result of the initial graph changes",
+              observedReadRefs,
+              observedGraphRefs: ["local:occurrence"],
+              verdict: "pass",
+              reason: "The initial occurrence is the current entry for each change",
+            },
+            {
+              purpose: "history_return",
+              sceneBindingIndexes: [],
+              mutationSpacetimeSettlementIndexes: [0],
+              query: "Return from each graph revision to the originating occurrence",
+              observedReadRefs,
+              observedGraphRefs: ["local:occurrence"],
+              verdict: "pass",
+              reason: "The initial occurrence preserves the historical return path",
+            },
+          ],
+          sceneInventoryComplete: true,
           graphStillDiscoverable: true,
           graphStillConcise: true,
           continuityPreserved: true,
+          spacetimeContinuityPreserved: true,
         }
       }
       case "settlement_review":
         return {
-          sourceUnitIds: [...input.sourceUnitIds],
-          settledSourceUnitIds: [...input.sourceUnitIds],
-          uncoveredSourceUnitIds: [],
+          settledSourceUnitIndexes: input.sourceUnitIds.map((_, index) => index),
+          uncoveredSourceUnitIndexes: [],
           sourceReturnComplete: true,
           retrievalProjectionComplete: true,
           semanticCoverageComplete: true,
+          spacetimeBindingsComplete: true,
+          mutationSpacetimeSettlementsComplete: true,
         }
-      case "frontier_settlement": {
-        const governance = graphGovernanceArtifactSchema.parse(input.artifacts.graph_governance)
-        const affectedAnchorIds = governance.mutations.flatMap((mutation) => mutation.operation === "create_node"
-          ? [mutation.node.id]
-          : [])
+      case "frontier_settlement":
         return {
-          affectedAnchorIds,
-          activeFrontierIds: affectedAnchorIds.slice(0, 1),
-          deferredFrontierIds: [],
-          archivedFrontierIds: [],
-          lastWorldTimeAnchorIds: affectedAnchorIds.slice(1, 2),
-          deferralReasons: {},
+          frontiers: [{
+            frontierAnchorRef: "local:occurrence",
+            disposition: "active",
+            lastSceneAnchorRefs: ["local:occurrence"],
+            lastTimeAnchorRefs: ["local:time"],
+            lastLocationAnchorRefs: ["local:location"],
+            correspondenceRefs: [],
+            reason: "The initial occurrence remains available for future evolution",
+            revisitCondition: "Revisit when later input or world pressure refers to this local branch",
+          }],
         }
-      }
       case "commit_review":
         return {
-          decision: "commit",
-          scopeId: request.scopeId,
-          requiredPhaseRunIds: [...input.phaseRunIds],
-          approvedArtifactIds: Object.values(input.artifacts).flatMap((value) => value === undefined ? [] : artifactIdsFromValue(value)),
-          unresolvedDependencyIds: [],
+          recommendation: "commit",
           finalSelfReview: "All required Fake AI phase artifacts are present and the settlement is complete",
         }
     }
   }
 
   private createGraphGovernanceArtifact(input: TurnPhaseInput): GraphGovernanceArtifact {
-    if (input.sourceId === undefined) {
-      throw new Error("Graph governance requires a persisted source")
-    }
+    if (input.sourceId === undefined) throw new Error("Graph governance requires a persisted source")
     const planning = emergencePlanningArtifactSchema.parse(input.artifacts.emergence_planning)
-    const naming = chapterNamingArtifactSchema.parse(input.artifacts.chapter_naming)
-    const decision = planning.decisions[0]
-    if (decision === undefined) {
-      throw new Error("Graph governance requires an emergence decision")
-    }
-    const occurrenceId = this.createId()
-    const timeId = decision.timeAnchorIds[0] ?? this.createId()
-    const locationId = decision.locationAnchorIds[0] ?? this.createId()
-    const timeLinkId = this.createId()
-    const locationLinkId = this.createId()
-    const sourceRefs = [{ sourceId: input.sourceId, locator: { chapterId: naming.chapterId } }]
+    if (planning.decisions[0] === undefined) throw new Error("Graph governance requires an emergence decision")
     const mutations: GraphGovernanceArtifact["mutations"] = [
-      { operation: "create_node", node: { id: occurrenceId, content: { text: input.userInput }, sourceRefs } },
-      { operation: "create_node", node: { id: timeId, content: { anchor: "initial world time" }, sourceRefs } },
-      { operation: "create_node", node: { id: locationId, content: { anchor: "initial scene location" }, sourceRefs } },
-      { operation: "create_link", link: { id: timeLinkId, fromNodeId: occurrenceId, toNodeId: timeId, content: { note: "time entry" }, sourceRefs } },
-      { operation: "create_link", link: { id: locationLinkId, fromNodeId: occurrenceId, toNodeId: locationId, content: { note: "space entry" }, sourceRefs } },
+      {
+        operation: "create_node",
+        ref: "local:occurrence",
+        data: {
+          content: {
+            text: input.userInput,
+            timeRef: "local:time",
+            locationRef: "local:location",
+          },
+        },
+      },
+      { operation: "create_node", ref: "local:time", data: { content: { anchor: "initial world time" } } },
+      { operation: "create_node", ref: "local:location", data: { content: { anchor: "initial scene location" } } },
+      { operation: "create_link", ref: "local:time-link", fromRef: "local:occurrence", toRef: "local:time", content: { note: "time entry" } },
+      { operation: "create_link", ref: "local:location-link", fromRef: "local:occurrence", toRef: "local:location", content: { note: "space entry" } },
     ]
-    const decisionRecordId = this.createId()
     return {
-      proposalId: this.createId(),
-      sourceUnitIds: [...input.sourceUnitIds],
       mutations,
       retrievalProjections: [{
-        projectionId: this.createId(),
         ownerKind: "node",
-        ownerId: occurrenceId,
         ownerMutationIndex: 0,
-        exactKeys: [naming.heading, input.userInput],
+        exactKeys: [input.userInput, `第${chineseNumber(input.chapterSequence)}章 世界种子`],
         semanticText: `Initial chapter occurrence: ${input.userInput}`,
-        sourceRefs,
       }],
-      settlementRecords: input.sourceUnitIds.map((sourceUnitId) => ({
-        settlementRecordId: this.createId(),
-        sourceUnitId,
-        graphRefs: [{ targetKind: "node", targetId: occurrenceId, mutationIndex: 0 }],
+      settlementRecords: input.sourceUnitIds.map((_, sourceUnitIndex) => ({
+        sourceUnitIndex,
+        graphRefs: [{ targetKind: "node", targetRef: "local:occurrence", mutationIndex: 0 }],
         reason: "The source unit returns through the chapter occurrence anchor",
         status: "settled",
       })),
-      continuityProofs: [{
-        continuityProofId: this.createId(),
-        payload: { timeAnchorIds: [timeId], locationAnchorIds: [locationId], predecessorRevisionIds: [] },
+      mutationSpacetimeSettlements: [{
+        mutationIndexes: mutations.map((_, index) => index),
+        effectDisposition: "world_effect",
+        effectiveSceneBindingIndexes: [0],
+        effectiveExistingSceneAnchorRefs: [],
+        currentEntryRefs: ["local:occurrence"],
+        predecessorRevisionRequired: false,
+        predecessorRevisionReadRefs: [],
+        historicalReturnRefs: ["local:occurrence"],
+        reason: "Every initial mutation becomes effective in the chapter's only scene",
+        selfReview: "The settlement uses no system timestamp as world time",
       }],
-      archiveOutletIds: [],
+      sceneSpacetimeBindings: [{
+        sceneIndex: 0,
+        sceneAnchorRef: "local:occurrence",
+        sourceUnitIndexes: input.sourceUnitIds.map((_, index) => index),
+        temporalReferenceRefs: ["local:time"],
+        timeAnchorRefs: ["local:time"],
+        spatialReferenceRefs: ["local:location"],
+        locationAnchorRefs: ["local:location"],
+        predecessorSceneIndexes: [],
+        predecessorSceneAnchorRefs: [],
+        transitionPathRefs: [],
+        correspondenceRefs: [],
+        explanation: "The occurrence, time, and location nodes form the initial scene binding",
+        selfReview: "The binding covers every source unit without inventing a domain schema",
+      }],
+      affectedFrontierRefs: ["local:occurrence"],
+      archiveOutletRefs: [],
       decisionRecords: [{
-        decisionRecordId,
         decisionKind: "initial_graph_governance",
         mutationIndexes: mutations.map((_, index) => index),
+        mutationSpacetimeSettlementIndexes: [0],
         reason: "Create the smallest reusable graph that can return to every source unit",
-        evidenceIds: [...input.sourceUnitIds],
         payload: { proposalKind: "initial_turn" },
         selfReview: "The proposal reuses the approved time and place anchors and adds no domain-specific schema",
       }],
     }
   }
-}
-
-function artifactIds(phase: AIPhase, artifact: unknown): string[] {
-  switch (phase) {
-    case "rule_assembly":
-      return [(artifact as { ruleSnapshotId: string }).ruleSnapshotId]
-    case "emergence_planning":
-      return emergencePlanningArtifactSchema.parse(artifact).decisions.map((decision) => decision.decisionId)
-    case "draft":
-      return [internalDraftArtifactSchema.parse(artifact).draftId]
-    case "chapter_naming":
-      return [chapterNamingArtifactSchema.parse(artifact).chapterId]
-    case "graph_governance": {
-      const governance = graphGovernanceArtifactSchema.parse(artifact)
-      return [
-        governance.proposalId,
-        ...governance.retrievalProjections.map((projection) => projection.projectionId),
-        ...governance.settlementRecords.map((record) => record.settlementRecordId),
-        ...governance.continuityProofs.map((proof) => proof.continuityProofId),
-        ...governance.decisionRecords.map((record) => record.decisionRecordId),
-      ]
-    }
-    default:
-      return []
-  }
-}
-
-function artifactIdsFromValue(value: unknown): string[] {
-  if (typeof value !== "object" || value === null) {
-    return []
-  }
-  return Object.entries(value).flatMap(([key, entry]) => key.endsWith("Id") && typeof entry === "string" ? [entry] : [])
 }
 
 function estimateTokens(value: unknown): number {

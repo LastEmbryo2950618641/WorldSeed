@@ -324,4 +324,127 @@ export const projectMigrations = Object.freeze([
     "ALTER TABLE graph_revisions ADD COLUMN predecessor_revision_id TEXT",
     "ALTER TABLE graph_revisions ADD COLUMN archive_outlet_ids_json TEXT NOT NULL DEFAULT '[]'",
   ]),
+  defineSqlMigration<ProjectDatabase>(10, "010_retrieval_trigram_fts", [
+    "DROP TABLE retrieval_fts",
+    `CREATE VIRTUAL TABLE retrieval_fts USING fts5(
+      projection_id UNINDEXED,
+      project_id UNINDEXED,
+      scope_id UNINDEXED,
+      visibility UNINDEXED,
+      semantic_text,
+      tokenize = 'trigram'
+    )`,
+    `INSERT INTO retrieval_fts(projection_id, project_id, scope_id, visibility, semantic_text)
+      SELECT id, project_id, scope_id, visibility, semantic_text FROM retrieval_projections`,
+  ]),
+  defineSqlMigration<ProjectDatabase>(11, "011_catalog_snapshots_and_evidence", [
+    `CREATE TABLE workspace_catalog_snapshots (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      generated_at INTEGER NOT NULL,
+      digest TEXT NOT NULL,
+      entries_json TEXT NOT NULL
+    )`,
+    `CREATE TABLE task_workspace_catalog_snapshots (
+      task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+      snapshot_id TEXT NOT NULL REFERENCES workspace_catalog_snapshots(id),
+      attached_at INTEGER NOT NULL
+    )`,
+    `CREATE TABLE evidence_objects (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      context_id TEXT,
+      source_kind TEXT NOT NULL CHECK (source_kind IN ('workspace', 'graph', 'revision', 'chapter')),
+      owner_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      locator TEXT NOT NULL,
+      content_ref TEXT NOT NULL,
+      read_reason TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+    "CREATE INDEX workspace_catalog_snapshots_project ON workspace_catalog_snapshots(project_id, generated_at)",
+    "CREATE INDEX evidence_objects_context ON evidence_objects(project_id, context_id, created_at)",
+    "CREATE INDEX evidence_objects_source_version ON evidence_objects(project_id, source_kind, owner_id, version)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(12, "012_project_settings", [
+    `CREATE TABLE project_settings (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id),
+      settings_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
+  ]),
+  defineSqlMigration<ProjectDatabase>(13, "013_spacetime_records_and_frontier_refs", [
+    `CREATE TABLE scene_spacetime_bindings (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      scope_id TEXT NOT NULL REFERENCES artifact_scopes(id),
+      source_id TEXT,
+      scene_index INTEGER NOT NULL CHECK (scene_index >= 0),
+      scene_anchor_id TEXT NOT NULL,
+      source_unit_indexes_json TEXT NOT NULL,
+      temporal_reference_refs_json TEXT NOT NULL,
+      time_anchor_refs_json TEXT NOT NULL,
+      spatial_reference_refs_json TEXT NOT NULL,
+      location_anchor_refs_json TEXT NOT NULL,
+      predecessor_scene_indexes_json TEXT NOT NULL,
+      predecessor_scene_refs_json TEXT NOT NULL,
+      transition_path_refs_json TEXT NOT NULL,
+      correspondence_refs_json TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      self_review TEXT NOT NULL,
+      visibility TEXT NOT NULL CHECK (visibility IN ('pending', 'committed', 'retired')),
+      digest TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(scope_id, scene_index)
+    )`,
+    "CREATE INDEX scene_spacetime_bindings_anchor ON scene_spacetime_bindings(scope_id, scene_anchor_id)",
+    "CREATE INDEX scene_spacetime_bindings_visibility ON scene_spacetime_bindings(project_id, visibility)",
+    `CREATE TABLE graph_revision_spacetime (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      scope_id TEXT NOT NULL REFERENCES artifact_scopes(id),
+      graph_revision_id TEXT NOT NULL REFERENCES graph_revisions(id),
+      effect_disposition TEXT NOT NULL CHECK (effect_disposition IN ('world_effect', 'representation_only')),
+      effective_scene_binding_ids_json TEXT NOT NULL,
+      effective_existing_scene_refs_json TEXT NOT NULL,
+      current_entry_refs_json TEXT NOT NULL,
+      predecessor_revision_required INTEGER NOT NULL CHECK (predecessor_revision_required IN (0, 1)),
+      predecessor_revision_ids_json TEXT NOT NULL,
+      historical_return_refs_json TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      self_review TEXT NOT NULL,
+      visibility TEXT NOT NULL CHECK (visibility IN ('pending', 'committed', 'retired')),
+      digest TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(scope_id, graph_revision_id)
+    )`,
+    "CREATE INDEX graph_revision_spacetime_visibility ON graph_revision_spacetime(project_id, visibility)",
+    "ALTER TABLE frontier_refs RENAME TO frontier_refs_legacy",
+    `CREATE TABLE frontier_refs (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      scope_id TEXT NOT NULL REFERENCES artifact_scopes(id),
+      frontier_anchor_ref TEXT NOT NULL,
+      disposition TEXT NOT NULL CHECK (disposition IN ('active', 'deferred', 'archived')),
+      last_scene_anchor_refs_json TEXT NOT NULL,
+      last_time_anchor_refs_json TEXT NOT NULL,
+      last_location_anchor_refs_json TEXT NOT NULL,
+      correspondence_refs_json TEXT NOT NULL,
+      last_processed_at INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      revisit_condition TEXT
+    )`,
+    `INSERT INTO frontier_refs (
+      id, project_id, scope_id, frontier_anchor_ref, disposition,
+      last_scene_anchor_refs_json, last_time_anchor_refs_json,
+      last_location_anchor_refs_json, correspondence_refs_json,
+      last_processed_at, reason, revisit_condition
+    ) SELECT id, project_id, scope_id, anchor_id, 'archived',
+      '[]', '[]', '[]', '[]', next_attempt_at,
+      'Legacy frontier archived during spacetime protocol migration', NULL
+      FROM frontier_refs_legacy`,
+    "DROP TABLE frontier_refs_legacy",
+    "CREATE INDEX frontier_refs_schedule ON frontier_refs(project_id, disposition, last_processed_at)",
+  ]),
 ])

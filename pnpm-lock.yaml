@@ -65,6 +65,9 @@ importers:
       '@worldseed/backend':
         specifier: workspace:*
         version: link:../backend
+      '@worldseed/config':
+        specifier: workspace:*
+        version: link:../../packages/config
       '@worldseed/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

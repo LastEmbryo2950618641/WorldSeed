@@ -1,6 +1,7 @@
 import {
   mkdirSync,
   mkdtempSync,
+  unlinkSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -27,6 +28,8 @@ const temporaryDirectories: string[] = []
 
 const defaults = {
   baseRules: "# Worldseed V1 基础规则\n\n平台只读规则。\n",
+  settingsReadme: "# 设定集索引\n",
+  referencesReadme: "# 参考文件索引\n",
   descriptionRules: "# 默认描写规则\n\n自动选择描写方式。\n",
   proseStyleRules: "# 默认笔风规则\n\n保持作品语言连续。\n",
 }
@@ -55,6 +58,11 @@ describe("Node workspace adapter", () => {
       .toHaveLength(5)
     expect(await adapter.readMarkdown(workspaceRoot, "世界推演规则/基础规则/base-rules.md"))
       .toBe(defaults.baseRules)
+    expect(await adapter.readMarkdown(workspaceRoot, "设定集/readme.md")).toBe(defaults.settingsReadme)
+    expect(await adapter.readMarkdown(workspaceRoot, "参考文件/readme.md")).toBe(defaults.referencesReadme)
+
+    await adapter.saveUserMarkdown(workspaceRoot, "设定集/readme.md", "# 已编辑的设定索引\n")
+    expect(await adapter.readMarkdown(workspaceRoot, "设定集/readme.md")).toContain("已编辑")
 
     await adapter.saveUserMarkdown(workspaceRoot, "设定集/局部/规则.md", "# 规则\n")
     expect(await adapter.readMarkdown(workspaceRoot, "设定集/局部/规则.md")).toBe("# 规则\n")
@@ -110,6 +118,20 @@ describe("Node workspace adapter", () => {
     expect(issueCodes).toContain("unexpected_root_entry")
     expect(issueCodes).toContain("invalid_file_type")
     expect(readFileSync(join(workspaceRoot, "参考文件", "data.json"), "utf8")).toBe("{}")
+  })
+
+  it("reports either mandatory index document when it is missing", async () => {
+    const root = temporaryDirectory()
+    const workspaceRoot = join(root, "workspace")
+    const adapter = new NodeWorkspaceAdapter()
+    await adapter.createLayout(workspaceRoot, defaults)
+
+    unlinkSync(join(workspaceRoot, "设定集", "readme.md"))
+    const report = await adapter.validate(workspaceRoot)
+    expect(report.issues).toContainEqual(expect.objectContaining({
+      code: "missing_fixed_entry",
+      path: "设定集/readme.md",
+    }))
   })
 })
 
@@ -200,7 +222,7 @@ describe("project lifecycle", () => {
     const internalStore = new NodeInternalStoreAdapter(appDataRoot)
     const store = await internalStore.prepareProject(projectId, workspaceRoot)
     const database = await openProjectDatabase(store.projectDatabaseRef)
-    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(9)
+    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(13)
     await database.destroy()
   })
 })

@@ -2,16 +2,19 @@ import { existsSync } from "node:fs"
 import { loadEnvFile } from "node:process"
 import { join, resolve } from "node:path"
 
-import { app, BrowserWindow, screen, session } from "electron"
+import { app, BrowserWindow, safeStorage, screen, session } from "electron"
+import { configureRuntimeDiagnostics, runtimeLog } from "@worldseed/backend"
+import { runtimeDiagnosticsConfigFromEnvironment } from "@worldseed/config"
 
 import { BackendProcess } from "./backend-process.js"
 import { registerIpcRouter, unregisterIpcRouter } from "./ipc-router.js"
 import { installApplicationMenu } from "./menu.js"
 import { secureWindow } from "./security.js"
+import { FileCredentialVault } from "./credential-vault.js"
 
 const backend = new BackendProcess()
 
-async function createWindow(): Promise<BrowserWindow> {
+async function createWindow(credentials: FileCredentialVault): Promise<BrowserWindow> {
   const display = screen.getPrimaryDisplay()
   const workArea = display.workArea
   const scaleFactor = display.scaleFactor
@@ -35,7 +38,7 @@ async function createWindow(): Promise<BrowserWindow> {
   })
   secureWindow(window)
   installApplicationMenu(window)
-  registerIpcRouter(backend, window)
+  registerIpcRouter(backend, window, credentials)
   window.once("ready-to-show", () => { window.show(); })
   if (process.env.ELECTRON_RENDERER_URL !== undefined) {
     await window.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -49,13 +52,34 @@ void app.whenReady().then(async () => {
   loadDevelopmentEnvironment()
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => { callback(false); })
   const applicationDataRoot = resolve(process.env.WORLDSEED_APP_DATA_ROOT ?? join(app.getPath("userData"), "runtime"))
+  const diagnostics = runtimeDiagnosticsConfigFromEnvironment(
+    process.env,
+    join(applicationDataRoot, "logs", "worldseed.log"),
+    !app.isPackaged,
+  )
+  configureRuntimeDiagnostics(diagnostics)
   const promptPackageRoot = resolve(
     process.env.WORLDSEED_PROMPT_ROOT ?? join(app.getAppPath(), "..", "..", "packages", "prompt-contracts"),
   )
-  backend.start({ applicationDataRoot, promptPackageRoot })
-  await createWindow()
+  const credentials = new FileCredentialVault(join(applicationDataRoot, "credentials.json"), {
+    encrypt: (value) => {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error("系统安全存储不可用，无法保存 API Key")
+      return safeStorage.encryptString(value).toString("base64")
+    },
+    decrypt: (value) => {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error("系统安全存储不可用，无法读取 API Key")
+      return safeStorage.decryptString(Buffer.from(value, "base64"))
+    },
+  })
+  runtimeLog("info", "electron-main", "application.ready", {
+    applicationDataRoot,
+    diagnostics,
+    packaged: app.isPackaged,
+  })
+  backend.start({ applicationDataRoot, promptPackageRoot, diagnostics })
+  await createWindow(credentials)
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) void createWindow()
+    if (BrowserWindow.getAllWindows().length === 0) void createWindow(credentials)
   })
 })
 

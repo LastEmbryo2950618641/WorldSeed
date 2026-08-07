@@ -71,16 +71,61 @@ export type SettlementRecord = Readonly<{
   createdAtMs: number
 }>
 
+export type SceneSpacetimeBindingRecord = Readonly<{
+  id: string
+  projectId: string
+  scopeId: ScopeId
+  sourceId?: string
+  sceneIndex: number
+  sceneAnchorId: string
+  sourceUnitIndexes: readonly number[]
+  temporalReferenceRefs: readonly string[]
+  timeAnchorRefs: readonly string[]
+  spatialReferenceRefs: readonly string[]
+  locationAnchorRefs: readonly string[]
+  predecessorSceneIndexes: readonly number[]
+  predecessorSceneRefs: readonly string[]
+  transitionPathRefs: readonly string[]
+  correspondenceRefs: readonly string[]
+  reason: string
+  selfReview: string
+  visibility: "pending" | "committed" | "retired"
+  digest: string
+  createdAtMs: number
+}>
+
+export type GraphRevisionSpacetimeRecord = Readonly<{
+  id: string
+  projectId: string
+  scopeId: ScopeId
+  graphRevisionId: string
+  effectDisposition: "world_effect" | "representation_only"
+  effectiveSceneBindingIds: readonly string[]
+  effectiveExistingSceneRefs: readonly string[]
+  currentEntryRefs: readonly string[]
+  predecessorRevisionRequired: boolean
+  predecessorRevisionIds: readonly string[]
+  historicalReturnRefs: readonly string[]
+  reason: string
+  selfReview: string
+  visibility: "pending" | "committed" | "retired"
+  digest: string
+  createdAtMs: number
+}>
+
 export type FrontierRecord = Readonly<{
   id: string
   projectId: ProjectId
   scopeId: ScopeId
-  anchorId: string
-  lastEffectiveTime: number
-  deferralCount: number
-  nextAttemptAt: number
-  status: string
-  payload: unknown
+  frontierAnchorRef: string
+  disposition: "active" | "deferred" | "archived"
+  lastSceneAnchorRefs: readonly string[]
+  lastTimeAnchorRefs: readonly string[]
+  lastLocationAnchorRefs: readonly string[]
+  correspondenceRefs: readonly string[]
+  lastProcessedAt: number
+  reason: string
+  revisitCondition?: string
 }>
 
 export type StoredPhaseRun = Readonly<{
@@ -103,8 +148,10 @@ export interface TurnPersistencePort {
   stageRuleSnapshot(snapshot: RuleSnapshotRecord): Promise<void>
   stageDecisionRecords(records: readonly DecisionRecord[]): Promise<void>
   stageSettlementRecords(records: readonly SettlementRecord[]): Promise<void>
+  stageSceneSpacetimeBindings(records: readonly SceneSpacetimeBindingRecord[]): Promise<void>
+  stageGraphRevisionSpacetime(records: readonly GraphRevisionSpacetimeRecord[]): Promise<void>
   stageFrontiers(records: readonly FrontierRecord[]): Promise<void>
-  updateTask(taskId: string, status: TaskStatus, lastPhase?: AIPhase, updatedAtMs?: number): Promise<void>
+  updateTask(taskId: string, status: TaskStatus, lastPhase?: AIPhase, updatedAtMs?: number, error?: unknown): Promise<void>
   findContext(contextId: string): Promise<TurnContext | undefined>
   listPhaseRuns(taskId: string): Promise<readonly StoredPhaseRun[]>
 }

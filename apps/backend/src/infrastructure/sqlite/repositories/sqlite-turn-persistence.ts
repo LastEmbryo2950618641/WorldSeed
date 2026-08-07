@@ -14,7 +14,9 @@ import {
   type DecisionRecord,
   type FinishPhaseRunInput,
   type FrontierRecord,
+  type GraphRevisionSpacetimeRecord,
   type RuleSnapshotRecord,
+  type SceneSpacetimeBindingRecord,
   type SettlementRecord,
   type StartPhaseRunInput,
   type StoredPhaseRun,
@@ -172,18 +174,69 @@ export class SqliteTurnPersistence implements TurnPersistencePort {
     }))).executeTakeFirstOrThrow()
   }
 
+  public async stageSceneSpacetimeBindings(records: readonly SceneSpacetimeBindingRecord[]): Promise<void> {
+    if (records.length === 0) return
+    await this.database.insertInto("scene_spacetime_bindings").values(records.map((record) => ({
+      id: record.id,
+      project_id: record.projectId,
+      scope_id: record.scopeId,
+      source_id: record.sourceId ?? null,
+      scene_index: record.sceneIndex,
+      scene_anchor_id: record.sceneAnchorId,
+      source_unit_indexes_json: encodeJson(record.sourceUnitIndexes),
+      temporal_reference_refs_json: encodeJson(record.temporalReferenceRefs),
+      time_anchor_refs_json: encodeJson(record.timeAnchorRefs),
+      spatial_reference_refs_json: encodeJson(record.spatialReferenceRefs),
+      location_anchor_refs_json: encodeJson(record.locationAnchorRefs),
+      predecessor_scene_indexes_json: encodeJson(record.predecessorSceneIndexes),
+      predecessor_scene_refs_json: encodeJson(record.predecessorSceneRefs),
+      transition_path_refs_json: encodeJson(record.transitionPathRefs),
+      correspondence_refs_json: encodeJson(record.correspondenceRefs),
+      reason: record.reason,
+      self_review: record.selfReview,
+      visibility: record.visibility,
+      digest: record.digest,
+      created_at: record.createdAtMs,
+    }))).executeTakeFirstOrThrow()
+  }
+
+  public async stageGraphRevisionSpacetime(records: readonly GraphRevisionSpacetimeRecord[]): Promise<void> {
+    if (records.length === 0) return
+    await this.database.insertInto("graph_revision_spacetime").values(records.map((record) => ({
+      id: record.id,
+      project_id: record.projectId,
+      scope_id: record.scopeId,
+      graph_revision_id: record.graphRevisionId,
+      effect_disposition: record.effectDisposition,
+      effective_scene_binding_ids_json: encodeJson(record.effectiveSceneBindingIds),
+      effective_existing_scene_refs_json: encodeJson(record.effectiveExistingSceneRefs),
+      current_entry_refs_json: encodeJson(record.currentEntryRefs),
+      predecessor_revision_required: record.predecessorRevisionRequired ? 1 : 0,
+      predecessor_revision_ids_json: encodeJson(record.predecessorRevisionIds),
+      historical_return_refs_json: encodeJson(record.historicalReturnRefs),
+      reason: record.reason,
+      self_review: record.selfReview,
+      visibility: record.visibility,
+      digest: record.digest,
+      created_at: record.createdAtMs,
+    }))).executeTakeFirstOrThrow()
+  }
+
   public async stageFrontiers(records: readonly FrontierRecord[]): Promise<void> {
     if (records.length === 0) return
     await this.database.insertInto("frontier_refs").values(records.map((record) => ({
       id: record.id,
       project_id: record.projectId,
       scope_id: record.scopeId,
-      anchor_id: record.anchorId,
-      last_effective_time: record.lastEffectiveTime,
-      deferral_count: record.deferralCount,
-      next_attempt_at: record.nextAttemptAt,
-      status: record.status,
-      payload_json: encodeJson(record.payload),
+      frontier_anchor_ref: record.frontierAnchorRef,
+      disposition: record.disposition,
+      last_scene_anchor_refs_json: encodeJson(record.lastSceneAnchorRefs),
+      last_time_anchor_refs_json: encodeJson(record.lastTimeAnchorRefs),
+      last_location_anchor_refs_json: encodeJson(record.lastLocationAnchorRefs),
+      correspondence_refs_json: encodeJson(record.correspondenceRefs),
+      last_processed_at: record.lastProcessedAt,
+      reason: record.reason,
+      revisit_condition: record.revisitCondition ?? null,
     }))).executeTakeFirstOrThrow()
   }
 
@@ -192,10 +245,12 @@ export class SqliteTurnPersistence implements TurnPersistencePort {
     status: Parameters<TurnPersistencePort["updateTask"]>[1],
     lastPhase?: Parameters<TurnPersistencePort["updateTask"]>[2],
     updatedAtMs: number = Date.now(),
+    error?: unknown,
   ): Promise<void> {
     await this.database.updateTable("tasks").set({
       status,
       last_phase: lastPhase ?? null,
+      error_json: error === undefined ? null : encodeJson(error),
       updated_at: updatedAtMs,
     }).where("id", "=", taskId).executeTakeFirstOrThrow()
   }
