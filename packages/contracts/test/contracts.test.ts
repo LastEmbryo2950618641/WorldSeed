@@ -78,6 +78,22 @@ describe("shared contracts", () => {
     expect(result.success).toBe(false)
   })
 
+  it("rejects read requests attached to a non-read outcome", () => {
+    const modelResult = modelPhaseResultSchema.safeParse({
+      outcome: "continue",
+      requestedReads: [{
+        reason: "This read must not run after the phase chose to continue",
+        expectedEvidence: "More evidence",
+      }],
+      citedReadIds: [],
+      unresolvedDependencies: [],
+      reason: "The phase claims it can continue",
+      selfReview: "The contradictory read request must be rejected",
+    })
+
+    expect(modelResult.success).toBe(false)
+  })
+
   it("supports a blocked retrieval result when evidence cannot be obtained", () => {
     const result = phaseResultEnvelopeSchema.parse({
       schemaVersion: 1,
@@ -175,11 +191,11 @@ describe("shared contracts", () => {
     const result = projectSettingsSchema.safeParse({
       version: 2,
       execution: {
-        maxModelCalls: 63,
+        maxModelCalls: 128,
         contextWindowTokens: 1_000_000,
         contextCompactionThresholdRatio: 0.95,
         outputTokenLimitMode: "model",
-        maxWallTimeMs: 780000,
+        maxWallTimeMs: 3_600_000,
         maxRetrievalRounds: 4,
       },
       retrieval: {
@@ -201,6 +217,38 @@ describe("shared contracts", () => {
     })
 
     expect(result.success).toBe(false)
+  })
+
+  it("accepts the expanded execution budget range", () => {
+    const result = projectSettingsSchema.safeParse({
+      version: 2,
+      execution: {
+        maxModelCalls: 400,
+        contextWindowTokens: 1_000_000,
+        contextCompactionThresholdRatio: 0.95,
+        outputTokenLimitMode: "model",
+        maxWallTimeMs: 7_200_000,
+        maxRetrievalRounds: 10,
+      },
+      retrieval: {
+        maxRequestsPerRound: 10,
+        maxCandidates: 20,
+        maxDepth: 2,
+        maxEvidenceTokens: 12_000,
+      },
+      graph: {
+        maxDirectOutDegree: 12,
+        maxDirectInDegree: 12,
+        mergeWarningThreshold: 10,
+        preferredExpansionDepth: 2,
+        maxExpansionDepth: 4,
+        maxVisitedNodes: 96,
+        maxVisitedLinks: 192,
+        layoutMode: "layered_collision_avoidance",
+      },
+    })
+
+    expect(result.success).toBe(true)
   })
 
   it("rejects obsolete project settings instead of migrating them", () => {

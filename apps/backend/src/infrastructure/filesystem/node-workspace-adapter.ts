@@ -117,7 +117,13 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     const normalized = assertWorkspaceMutationAllowed(relativePath, "file", "chapter_publisher")
     const path = resolveInside(root, normalized)
     await assertParentChainContainsNoLinks(root, path)
-    await writeFile(path, content, { encoding: "utf8", flag: "wx" })
+    try {
+      await writeFile(path, content, { encoding: "utf8", flag: "wx" })
+    } catch (error) {
+      if (!isAlreadyExistsError(error)) throw error
+      const existing = await readFile(path, "utf8")
+      if (existing !== content) throw new Error(`Chapter already exists with different content: ${normalized}`)
+    }
   }
 
   public async importMarkdownFiles(
@@ -169,6 +175,13 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     }
     return copies.length
   }
+}
+
+function isAlreadyExistsError(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && error.code === "EEXIST"
 }
 
 function resolveInside(root: string, relativePath: string): string {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 
-import type { Kysely } from "kysely"
+import { sql, type Kysely } from "kysely"
 
 import {
   aiPhaseSchema,
@@ -22,7 +22,7 @@ import {
   type StoredPhaseRun,
   type TurnPersistencePort,
 } from "../../../index.js"
-import type { PhaseRunRow, ProjectDatabase } from "../database-types.js"
+import type { FrontierRefRow, PhaseRunRow, ProjectDatabase } from "../database-types.js"
 import { decodeJson, encodeJson } from "../json-codec.js"
 
 type RecordedUsage = Readonly<{
@@ -174,6 +174,29 @@ export class SqliteTurnPersistence implements TurnPersistencePort {
     }))).executeTakeFirstOrThrow()
   }
 
+  public async listSettlementsForSourceUnits(
+    projectId: string,
+    sourceUnitIds: readonly string[],
+  ): Promise<readonly SettlementRecord[]> {
+    if (sourceUnitIds.length === 0) return []
+    const rows = await this.database.selectFrom("settlement_records").selectAll()
+      .where("project_id", "=", projectId)
+      .where("source_unit_id", "in", sourceUnitIds)
+      .orderBy("created_at")
+      .execute()
+    return rows.map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      scopeId: row.scope_id,
+      sourceUnitId: row.source_unit_id,
+      graphRefs: decodeJson(row.graph_refs_json),
+      reason: row.reason,
+      status: row.status,
+      digest: row.digest,
+      createdAtMs: row.created_at,
+    }))
+  }
+
   public async stageSceneSpacetimeBindings(records: readonly SceneSpacetimeBindingRecord[]): Promise<void> {
     if (records.length === 0) return
     await this.database.insertInto("scene_spacetime_bindings").values(records.map((record) => ({
@@ -240,6 +263,37 @@ export class SqliteTurnPersistence implements TurnPersistencePort {
     }))).executeTakeFirstOrThrow()
   }
 
+  public async listSchedulableFrontiers(
+    projectId: string,
+    limit: number,
+  ): Promise<readonly FrontierRecord[]> {
+    if (limit <= 0) return []
+    const rows = await sql<FrontierRefRow>`
+      WITH ranked_frontiers AS (
+        SELECT frontier_refs.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY frontier_refs.frontier_anchor_ref
+            ORDER BY frontier_refs.last_processed_at DESC, frontier_refs.id DESC
+          ) AS frontier_rank
+        FROM frontier_refs
+        INNER JOIN artifact_scopes ON artifact_scopes.id = frontier_refs.scope_id
+        WHERE frontier_refs.project_id = ${projectId}
+          AND artifact_scopes.visibility = 'committed'
+      )
+      SELECT id, project_id, scope_id, frontier_anchor_ref, disposition,
+        last_scene_anchor_refs_json, last_time_anchor_refs_json,
+        last_location_anchor_refs_json, correspondence_refs_json,
+        last_processed_at, reason, revisit_condition
+      FROM ranked_frontiers
+      WHERE frontier_rank = 1
+        AND disposition IN ('active', 'deferred')
+      ORDER BY CASE disposition WHEN 'active' THEN 0 ELSE 1 END,
+        last_processed_at ASC, id ASC
+      LIMIT ${Math.floor(limit)}
+    `.execute(this.database)
+    return rows.rows.map(mapFrontier)
+  }
+
   public async updateTask(
     taskId: string,
     status: Parameters<TurnPersistencePort["updateTask"]>[1],
@@ -258,6 +312,12 @@ export class SqliteTurnPersistence implements TurnPersistencePort {
   public async findContext(contextId: string): Promise<TurnContext | undefined> {
     const row = await this.database.selectFrom("turn_contexts").select("context_json")
       .where("id", "=", contextId).executeTakeFirst()
+    return row === undefined ? undefined : turnContextSchema.parse(decodeJson(row.context_json))
+  }
+
+  public async findContextByTask(taskId: string): Promise<TurnContext | undefined> {
+    const row = await this.database.selectFrom("turn_contexts").select("context_json")
+      .where("task_id", "=", taskId).executeTakeFirst()
     return row === undefined ? undefined : turnContextSchema.parse(decodeJson(row.context_json))
   }
 
@@ -313,7 +373,7 @@ async function summarizeKvUsage(database: Kysely<ProjectDatabase>, contextId: st
 }
 
 function mapPhaseRun(row: PhaseRunRow): StoredPhaseRun {
-  const status = row.status === "running" || row.status === "completed" || row.status === "failed"
+  const status = row.status === "running" || row.status === "completed" || row.status === "failed" || row.status === "cancelled"
     ? row.status
     : "failed"
   return {
@@ -326,5 +386,22 @@ function mapPhaseRun(row: PhaseRunRow): StoredPhaseRun {
     usage: decodeJson(row.usage_json),
     startedAtMs: row.started_at,
     ...(row.finished_at === null ? {} : { finishedAtMs: row.finished_at }),
+  }
+}
+
+function mapFrontier(row: FrontierRefRow): FrontierRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    scopeId: row.scope_id,
+    frontierAnchorRef: row.frontier_anchor_ref,
+    disposition: row.disposition,
+    lastSceneAnchorRefs: decodeJson(row.last_scene_anchor_refs_json) as string[],
+    lastTimeAnchorRefs: decodeJson(row.last_time_anchor_refs_json) as string[],
+    lastLocationAnchorRefs: decodeJson(row.last_location_anchor_refs_json) as string[],
+    correspondenceRefs: decodeJson(row.correspondence_refs_json) as string[],
+    lastProcessedAt: row.last_processed_at,
+    reason: row.reason,
+    ...(row.revisit_condition === null ? {} : { revisitCondition: row.revisit_condition }),
   }
 }

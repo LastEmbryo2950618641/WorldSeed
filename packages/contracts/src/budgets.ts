@@ -10,6 +10,7 @@ export const modelCallBudgetSchema = z.object({
   maxOutputTokens: tokenCountSchema,
   remainingOutputTokens: tokenCountSchema,
   deadlineAtMs: tokenCountSchema,
+  modelRequestDeadlineAtMs: tokenCountSchema.optional(),
   retrievalExecutionDeadlineAtMs: tokenCountSchema.optional(),
   retrievalPhaseDeadlineAtMs: tokenCountSchema.optional(),
 })

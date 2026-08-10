@@ -14,6 +14,10 @@ import { FileCredentialVault } from "./credential-vault.js"
 
 const backend = new BackendProcess()
 
+if (!app.isPackaged && process.env.WORLDSEED_CDP_PORT !== undefined) {
+  app.commandLine.appendSwitch("remote-debugging-port", process.env.WORLDSEED_CDP_PORT)
+}
+
 async function createWindow(credentials: FileCredentialVault): Promise<BrowserWindow> {
   const display = screen.getPrimaryDisplay()
   const workArea = display.workArea

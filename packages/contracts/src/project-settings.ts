@@ -21,18 +21,24 @@ const graphSettingsSchema = z.object({
   layoutMode: z.literal("layered_collision_avoidance"),
 })
 
+const historySettingsSchema = z.object({
+  retentionLimit: positiveInteger.max(100_000).nullable(),
+})
+
 export const projectSettingsSchema = z.object({
   version: z.literal(2),
   execution: z.object({
-    maxModelCalls: positiveInteger.max(200),
+    maxModelCalls: positiveInteger.max(400),
     contextWindowTokens: positiveInteger.max(2_000_000),
     contextCompactionThresholdRatio: z.number().min(0.5).max(0.99),
     outputTokenLimitMode: z.literal("model"),
-    maxWallTimeMs: positiveInteger.max(1_800_000),
+    maxWallTimeMs: positiveInteger.max(7_200_000),
+    maxModelRequestTimeMs: positiveInteger.max(3_600_000).default(3_600_000),
     maxRetrievalRounds: positiveInteger.max(10),
   }),
   retrieval: retrievalSettingsSchema,
   graph: graphSettingsSchema,
+  history: historySettingsSchema.default({ retentionLimit: null }),
 }).superRefine(validateGraphSettings)
 
 export type ProjectSettings = z.infer<typeof projectSettingsSchema>

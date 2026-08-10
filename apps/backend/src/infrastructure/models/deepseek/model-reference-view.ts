@@ -90,6 +90,13 @@ function registerRequestReferences(request: PhaseRequestEnvelope, registry: Refe
       if (evidence.ownerKind === "node" || evidence.ownerKind === "link") {
         registerIfUuid(evidence.ownerId, evidence.ownerKind, registry)
       }
+      if (Array.isArray(evidence.relatedOwnerRefs)) {
+        for (const relatedOwner of evidence.relatedOwnerRefs) {
+          if (!isRecord(relatedOwner)) continue
+          if (relatedOwner.ownerKind !== "node" && relatedOwner.ownerKind !== "link") continue
+          registerIfUuid(relatedOwner.ownerId, relatedOwner.ownerKind, registry)
+        }
+      }
     }
   }
 }
@@ -155,11 +162,34 @@ function createModelReadEvidence(value: unknown): unknown {
   const {
     revisionId: ignoredRevisionId,
     sourceRefs: ignoredSourceRefs,
+    ownerId,
+    ownerKind,
+    relatedOwnerRefs,
     ...evidence
   } = value
   void ignoredRevisionId
   void ignoredSourceRefs
-  return evidence
+  const modelRelatedOwnerRefs = Array.isArray(relatedOwnerRefs)
+    ? relatedOwnerRefs.flatMap((relatedOwner) => {
+      if (!isRecord(relatedOwner)
+        || (relatedOwner.ownerKind !== "node" && relatedOwner.ownerKind !== "link")
+        || typeof relatedOwner.ownerId !== "string") return []
+      return [{
+        ownerKind: relatedOwner.ownerKind,
+        ownerId: relatedOwner.ownerId,
+        ...(Array.isArray(relatedOwner.exactKeys) ? { exactKeys: relatedOwner.exactKeys } : {}),
+        ...(typeof relatedOwner.semanticText === "string" ? { semanticText: relatedOwner.semanticText } : {}),
+      }]
+    })
+    : []
+  const modelCanAddressOwner = ownerKind === "node" || ownerKind === "link"
+    || typeof ownerId !== "string" || !isUuid(ownerId)
+  return {
+    ...evidence,
+    ownerKind,
+    ...(modelRelatedOwnerRefs.length > 0 ? { relatedOwnerRefs: modelRelatedOwnerRefs } : {}),
+    ...(modelCanAddressOwner ? { ownerId } : {}),
+  }
 }
 
 function createModelRetrievalGap(value: unknown): unknown {

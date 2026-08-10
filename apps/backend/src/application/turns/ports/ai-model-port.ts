@@ -24,6 +24,10 @@ export type PhaseModelExecution = Readonly<{
   usage: PhaseModelUsage
 }>
 
+export type ModelExecutionOptions = Readonly<{
+  signal?: AbortSignal
+}>
+
 export type AIModelInfo = Readonly<{
   provider: string
   model: string
@@ -34,7 +38,7 @@ export type AIModelInfo = Readonly<{
 
 export interface AIModelPort {
   readonly info?: AIModelInfo
-  execute(request: PhaseRequestEnvelope): Promise<PhaseModelExecution>
+  execute(request: PhaseRequestEnvelope, options?: ModelExecutionOptions): Promise<PhaseModelExecution>
 }
 
 export type PromptResource = Readonly<{
@@ -50,8 +54,10 @@ export interface PromptResourcePort {
 }
 
 export type TurnPhaseInput = Readonly<{
+  workflow: "turn" | "query" | "evolution"
   userInput: string
   chapterSequence: number
+  allowWorkspaceChapterReads: boolean
   presentation?: Readonly<{
     descriptionRulePath?: string | undefined
     proseStyleRulePath?: string | undefined
@@ -77,7 +83,17 @@ export type TurnReadEvidence = Readonly<{
   exactKeys: readonly string[]
   semanticText: string
   sourceRefs: readonly unknown[]
+  relatedOwnerRefs?: readonly RelatedOwnerRef[]
   digest: string
+  stateRole?: "current" | "historical"
+}>
+
+export type RelatedOwnerRef = Readonly<{
+  ownerKind: string
+  ownerId: string
+  revisionId?: string
+  exactKeys?: readonly string[]
+  semanticText?: string
 }>
 
 export type TurnRetrievalGap = Readonly<{

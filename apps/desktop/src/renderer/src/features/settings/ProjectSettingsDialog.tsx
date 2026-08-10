@@ -4,6 +4,7 @@ import {
   Bot,
   Database,
   Gauge,
+  History,
   Network,
   Search,
   X,
@@ -12,16 +13,17 @@ import {
 
 import { projectSettingsSchema, type ProjectSettings } from "@worldseed/contracts"
 
-type SettingsSection = "execution" | "retrieval" | "graph" | "model"
+type SettingsSection = "execution" | "retrieval" | "graph" | "history" | "model"
 type NumericExecutionSetting = Exclude<keyof ProjectSettings["execution"], "outputTokenLimitMode">
 
 type Props = Readonly<{
   projectName: string
   settings: ProjectSettings
   activeModelName: string
-  onClose(): void
-  onSave(settings: ProjectSettings): void | Promise<void>
-  onOpenModelSettings(): void
+  historyEntryCount?: number
+  onClose: () => void
+  onSave: (settings: ProjectSettings) => void | Promise<void>
+  onOpenModelSettings: () => void
 }>
 
 type SectionDefinition = Readonly<{
@@ -36,6 +38,7 @@ const sections: readonly SectionDefinition[] = [
   { id: "execution", label: "推演执行", group: "项目", keywords: "模型调用 token 耗时 预算 检索轮次", icon: Gauge },
   { id: "retrieval", label: "资料检索", group: "项目", keywords: "读取 请求 候选 深度 证据 token", icon: Database },
   { id: "graph", label: "世界图", group: "项目", keywords: "出度 入度 合并 预警 展开 节点 连接 入口 布局", icon: Network },
+  { id: "history", label: "推演历史", group: "项目", keywords: "保存 历史 世界线 保留 上限 删除", icon: History },
   { id: "model", label: "模型服务", group: "应用", keywords: "base url api key deepseek 模型", icon: Bot },
 ]
 
@@ -43,6 +46,7 @@ export function ProjectSettingsDialog({
   projectName,
   settings,
   activeModelName,
+  historyEntryCount = 8,
   onClose,
   onSave,
   onOpenModelSettings,
@@ -86,9 +90,16 @@ export function ProjectSettingsDialog({
     setDraft((current) => ({ ...current, graph: { ...current.graph, [key]: value } }))
     setSaveError(undefined)
   }
+  const updateHistoryLimit = (retentionLimit: number | null): void => {
+    setDraft((current) => ({ ...current, history: { retentionLimit } }))
+    setSaveError(undefined)
+  }
 
   const save = async (): Promise<void> => {
     if (!validation.success) return
+    const retained = validation.data.history.retentionLimit
+    const deleteCount = retained === null ? 0 : Math.max(0, historyEntryCount - retained)
+    if (deleteCount > 0 && !window.confirm(`应用此设置将立即删除最旧的 ${String(deleteCount)} 个推演历史保存点，且无法恢复。是否继续？`)) return
     setSaving(true)
     setSaveError(undefined)
     try {
@@ -128,6 +139,7 @@ export function ProjectSettingsDialog({
           {section === "execution" ? <ExecutionSettings value={draft.execution} onChange={updateExecution} /> : null}
           {section === "retrieval" ? <RetrievalSettings value={draft.retrieval} onChange={updateRetrieval} /> : null}
           {section === "graph" ? <GraphSettings value={draft.graph} onChange={updateGraph} /> : null}
+          {section === "history" ? <HistorySettings value={draft.history} entryCount={historyEntryCount} onChange={updateHistoryLimit} /> : null}
           {section === "model" ? <ModelSettings activeModelName={activeModelName} onOpen={onOpenModelSettings} /> : null}
         </div>
       </div>
@@ -142,24 +154,25 @@ export function ProjectSettingsDialog({
 
 function ExecutionSettings({ value, onChange }: {
   value: ProjectSettings["execution"]
-  onChange(key: NumericExecutionSetting, value: number): void
+  onChange: (key: NumericExecutionSetting, value: number) => void
 }): React.JSX.Element {
   return <SettingsPage icon={Gauge} title="推演执行" description="默认按每轮可能失败并保留约 30% 重试冗余计算。">
-    <NumberSetting label="最大模型调用次数" description="包含阶段调用和业务 Schema 修复调用" value={value.maxModelCalls} min={1} max={200} onChange={(next) => { onChange("maxModelCalls", next); }} />
+    <NumberSetting label="最大模型调用次数" description="包含阶段调用和业务 Schema 修复调用" value={value.maxModelCalls} min={1} max={400} onChange={(next) => { onChange("maxModelCalls", next); }} />
     <NumberSetting label="模型上下文窗口" description="当前模型单次请求可接受的上下文上限" value={value.contextWindowTokens} min={1} max={2_000_000} step={1000} onChange={(next) => { onChange("contextWindowTokens", next); }} />
     <NumberSetting label="主动压缩阈值" description={`达到 ${Math.floor(value.contextWindowTokens * value.contextCompactionThresholdRatio).toLocaleString()} Token 前由系统接管压缩`} value={Math.round(value.contextCompactionThresholdRatio * 100)} min={50} max={99} suffix="%" onChange={(next) => { onChange("contextCompactionThresholdRatio", next / 100); }} />
     <div className="settings-field-row">
-      <span><strong>输出 Token 上限</strong><small>应用不设置累计输出上限，也不向接口固定 max_tokens</small></span>
+      <span><strong>输出 Token 策略</strong><small>不限制整轮累计输出；正文按字数计算，控制阶段使用结构化护栏</small></span>
       <div className="settings-readonly-value"><Binary size={14} />由模型决定</div>
     </div>
-    <NumberSetting label="最长运行时间" description="墙钟时间上限，单位毫秒" value={value.maxWallTimeMs} min={1} max={1_800_000} step={1000} suffix="ms" onChange={(next) => { onChange("maxWallTimeMs", next); }} />
+    <NumberSetting label="单次模型请求最长时间" description="单次 AI 请求超过此时间后暂停并等待用户选择，不影响已保存检查点" value={value.maxModelRequestTimeMs} min={30_000} max={3_600_000} step={1000} suffix="ms" onChange={(next) => { onChange("maxModelRequestTimeMs", next); }} />
+    <NumberSetting label="最长运行时间" description="墙钟时间上限，单位毫秒" value={value.maxWallTimeMs} min={1} max={7_200_000} step={1000} suffix="ms" onChange={(next) => { onChange("maxWallTimeMs", next); }} />
     <NumberSetting label="最大检索轮次" description="同一阶段允许模型补充读取资料的轮数" value={value.maxRetrievalRounds} min={1} max={10} onChange={(next) => { onChange("maxRetrievalRounds", next); }} />
   </SettingsPage>
 }
 
 function RetrievalSettings({ value, onChange }: {
   value: ProjectSettings["retrieval"]
-  onChange(key: keyof ProjectSettings["retrieval"], value: number): void
+  onChange: (key: keyof ProjectSettings["retrieval"], value: number) => void
 }): React.JSX.Element {
   return <SettingsPage icon={Database} title="资料检索" description="限制每轮选择性读取的广度、深度和证据体积。">
     <NumberSetting label="每轮最大读取请求" description="模型一次返回中可执行的资料读取请求数" value={value.maxRequestsPerRound} min={1} max={50} onChange={(next) => { onChange("maxRequestsPerRound", next); }} />
@@ -171,7 +184,7 @@ function RetrievalSettings({ value, onChange }: {
 
 function GraphSettings({ value, onChange }: {
   value: ProjectSettings["graph"]
-  onChange(key: Exclude<keyof ProjectSettings["graph"], "layoutMode">, value: number): void
+  onChange: (key: Exclude<keyof ProjectSettings["graph"], "layoutMode">, value: number) => void
 }): React.JSX.Element {
   return <SettingsPage icon={Network} title="世界图" description="控制局部图容量、递归展开与可视化读取边界。">
     <NumberSetting label="直接出度上限" description="节点直接出口达到上限后，AI 应先合并相近出口" value={value.maxDirectOutDegree} min={1} max={64} onChange={(next) => { onChange("maxDirectOutDegree", next); }} />
@@ -189,7 +202,37 @@ function GraphSettings({ value, onChange }: {
   </SettingsPage>
 }
 
-function ModelSettings({ activeModelName, onOpen }: { activeModelName: string; onOpen(): void }): React.JSX.Element {
+function HistorySettings({ value, entryCount, onChange }: {
+  value: ProjectSettings["history"]
+  entryCount: number
+  onChange: (value: number | null) => void
+}): React.JSX.Element {
+  const limited = value.retentionLimit !== null
+  const deleteCount = value.retentionLimit === null ? 0 : Math.max(0, entryCount - value.retentionLimit)
+  return <SettingsPage icon={History} title="推演历史" description="控制项目可恢复保存点的数量；默认永久保留全部历史。">
+    <div className="settings-field-row history-retention-mode">
+      <span><strong>保留方式</strong><small>任务检查点不计入推演历史数量</small></span>
+      <div className="settings-segmented" role="group" aria-label="推演历史保留方式">
+        <button className={limited ? "" : "active"} type="button" onClick={() => { onChange(null); }}>无上限</button>
+        <button className={limited ? "active" : ""} type="button" onClick={() => { onChange(value.retentionLimit ?? 100); }}>限制数量</button>
+      </div>
+    </div>
+    <div className="settings-field-row">
+      <span><strong>保存点上限</strong><small>每新增一个保存点，超过上限时自动删除最旧历史</small></span>
+      {limited
+        ? <span className="settings-number-input"><input aria-label="保存点上限" type="number" value={value.retentionLimit ?? 100} min={1} max={100_000} onChange={(event) => { onChange(Number(event.target.value)); }} /><em>个</em></span>
+        : <div className="settings-readonly-value"><History size={14} />全部保留</div>}
+    </div>
+    <div className={`history-retention-preview ${deleteCount > 0 ? "destructive" : ""}`}>
+      <span><strong>当前历史</strong><em>{entryCount} 个保存点</em></span>
+      <p>{deleteCount > 0
+        ? `应用后立即删除最旧的 ${String(deleteCount)} 个保存点；增大上限无法恢复。`
+        : limited ? "当前数量未超过上限，不会立即删除历史。" : "无上限模式不会自动删除任何历史保存点。"}</p>
+    </div>
+  </SettingsPage>
+}
+
+function ModelSettings({ activeModelName, onOpen }: { activeModelName: string; onOpen: () => void }): React.JSX.Element {
   return <SettingsPage icon={Bot} title="模型服务" description="模型配置属于应用级安全设置，可被多个项目复用。">
     <div className="settings-model-summary">
       <span><Bot size={18} /></span>
@@ -219,7 +262,7 @@ function NumberSetting({ label, description, value, min, max, step = 1, suffix, 
   max: number
   step?: number
   suffix?: string
-  onChange(value: number): void
+  onChange: (value: number) => void
 }): React.JSX.Element {
   return <label className="settings-field-row">
     <span><strong>{label}</strong><small>{description}</small></span>

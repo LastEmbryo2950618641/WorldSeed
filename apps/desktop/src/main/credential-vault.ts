@@ -70,7 +70,7 @@ export class FileCredentialVault {
       return parsed
     } catch (error) {
       if (isFileNotFound(error)) return { version: 1, secrets: {} }
-      if (error instanceof SyntaxError) {
+      if (isJsonSyntaxError(error)) {
         await rename(this.filePath, `${this.filePath}.corrupt-${String(Date.now())}`)
         return { version: 1, secrets: {} }
       }
@@ -94,4 +94,8 @@ function isVaultFile(value: unknown): value is VaultFile {
 
 function isFileNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
+}
+
+function isJsonSyntaxError(error: unknown): boolean {
+  return error instanceof Error && error.name === "SyntaxError"
 }

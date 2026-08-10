@@ -1,14 +1,22 @@
-import { Activity, Check, Circle, GitBranch, LoaderCircle, Network, Orbit } from "lucide-react"
+import { useEffect, useState } from "react"
+import { Activity, Check, Circle, GitBranch, History, LoaderCircle, Network, Orbit } from "lucide-react"
 import { aiPhaseValues, type ProjectSettings } from "@worldseed/contracts"
 
 import type { GraphSlice, TaskSnapshot } from "../../api/client.js"
 import { useWorkbenchStore, type RightTab } from "../../state/workbench-store.js"
 import { WorldGraph } from "./WorldGraph.js"
+import { HistoryPanel } from "./HistoryPanel.js"
+import { RuntimeMonitor, TaskCheckpointDialog } from "./TaskCheckpointPrototype.js"
 
 type Props = Readonly<{
   task: TaskSnapshot | undefined
   graphSlice: GraphSlice | undefined
   graphSettings?: ProjectSettings["graph"] | undefined
+  executionSettings?: ProjectSettings["execution"] | undefined
+  historyRetentionLimit?: number | null | undefined
+  onOpenProjectSettings?(): void
+  onResumeTask?(mode: "continue" | "retry_phase", resetMetricIds: readonly string[]): Promise<void>
+  onPauseTask?(): Promise<void>
 }>
 
 const labels: Record<string, string> = {
@@ -30,36 +38,43 @@ const labels: Record<string, string> = {
   context_compaction_review: "复核压缩结果",
 }
 
-export function RightRail({ task, graphSlice, graphSettings }: Props): React.JSX.Element {
+export function RightRail({ task, graphSlice, graphSettings, executionSettings, historyRetentionLimit = null, onOpenProjectSettings, onResumeTask, onPauseTask }: Props): React.JSX.Element {
+  const [checkpointOpen, setCheckpointOpen] = useState(false)
   const tab = useWorkbenchStore((state) => state.rightTab)
   const setTab = useWorkbenchStore((state) => state.setRightTab)
-  return <aside className="right-rail">
+  useEffect(() => {
+    if (task?.status === "awaiting_user_decision") setCheckpointOpen(true)
+  }, [task?.status])
+  return <><aside className="right-rail">
     <div className="right-tabs">
       <Tab id="process" tab={tab} onChange={setTab} icon={<Activity size={15} />} label="流程" />
       <Tab id="graph" tab={tab} onChange={setTab} icon={<Network size={15} />} label="世界图" />
       <Tab id="evolution" tab={tab} onChange={setTab} icon={<Orbit size={15} />} label="自洽演化" />
+      <Tab id="history" tab={tab} onChange={setTab} icon={<History size={15} />} label="历史" />
     </div>
     <div className="right-content">
-      {tab === "process" ? <ProcessPanel task={task} /> : tab === "graph" ? <WorldGraph slice={graphSlice} settings={graphSettings} /> : <EvolutionPanel />}
+      {tab === "process" ? <ProcessPanel task={task} executionSettings={executionSettings} onOpenCheckpoint={() => { setCheckpointOpen(true); }} /> : null}
+      {tab === "graph" ? <WorldGraph slice={graphSlice} settings={graphSettings} /> : null}
+      {tab === "evolution" ? <EvolutionPanel /> : null}
+      {tab === "history" ? <HistoryPanel retentionLimit={historyRetentionLimit} taskRunning={task?.status === "running"} onOpenSettings={onOpenProjectSettings ?? (() => undefined)} onOpenCheckpoint={() => { setCheckpointOpen(true); }} /> : null}
     </div>
     <div className="world-summary"><span>世界时间 <strong>当前章节锚点</strong></span><span>图局部 <strong>{graphSlice === undefined ? "未读取" : `${String(graphSlice.nodes.length)} 节点 / ${String(graphSlice.links.length)} 连接`}</strong></span><span>任务状态 <strong>{task?.status ?? "未运行"}</strong></span></div>
-  </aside>
+  </aside>{checkpointOpen && task !== undefined ? <TaskCheckpointDialog
+    task={task}
+    {...(executionSettings === undefined ? {} : { executionLimits: executionSettings })}
+    onClose={() => { setCheckpointOpen(false); }}
+    onResume={onResumeTask ?? (() => Promise.reject(new Error("恢复接口尚未连接")))}
+    onPause={onPauseTask ?? (() => Promise.reject(new Error("暂停接口尚未连接")))}
+  /> : null}</>
 }
 
 function Tab({ id, tab, onChange, icon, label }: { id: RightTab; tab: RightTab; onChange: (tab: RightTab) => void; icon: React.ReactNode; label: string }): React.JSX.Element {
   return <button className={tab === id ? "active" : ""} onClick={() => { onChange(id); }}>{icon}{label}</button>
 }
 
-function ProcessPanel({ task }: { task: TaskSnapshot | undefined }): React.JSX.Element {
-  const result = task?.result
+function ProcessPanel({ task, executionSettings, onOpenCheckpoint }: { task: TaskSnapshot | undefined; executionSettings?: ProjectSettings["execution"] | undefined; onOpenCheckpoint: () => void }): React.JSX.Element {
   return <div className="process-panel">
-    <div className="usage-grid">
-      <span className="model-identity"><small>实际运行模型</small><strong>{result === undefined ? "-" : `${result.modelProvider} / ${result.modelName}`}</strong></span>
-      <span><small>模型调用</small><strong>{result?.modelCalls ?? "-"}</strong></span>
-      <span><small>输入 Token</small><strong>{result?.inputTokens.toLocaleString() ?? "-"}</strong></span>
-      <span><small>输出 Token</small><strong>{result?.outputTokens.toLocaleString() ?? "-"}</strong></span>
-      <span><small>KV 命中率</small><strong>{result?.kvCacheHitRate === undefined ? "不可用" : `${String(Math.round(result.kvCacheHitRate * 100))}%`}</strong></span>
-    </div>
+    <RuntimeMonitor task={task} {...(executionSettings === undefined ? {} : { executionLimits: executionSettings })} onOpenCheckpoint={onOpenCheckpoint} />
     <div className="phase-list">{aiPhaseValues.map((phase) => {
       const runs = task?.phaseRuns?.filter((run) => run.phase === phase) ?? []
       const latest = runs.at(-1)

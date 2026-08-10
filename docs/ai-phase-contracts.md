@@ -49,7 +49,7 @@ type PhaseRequest<TInput> = {
 
 应用层内部请求中的 ID 必须能够从同一项目、同一任务和允许的作用域解析。发送给模型时，适配器移除模型不需要的技术字段，并将仍需引用的真实 ID 替换为本次请求专属别名；模型消息不直接暴露持久化 UUID，也不直接嵌入整个持久化图。
 
-每个阶段只有一套 artifact schema。模型直接返回该语义 artifact，应用层不再维护第二套“模型 artifact”并做字段翻译。模型不生成章节、原文、提案、修订、投影、结算或决定记录 UUID；这些技术身份由应用层在物化时创建。模型使用本次请求的 `read-*`、`node-*`、`link-*` 等临时别名引用已有证据；适配器先验证别名结果，再恢复真实 ID。只有 `graph_governance` 可以为新图对象声明 `local:*`；其他阶段只能引用本轮可读的已有图身份，尚未建立的新事物通过语义字段描述并将图引用留空。
+每个阶段只有一套 artifact schema。模型直接返回该语义 artifact，应用层不再维护第二套“模型 artifact”并做字段翻译。模型不生成章节、原文、提案、修订、投影、结算或决定记录 UUID；这些技术身份由应用层在物化时创建。模型使用本次请求的 `read-*`、`node-*`、`link-*` 等临时别名引用已有证据；适配器先验证别名结果，再恢复真实 ID。只有 `graph_governance` 可以声明新的 `local:*`；后续阶段可以复用本请求中 graph governance 已声明的局部句柄，但不能新增或伪造新的局部句柄，其他阶段仍只能引用本轮可读的已有图身份。
 
 ## 3. 公共结果
 
@@ -118,6 +118,16 @@ type UnresolvedDependency = {
 
 AI只提出搜索表达和原因。应用层执行检索并把真实返回内容追加到同一个 `TurnContext`；请求本身不能成为事实依据。`directions`、`maxCandidates` 和 `maxDepth` 只是机械查询参数，不定义出口语义。AI读取返回局部后，必须理解该局部自身形成的组织方式，并自主决定下一步路径和停止位置。
 
+`sourceKinds = source` 指向应用内部已经提交且不可变的原文单元投影，不等同于读取用户工作目录中的 `章节正文/*.md`。`allowWorkspaceChapterReads = false` 只禁止后者，不得屏蔽内部原文投影。模型查询精确原话、标题或其他逐字内容时必须使用非空 `exactKeys`；若同一查询包含 `graph` 或 `revision`，应用层会机械去重并补入 `source`，保证精确索引候选不会因模型混淆两类来源而被过滤。仅查询 `rule` 或 `reference` 时不会补入 `source`，普通语义查询也不会因此扩大召回范围。
+
+source 语义候选命中后，应用层可围绕当前请求的首个高相关原文单元，按同一来源的相邻顺序返回有界连续窗口。窗口只由来源身份、序号、`maxCandidates` 和累计证据 Token 预算决定，不根据正文中的人物、对白、地点或事件类型特化。窗口内每个单元仍是独立 `read-*` 证据，模型只能引用实际返回的单元，不能把未返回的前后文当作已读事实。
+
+`requestedReads` 与 `outcome` 必须保持单一语义：只有 `outcome = request_read` 可以携带非空读取请求；`continue` 以及其他结果必须返回空数组。后端不再执行“已经决定继续、却又附带读取”的矛盾结果，避免阶段在已有充分证据后继续扩张。
+
+内部原文投影返回的 `relatedOwnerRefs` 是该原文单元经结算关联到的局部图摘要。它与原文证据共同计入 `retrieval.maxEvidenceTokens`，候选越多时每个原文候选获得的关联摘要份额越小；后端可裁剪关联摘要，但不能裁剪后把摘要冒充原文。这个限制只约束本轮模型可见证据体积，不限制持久图本身的节点、出口或 AI 自主演化结构。
+
+返回的 source 证据还可以带有 `relatedOwnerRefs` 及受限图投影摘要，这是应用根据原文单元结算记录提供的通用图入口，不是人物、地点或事件专用字段。模型应优先沿这些摘要恢复该原文单元对应的局部时空、状态与演化；摘要足够时不应重复展开全部入口，也不得用另一个仅语义相似的图候选替换已关联局部。
+
 ## 5. 各阶段产物
 
 ### 5.1 interpret
@@ -152,6 +162,8 @@ type RuleAssemblyArtifact = {
 ```
 
 基础规则不可被用户规则覆盖；用户规则在明确适用范围内优先。`selectedWorkspacePaths` 只能引用本轮 `readEvidence` 已实际返回的工作区文件。平台基础规则使用独立 `baseRuleVersion` 固定，不把用户目录中的只读镜像文件伪装成动态读取证据。
+
+`rule_assembly` 只返回规则选择控制结果，不返回规则正文、资料摘要或完整 `RuleSnapshot`。该阶段没有长文本字段；路径选择理由和冲突说明必须是短句，未选择新文件时三个 artifact 字段分别返回空数组、空对象和空数组。所有非正文阶段都使用独立的单次结构化输出护栏，防止控制 JSON 无限膨胀；正文阶段根据用户字数范围为正文和模型思考保留空间。护栏不改变整轮累计输出 Token 策略，也不是用户可见正文的字数上限。
 
 ### 5.3 source_retrieval
 
@@ -430,6 +442,8 @@ type FrontierSettlementArtifact = {
 
 `semantic_review.approvedAffectedFrontierRefs` 中每个引用必须恰好出现一次，不能增加、遗漏或重复；存在任何 rejected 前沿时不能进入本阶段。活跃或推迟前沿必须具有自己的最后场景、时间与地点锚点以及非空 `revisitCondition`；归档前沿继续保留返回路径，但可以省略重访条件。`disposition` 只用于调度，所有世界时空含义仍存在于普通图中。系统处理时间只能用于调度字段，不能写入 `lastTimeAnchorRefs`。
 
+`affectedFrontierRefs` 只表示能够独立继续、暂停或归档并可被重新发现的局部演化入口，不是 `mutations`、节点或连接的逐项清单；一个前沿可以承载多项修改。语义复核应先检查这一点，发现过度展开时退回图治理收敛集合。前沿结算的 `frontierAnchorRef` 集合必须与已批准集合完全相同；`correspondenceRefs` 只能补充前沿内部的可达结构，不能替代或偷换前沿锚点。
+
 ### 5.14 commit_review
 
 ```ts
@@ -479,6 +493,8 @@ type CommitReviewArtifact = {
 - 保存原始响应摘要、schema 版本和校验结果；
 - 结构失败最多执行 `maxSchemaRepairAttempts` 次，默认 `2`；
 - 修复调用继续使用同一个 `TurnContext`，追加校验错误，不重建任务上下文；
+- 请求尾部必须再次强调：请求资料是只读输入，完整性不是复述输入；每个数组项必须对应唯一语义项，单个 JSON 对象闭合后立即停止；`draft.artifact.contentMarkdown` 之外的文本字段保持简短，不重复正文或证据；
+- 发给模型的 Schema 只包含业务字段，去除 `$schema` 等自描述元数据；运行时仍以同一套 Zod Schema 作为唯一校验来源，不能让模型复制校验器元数据。
 - 达到上限后产生 `model_failure`，保留 pending 作用域，不猜测缺失字段。
 
 ## 8. 验收标准

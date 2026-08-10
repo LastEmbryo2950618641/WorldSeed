@@ -1,6 +1,7 @@
 import {
   PROTOCOL_VERSION,
   SCHEMA_VERSION,
+  phaseRequestEnvelopeSchema,
   phaseResultEnvelopeSchema,
   type AIPhase,
   type GraphMutation,
@@ -57,6 +58,7 @@ import type {
   TurnPhaseInput,
   TurnRetrievalGap,
   TurnReadEvidence,
+  RelatedOwnerRef,
 } from "./ports/index.js"
 import type { InternalProjectStore, InternalStorePort, WorkspacePort } from "../workspace/index.js"
 import type {
@@ -64,9 +66,10 @@ import type {
   WorkspaceCatalogPort,
   WorkspaceCatalogSnapshotRepository,
 } from "../retrieval/index.js"
+import { buildSourceUnitExactKeys } from "../retrieval/index.js"
 import { createRetrievalGaps } from "./retrieval-gap.js"
 
-const modelPhases: readonly AIPhase[] = [
+const turnModelPhases: readonly AIPhase[] = [
   "interpret",
   "rule_assembly",
   "emergence_planning",
@@ -81,7 +84,82 @@ const modelPhases: readonly AIPhase[] = [
   "commit_review",
 ]
 
+const turnExecutionPhases: readonly AIPhase[] = [
+  ...turnModelPhases.slice(0, 2),
+  "source_retrieval",
+  ...turnModelPhases.slice(2),
+]
+
+const queryExecutionPhases: readonly AIPhase[] = [
+  "interpret",
+  "rule_assembly",
+  "source_retrieval",
+  "draft",
+  "response_review",
+]
+
+const evolutionExecutionPhases: readonly AIPhase[] = [
+  "interpret",
+  "rule_assembly",
+  "source_retrieval",
+  "emergence_planning",
+  "emergence_review",
+  "dependency_audit",
+  "graph_governance",
+  "semantic_review",
+  "settlement_review",
+  "frontier_settlement",
+  "commit_review",
+]
+
+const phaseArtifactDependencies = {
+  interpret: [],
+  rule_assembly: ["interpret"],
+  source_retrieval: ["interpret", "rule_assembly"],
+  emergence_planning: ["interpret", "rule_assembly", "source_retrieval"],
+  emergence_review: ["source_retrieval", "emergence_planning"],
+  draft: ["interpret", "rule_assembly", "source_retrieval", "emergence_planning", "emergence_review"],
+  chapter_naming: ["draft"],
+  dependency_audit: ["source_retrieval", "emergence_planning", "emergence_review", "draft"],
+  response_review: ["source_retrieval", "draft", "dependency_audit"],
+  graph_governance: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "dependency_audit"],
+  semantic_review: ["draft", "dependency_audit", "graph_governance"],
+  settlement_review: ["dependency_audit", "graph_governance", "semantic_review"],
+  frontier_settlement: ["graph_governance", "semantic_review", "settlement_review"],
+  commit_review: ["draft", "dependency_audit", "graph_governance", "semantic_review", "settlement_review", "frontier_settlement"],
+  context_compaction: [
+    "interpret",
+    "rule_assembly",
+    "source_retrieval",
+    "emergence_planning",
+    "emergence_review",
+    "draft",
+    "chapter_naming",
+    "dependency_audit",
+    "response_review",
+    "graph_governance",
+    "semantic_review",
+    "settlement_review",
+    "frontier_settlement",
+    "commit_review",
+  ],
+  context_compaction_review: ["context_compaction"],
+} as const satisfies Record<AIPhase, readonly AIPhase[]>
+
+const workspaceCatalogPhases = new Set<AIPhase>(["interpret", "rule_assembly", "source_retrieval"])
+
+export type WorldWorkflow = "turn" | "query" | "evolution"
+
+function executionPhasesFor(workflow: WorldWorkflow): readonly AIPhase[] {
+  switch (workflow) {
+    case "turn": return turnExecutionPhases
+    case "query": return queryExecutionPhases
+    case "evolution": return evolutionExecutionPhases
+  }
+}
+
 export type TurnOrchestratorInput = Readonly<{
+  workflow?: WorldWorkflow
   projectId: ProjectId
   workspaceRootRef: string
   internalStore: InternalProjectStore
@@ -98,6 +176,7 @@ export type TurnOrchestratorInput = Readonly<{
   scopeId?: string
   contextId?: string
   sourceId?: string
+  allowWorkspaceChapterReads?: boolean
   maxModelCalls?: number
   maxContextTokens?: number
   maxInputTokens?: number
@@ -111,6 +190,7 @@ export type TurnOrchestratorInput = Readonly<{
 }>
 
 export type TurnExecutionResult = Readonly<{
+  kind: "turn"
   taskId: string
   turnId: string
   scopeId: string
@@ -124,6 +204,51 @@ export type TurnExecutionResult = Readonly<{
   modelName: string
   graphAnchorIds: readonly string[]
   kvCacheHitRate?: number
+}>
+
+export type WorldQueryExecutionResult = Readonly<{
+  kind: "query"
+  taskId: string
+  turnId: string
+  scopeId: string
+  contextId: string
+  answerMarkdown: string
+  evidence: readonly Readonly<{
+    readId: string
+    ownerKind: string
+    ownerId: string
+    revisionId?: string
+    sourceRefs: readonly unknown[]
+  }>[]
+  modelCalls: number
+  inputTokens: number
+  outputTokens: number
+  modelProvider: string
+  modelName: string
+  kvCacheHitRate?: number
+}>
+
+export type WorldEvolutionExecutionResult = Readonly<{
+  kind: "evolution"
+  taskId: string
+  turnId: string
+  scopeId: string
+  contextId: string
+  graphAnchorIds: readonly string[]
+  graphMutationCount: number
+  modelCalls: number
+  inputTokens: number
+  outputTokens: number
+  modelProvider: string
+  modelName: string
+  kvCacheHitRate?: number
+}>
+
+export type WorkflowExecutionResult = TurnExecutionResult | WorldQueryExecutionResult | WorldEvolutionExecutionResult
+
+export type TurnExecutionHooks = Readonly<{
+  onPrepared?(): void
+  signal?: AbortSignal
 }>
 
 export type TurnOrchestratorDependencies = Readonly<{
@@ -147,10 +272,21 @@ export type TurnOrchestratorDependencies = Readonly<{
   }>
 }>
 
+type TurnBudgetMetric = "model_calls" | "input_tokens" | "output_tokens" | "wall_time"
+
+class TurnBudgetExceededError extends Error {
+  public constructor(public readonly metric: TurnBudgetMetric, message: string) {
+    super(message)
+    this.name = "TurnBudgetExceededError"
+  }
+}
+
 export class TurnOrchestrator {
   public constructor(private readonly dependencies: TurnOrchestratorDependencies) {}
 
-  public async execute(input: TurnOrchestratorInput): Promise<TurnExecutionResult> {
+  public async execute(input: TurnOrchestratorInput, hooks?: TurnExecutionHooks): Promise<WorkflowExecutionResult> {
+    throwIfExecutionCancelled(hooks?.signal)
+    const workflow = input.workflow ?? "turn"
     const taskId = input.taskId ?? this.dependencies.createId()
     const turnId = input.turnId ?? this.dependencies.createId()
     const scopeId = input.scopeId ?? this.dependencies.createId()
@@ -163,6 +299,7 @@ export class TurnOrchestrator {
       taskId,
       turnId,
       projectId: input.projectId,
+      workflow,
       chapterSequence: input.chapterSequence,
       modelProvider: this.dependencies.model.info?.provider ?? "unknown",
       modelName: this.dependencies.model.info?.model ?? "unknown",
@@ -184,9 +321,9 @@ export class TurnOrchestrator {
       taskId,
       turnId,
       scopeId,
-      kind: "turn",
+      kind: workflow,
       status: "created",
-      reason: "AI turn starts from user input and creates a pending isolated scope",
+      reason: `AI ${workflow} starts from user input and creates a pending isolated scope`,
       configSnapshot: {
         budget,
         ...(input.projectSettings === undefined ? {} : { projectSettings: input.projectSettings }),
@@ -205,7 +342,7 @@ export class TurnOrchestrator {
       projectId: input.projectId,
       taskId,
       turnId,
-      taskKind: "turn",
+      taskKind: workflow,
       baseCommittedSequence: scope.baseCommittedSequence,
       maxTokens: resolveContextTokenLimit(
         input.maxContextTokens,
@@ -230,69 +367,201 @@ export class TurnOrchestrator {
       catalogSnapshot,
     )
     context = mandatoryWorkspaceReads.context
+    const evolutionFrontierReads = workflow === "evolution"
+      ? await this.readEvolutionFrontierEvidence(context, input)
+      : { context, evidence: [] as TurnReadEvidence[] }
+    context = evolutionFrontierReads.context
     await this.dependencies.persistence.saveContext(context, this.dependencies.now())
     await this.dependencies.persistence.updateTask(taskId, "running", undefined, createdAtMs)
+    hooks?.onPrepared?.()
 
     const artifacts: Partial<Record<AIPhase, unknown>> = {}
     const phaseRunIds: string[] = []
     const phaseRuns = new Map<AIPhase, string>()
     let sourceUnitIds: string[] = []
-    let readEvidence: TurnReadEvidence[] = [...mandatoryWorkspaceReads.evidence]
+    let readEvidence: TurnReadEvidence[] = [
+      ...mandatoryWorkspaceReads.evidence,
+      ...evolutionFrontierReads.evidence,
+    ]
     let retrievalGaps: TurnRetrievalGap[] = []
-    let usage = { modelCalls: 0, inputTokens: 0, outputTokens: 0, cacheHits: 0, cacheMisses: 0 }
+    return this.continueExecution(input, {
+      taskId,
+      turnId,
+      scopeId,
+      contextId,
+      sourceId,
+      createdAtMs,
+      baseRuleVersion: baseRules.version,
+      catalogSnapshot,
+      context,
+      artifacts,
+      phaseRunIds,
+      phaseRuns,
+      phaseAttempts: new Map(),
+      sourceUnitIds,
+      readEvidence,
+      visibleEvidence: [...readEvidence],
+      retrievalGaps,
+      totalUsage: emptyPhaseUsage(),
+      budget,
+      startPhaseIndex: 0,
+      ...(hooks?.signal === undefined ? {} : { signal: hooks.signal }),
+    })
+  }
+
+  public async resume(input: TurnOrchestratorInput, mode: "continue" | "retry_phase" = "continue", hooks?: TurnExecutionHooks): Promise<WorkflowExecutionResult> {
+    throwIfExecutionCancelled(hooks?.signal)
+    const workflow = input.workflow ?? "turn"
+    const executionPhases = executionPhasesFor(workflow)
+    if (input.taskId === undefined) throw new Error("A taskId is required to resume a turn")
+    const task = await this.dependencies.taskScopes.findTask(input.taskId)
+    if (task === undefined) throw new Error(`Cannot resume missing task: ${input.taskId}`)
+    if (task.status !== "awaiting_user_decision" && task.status !== "paused") {
+      throw new Error(`Task cannot resume from status: ${task.status}`)
+    }
+    const scope = await this.dependencies.taskScopes.findScope(task.scopeId)
+    const context = await this.dependencies.persistence.findContextByTask(input.taskId)
+    const storedRuns = await this.dependencies.persistence.listPhaseRuns(input.taskId)
+    if (scope === undefined || context === undefined || storedRuns.length === 0) {
+      throw new Error("The task has no recoverable phase checkpoint")
+    }
+    const latestRun = storedRuns.at(-1)
+    if (latestRun === undefined) throw new Error("The task has no recoverable phase checkpoint")
+    const storedInputs = storedRuns.map((run) => {
+      const storedRequest = phaseRequestEnvelopeSchema.parse(run.request)
+      return readStoredTurnPhaseInput(storedRequest.input)
+    })
+    const latestInput = storedInputs.at(-1)
+    if (latestInput === undefined) throw new Error("The task has no recoverable phase checkpoint")
+    const sourceId = [...storedInputs].reverse().find((storedInput) => storedInput.sourceId !== undefined)?.sourceId
+    const catalogSnapshot = [...storedInputs].reverse().find((storedInput) => storedInput.workspaceCatalog !== undefined)?.workspaceCatalog
+    if (sourceId === undefined || catalogSnapshot === undefined) {
+      throw new Error("The task checkpoint is missing source or workspace catalog state")
+    }
+    const artifacts: Partial<Record<AIPhase, unknown>> = {}
+    const phaseRuns = new Map<AIPhase, string>()
+    const phaseAttempts = new Map<AIPhase, number>()
+    for (const run of storedRuns) {
+      phaseRuns.set(run.phase, run.phaseRunId)
+      phaseAttempts.set(run.phase, Math.max(phaseAttempts.get(run.phase) ?? 0, run.attempt))
+      if (run.status !== "completed" || run.result === undefined) continue
+      const result = phaseResultEnvelopeSchema.parse(run.result)
+      artifacts[run.phase] = parsePhaseArtifact(run.phase, result.artifact)
+    }
+    const latestPhaseIndex = executionPhases.indexOf(latestRun.phase)
+    if (latestPhaseIndex < 0) throw new Error(`Cannot resume unknown phase: ${latestRun.phase}`)
+    const startPhaseIndex = latestRun.status === "completed" ? latestPhaseIndex + 1 : latestPhaseIndex
+    const commitReviewIndex = executionPhases.indexOf("commit_review")
+    if (commitReviewIndex >= 0 && startPhaseIndex >= commitReviewIndex) {
+      await this.dependencies.commit.resetPending(task.scopeId)
+    }
+    const nowMs = input.nowMs ?? this.dependencies.now()
+    const totalUsage = storedRuns.reduce((total, run) => addPhaseUsage(total, phaseUsageFromStored(run.usage)), emptyPhaseUsage())
+    const restoredReadEvidence = uniqueTurnReadEvidence(storedInputs.flatMap((storedInput) => storedInput.readEvidence))
+    this.log("info", "turn.resumed", {
+      taskId: task.taskId,
+      resumePhase: executionPhases[startPhaseIndex],
+      completedPhaseRuns: storedRuns.filter((run) => run.status === "completed").length,
+      previousModelCalls: totalUsage.modelCalls,
+      mode,
+    })
+    await this.dependencies.persistence.updateTask(task.taskId, "running", executionPhases[startPhaseIndex], nowMs)
+    return this.continueExecution(input, {
+      taskId: task.taskId,
+      turnId: scope.turnId,
+      scopeId: task.scopeId,
+      contextId: context.contextId,
+      sourceId,
+      createdAtMs: task.createdAtMs,
+      baseRuleVersion: (await this.dependencies.prompts.loadBaseRules()).version,
+      catalogSnapshot,
+      context,
+      artifacts,
+      phaseRunIds: storedRuns.map((run) => run.phaseRunId),
+      phaseRuns,
+      phaseAttempts,
+      sourceUnitIds: [...latestInput.sourceUnitIds],
+      readEvidence: restoredReadEvidence,
+      visibleEvidence: [...latestInput.readEvidence],
+      retrievalGaps: [...latestInput.retrievalGaps],
+      totalUsage,
+      budget: createBudget(input, nowMs),
+      startPhaseIndex,
+      ...(hooks?.signal === undefined ? {} : { signal: hooks.signal }),
+    })
+  }
+
+  private async continueExecution(input: TurnOrchestratorInput, state: TurnExecutionState): Promise<WorkflowExecutionResult> {
+    const workflow = input.workflow ?? "turn"
+    const executionPhases = executionPhasesFor(workflow)
+    let {
+      context,
+      sourceUnitIds,
+      readEvidence,
+      visibleEvidence,
+      retrievalGaps,
+      totalUsage,
+    } = state
+    const artifacts = state.artifacts
+    const phaseRunIds = state.phaseRunIds
+    const phaseRuns = state.phaseRuns
+    let windowUsage = emptyPhaseUsage()
 
     try {
-      for (const phase of [...modelPhases.slice(0, 2), "source_retrieval" as const, ...modelPhases.slice(2)]) {
+      for (const phase of executionPhases.slice(state.startPhaseIndex)) {
+        throwIfExecutionCancelled(state.signal)
         const phaseStartedAtMs = this.dependencies.now()
         const phaseRunId = this.dependencies.createId()
+        const attempt = (state.phaseAttempts.get(phase) ?? 0) + 1
+        state.phaseAttempts.set(phase, attempt)
         phaseRunIds.push(phaseRunId)
         phaseRuns.set(phase, phaseRunId)
         const result = await this.executePhase({
           input,
-          inputScopeId: scopeId,
-          sourceId,
+          inputScopeId: state.scopeId,
+          sourceId: state.sourceId,
           sourceUnitIds,
           phase,
           phaseRunId,
+          attempt,
           phaseRunIds,
           context,
           artifacts,
           readEvidence,
+          visibleEvidence,
           retrievalGaps,
-          catalogSnapshot,
-          budget,
-          usage,
+          catalogSnapshot: state.catalogSnapshot,
+          budget: state.budget,
+          usage: windowUsage,
+          ...(state.signal === undefined ? {} : { signal: state.signal }),
         })
         context = result.context
         readEvidence = [...result.readEvidence]
+        visibleEvidence = [...result.visibleEvidence]
         retrievalGaps = [...result.retrievalGaps]
         phaseRuns.set(phase, result.phaseRunId)
         artifacts[phase] = result.artifact
-        usage = {
-          modelCalls: usage.modelCalls + result.usage.modelCalls,
-          inputTokens: usage.inputTokens + result.usage.inputTokens,
-          outputTokens: usage.outputTokens + result.usage.outputTokens,
-          cacheHits: usage.cacheHits + result.usage.cacheHits,
-          cacheMisses: usage.cacheMisses + result.usage.cacheMisses,
-        }
+        windowUsage = addPhaseUsage(windowUsage, result.usage)
+        totalUsage = addPhaseUsage(totalUsage, result.usage)
         this.log("debug", "phase.completed", {
-          taskId,
+          taskId: state.taskId,
           phase,
           phaseRunId: result.phaseRunId,
           elapsedMs: this.dependencies.now() - phaseStartedAtMs,
           phaseModelCalls: result.usage.modelCalls,
           phaseInputTokens: result.usage.inputTokens,
           phaseOutputTokens: result.usage.outputTokens,
-          totalModelCalls: usage.modelCalls,
-          totalInputTokens: usage.inputTokens,
-          totalOutputTokens: usage.outputTokens,
-          deadlineRemainingMs: budget.deadlineAtMs - this.dependencies.now(),
+          totalModelCalls: totalUsage.modelCalls,
+          totalInputTokens: totalUsage.inputTokens,
+          totalOutputTokens: totalUsage.outputTokens,
+          deadlineRemainingMs: state.budget.deadlineAtMs - this.dependencies.now(),
           contextSegments: context.segments.length,
           evidenceCount: readEvidence.length,
+          visibleEvidenceCount: visibleEvidence.length,
           retrievalGapCount: retrievalGaps.length,
         })
-        assertUsageWithinBudget(budget, usage, this.dependencies.now())
-        await this.dependencies.persistence.updateTask(taskId, phase === "commit_review" ? "committing" : "running", phase, this.dependencies.now())
+        assertUsageWithinBudget(state.budget, windowUsage, this.dependencies.now())
+        await this.dependencies.persistence.updateTask(state.taskId, phase === "commit_review" ? "committing" : "running", phase, this.dependencies.now())
         if (phase === "rule_assembly") {
           const rules = ruleAssemblyArtifactSchema.parse(result.artifact)
           const ruleSnapshotId = this.dependencies.createId()
@@ -300,8 +569,8 @@ export class TurnOrchestrator {
           const ruleSnapshot = {
             id: ruleSnapshotId,
             projectId: input.projectId,
-            taskId,
-            baseRuleVersion: baseRules.version,
+            taskId: state.taskId,
+            baseRuleVersion: state.baseRuleVersion,
             sourceVersions,
             selectionReasons: rules.selectionReasons,
             createdAtMs: this.dependencies.now(),
@@ -314,108 +583,282 @@ export class TurnOrchestrator {
           await this.dependencies.persistence.saveContext(context, this.dependencies.now())
         }
         if (phase === "chapter_naming") {
-          sourceUnitIds = await this.persistDraftUnits(input, sourceId, artifacts)
+          sourceUnitIds = await this.persistDraftUnits(input, state.scopeId, state.sourceId, artifacts)
         }
       }
 
-      const naming = chapterNamingArtifactSchema.parse(artifacts.chapter_naming)
-      const draft = internalDraftArtifactSchema.parse(artifacts.draft)
-      const commitReview = parsePhaseArtifact("commit_review", artifacts.commit_review) as { recommendation: string }
-      this.log("debug", "turn.commit_review.advisory", {
-        taskId,
-        recommendation: commitReview.recommendation,
-        message: "AI commit review is advisory; structural and settlement gates decide whether the turn can be persisted",
-      })
-      const chapterContent = ensureHeading(naming.heading, draft.contentMarkdown)
-      const contentRef = await this.dependencies.internalStore.writeImmutableDocument(input.internalStore, sourceId, chapterContent)
-      await this.stageDocument(input, sourceId, scopeId, naming, contentRef, chapterContent, createdAtMs)
-      const graphAnchorIds = await this.stageGraphAndSettlement(
-        input,
-        taskId,
-        sourceId,
-        scopeId,
-        phaseRuns.get("graph_governance"),
-        artifacts,
-        sourceUnitIds,
-        readEvidence,
-        createdAtMs,
-      )
-
-      await this.dependencies.commit.commit(scopeId)
-      const chapterPath = `章节正文/${sanitizeFilename(naming.filename)}`
-      await this.dependencies.workspace.publishChapter(input.workspaceRootRef, chapterPath, chapterContent)
-      await this.dependencies.persistence.updateTask(taskId, "completed", "commit_review", this.dependencies.now())
-      const totalCacheTokens = usage.cacheHits + usage.cacheMisses
-      const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
-      this.log("info", "turn.committed", {
-        taskId,
-        turnId,
-        scopeId,
-        chapterPath,
-        elapsedMs: this.dependencies.now() - createdAtMs,
-        modelCalls: usage.modelCalls,
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        graphMutationCount: governance.mutations.length,
-      })
-      return {
-        taskId,
-        turnId,
-        scopeId,
-        contextId,
-        chapterPath,
-        chapterHeading: naming.heading,
-        modelCalls: usage.modelCalls,
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        modelProvider: this.dependencies.model.info?.provider ?? "unknown",
-        modelName: this.dependencies.model.info?.model ?? "unknown",
-        graphAnchorIds,
-        ...(totalCacheTokens === 0 ? {} : { kvCacheHitRate: usage.cacheHits / totalCacheTokens }),
+      throwIfExecutionCancelled(state.signal)
+      if (workflow === "query") {
+        return await this.completeQuery(state, artifacts, readEvidence, totalUsage)
       }
+      if (workflow === "evolution") {
+        return await this.completeEvolution(input, state, artifacts, phaseRuns, readEvidence, totalUsage)
+      }
+      return await this.completeTurn(input, state, artifacts, phaseRuns, sourceUnitIds, readEvidence, totalUsage)
     } catch (error) {
+      if (state.signal?.aborted) {
+        const cancelledPhase = phaseRuns.size === 0 ? undefined : [...phaseRuns.keys()].at(-1)
+        const cancelledAtMs = this.dependencies.now()
+        this.log("info", "turn.cancelled", {
+          taskId: state.taskId,
+          turnId: state.turnId,
+          phase: cancelledPhase,
+          phaseRunId: phaseRuns.get(cancelledPhase as AIPhase),
+          elapsedMs: cancelledAtMs - state.createdAtMs,
+        })
+        await this.dependencies.persistence.updateTask(
+          state.taskId,
+          "cancelled",
+          cancelledPhase,
+          cancelledAtMs,
+        )
+        throw executionCancellationReason(state.signal)
+      }
       const failedPhase = phaseRuns.size === 0 ? undefined : [...phaseRuns.keys()].at(-1)
-      this.log("error", "turn.failed", {
-        taskId,
-        turnId,
+      const interruptedAtMs = this.dependencies.now()
+      const normalizedError = normalizeDeadlineInterruption(error, state.budget, interruptedAtMs)
+      const interruption = createInterruptionRecord(normalizedError, failedPhase, phaseRuns.get(failedPhase as AIPhase), interruptedAtMs)
+      this.log("warn", "turn.interrupted", {
+        taskId: state.taskId,
+        turnId: state.turnId,
         failedPhase,
-        elapsedMs: this.dependencies.now() - createdAtMs,
-        deadlineAtMs: budget.deadlineAtMs,
-        nowMs: this.dependencies.now(),
-        usage,
-        error,
+        elapsedMs: interruptedAtMs - state.createdAtMs,
+        deadlineAtMs: state.budget.deadlineAtMs,
+        nowMs: interruptedAtMs,
+        usage: totalUsage,
+        interruption,
       })
-      await this.dependencies.persistence.updateTask(taskId, "failed", failedPhase, this.dependencies.now(), {
-        message: error instanceof Error ? error.message : String(error),
-        failedAtMs: this.dependencies.now(),
-      })
-      throw error
+      await this.dependencies.persistence.updateTask(
+        state.taskId,
+        "awaiting_user_decision",
+        failedPhase,
+        interruptedAtMs,
+        interruption,
+      )
+      throw normalizedError
+    }
+  }
+
+  private async completeTurn(
+    input: TurnOrchestratorInput,
+    state: TurnExecutionState,
+    artifacts: Partial<Record<AIPhase, unknown>>,
+    phaseRuns: ReadonlyMap<AIPhase, string>,
+    sourceUnitIds: readonly string[],
+    readEvidence: readonly TurnReadEvidence[],
+    totalUsage: PhaseUsage,
+  ): Promise<TurnExecutionResult> {
+    const naming = chapterNamingArtifactSchema.parse(artifacts.chapter_naming)
+    const draft = internalDraftArtifactSchema.parse(artifacts.draft)
+    const commitReview = parsePhaseArtifact("commit_review", artifacts.commit_review) as { recommendation: string }
+    this.log("debug", "turn.commit_review.advisory", {
+      taskId: state.taskId,
+      recommendation: commitReview.recommendation,
+      message: "AI commit review is advisory; structural and settlement gates decide whether the turn can be persisted",
+    })
+    const chapterContent = ensureHeading(naming.heading, draft.contentMarkdown)
+    const contentRef = await this.dependencies.internalStore.writeImmutableDocument(input.internalStore, state.sourceId, chapterContent)
+    await this.stageDocument(input, state.sourceId, state.scopeId, naming, contentRef, chapterContent, state.createdAtMs)
+    const graphAnchorIds = await this.stageGraphAndSettlement(
+      input,
+      state.taskId,
+      state.sourceId,
+      state.scopeId,
+      phaseRuns.get("graph_governance"),
+      artifacts,
+      sourceUnitIds,
+      readEvidence,
+      state.createdAtMs,
+    )
+
+    await this.dependencies.commit.commit(state.scopeId)
+    const chapterPath = `章节正文/${sanitizeFilename(naming.filename)}`
+    await this.dependencies.workspace.publishChapter(input.workspaceRootRef, chapterPath, chapterContent)
+    await this.dependencies.persistence.updateTask(state.taskId, "completed", "commit_review", this.dependencies.now())
+    const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
+    this.log("info", "turn.committed", {
+      taskId: state.taskId,
+      turnId: state.turnId,
+      scopeId: state.scopeId,
+      chapterPath,
+      elapsedMs: this.dependencies.now() - state.createdAtMs,
+      modelCalls: totalUsage.modelCalls,
+      inputTokens: totalUsage.inputTokens,
+      outputTokens: totalUsage.outputTokens,
+      graphMutationCount: governance.mutations.length,
+    })
+    return {
+      kind: "turn",
+      taskId: state.taskId,
+      turnId: state.turnId,
+      scopeId: state.scopeId,
+      contextId: state.contextId,
+      chapterPath,
+      chapterHeading: naming.heading,
+      modelCalls: totalUsage.modelCalls,
+      inputTokens: totalUsage.inputTokens,
+      outputTokens: totalUsage.outputTokens,
+      modelProvider: this.dependencies.model.info?.provider ?? "unknown",
+      modelName: this.dependencies.model.info?.model ?? "unknown",
+      graphAnchorIds,
+      ...cacheRateResult(totalUsage),
+    }
+  }
+
+  private async completeQuery(
+    state: TurnExecutionState,
+    artifacts: Partial<Record<AIPhase, unknown>>,
+    readEvidence: readonly TurnReadEvidence[],
+    totalUsage: PhaseUsage,
+  ): Promise<WorldQueryExecutionResult> {
+    const draft = internalDraftArtifactSchema.parse(artifacts.draft)
+    const review = parsePhaseArtifact("response_review", artifacts.response_review) as {
+      evidenceClosed: boolean
+      leaksUnobservedInformation: boolean
+      requiresWorkflowUpgrade: boolean
+    }
+    this.log("info", "world.query.reviewed", {
+      taskId: state.taskId,
+      evidenceClosed: review.evidenceClosed,
+      leaksUnobservedInformation: review.leaksUnobservedInformation,
+      requiresWorkflowUpgrade: review.requiresWorkflowUpgrade,
+      evidenceCount: readEvidence.length,
+    })
+    await this.dependencies.commit.retire(state.scopeId, this.dependencies.now())
+    await this.dependencies.persistence.updateTask(state.taskId, "completed", "response_review", this.dependencies.now())
+    return {
+      kind: "query",
+      taskId: state.taskId,
+      turnId: state.turnId,
+      scopeId: state.scopeId,
+      contextId: state.contextId,
+      answerMarkdown: draft.contentMarkdown,
+      evidence: readEvidence.map((evidence) => ({
+        readId: evidence.readId,
+        ownerKind: evidence.ownerKind,
+        ownerId: evidence.ownerId,
+        ...(evidence.revisionId === undefined ? {} : { revisionId: evidence.revisionId }),
+        ...(evidence.relatedOwnerRefs === undefined ? {} : { relatedOwnerRefs: evidence.relatedOwnerRefs }),
+        sourceRefs: evidence.sourceRefs,
+      })),
+      modelCalls: totalUsage.modelCalls,
+      inputTokens: totalUsage.inputTokens,
+      outputTokens: totalUsage.outputTokens,
+      modelProvider: this.dependencies.model.info?.provider ?? "unknown",
+      modelName: this.dependencies.model.info?.model ?? "unknown",
+      ...cacheRateResult(totalUsage),
+    }
+  }
+
+  private async completeEvolution(
+    input: TurnOrchestratorInput,
+    state: TurnExecutionState,
+    artifacts: Partial<Record<AIPhase, unknown>>,
+    phaseRuns: ReadonlyMap<AIPhase, string>,
+    readEvidence: readonly TurnReadEvidence[],
+    totalUsage: PhaseUsage,
+  ): Promise<WorldEvolutionExecutionResult> {
+    assertEvolutionFrontierContinuity(readEvidence)
+    const commitReview = parsePhaseArtifact("commit_review", artifacts.commit_review) as { recommendation: string }
+    this.log("debug", "world.evolve.commit_review.advisory", {
+      taskId: state.taskId,
+      recommendation: commitReview.recommendation,
+    })
+    const graphAnchorIds = await this.stageGraphAndSettlement(
+      input,
+      state.taskId,
+      state.sourceId,
+      state.scopeId,
+      phaseRuns.get("graph_governance"),
+      artifacts,
+      [],
+      readEvidence,
+      state.createdAtMs,
+    )
+    await this.dependencies.commit.commit(state.scopeId)
+    await this.dependencies.persistence.updateTask(state.taskId, "completed", "commit_review", this.dependencies.now())
+    const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
+    this.log("info", "world.evolve.committed", {
+      taskId: state.taskId,
+      turnId: state.turnId,
+      scopeId: state.scopeId,
+      graphMutationCount: governance.mutations.length,
+      elapsedMs: this.dependencies.now() - state.createdAtMs,
+      modelCalls: totalUsage.modelCalls,
+      inputTokens: totalUsage.inputTokens,
+      outputTokens: totalUsage.outputTokens,
+    })
+    return {
+      kind: "evolution",
+      taskId: state.taskId,
+      turnId: state.turnId,
+      scopeId: state.scopeId,
+      contextId: state.contextId,
+      graphAnchorIds,
+      graphMutationCount: governance.mutations.length,
+      modelCalls: totalUsage.modelCalls,
+      inputTokens: totalUsage.inputTokens,
+      outputTokens: totalUsage.outputTokens,
+      modelProvider: this.dependencies.model.info?.provider ?? "unknown",
+      modelName: this.dependencies.model.info?.model ?? "unknown",
+      ...cacheRateResult(totalUsage),
     }
   }
 
   private async executePhase(input: ExecutePhaseInput): Promise<ExecutePhaseResult> {
+    throwIfExecutionCancelled(input.signal)
     const prompt = await this.dependencies.prompts.loadPhase(input.phase)
     let currentContext = input.context
     let currentPhaseRunId = input.phaseRunId
-    let attempt = 1
+    let attempt = input.attempt
     let phaseUsage = emptyPhaseUsage()
     let currentEvidence = [...input.readEvidence]
+    let currentVisibleEvidence = [...input.visibleEvidence]
     let currentRetrievalGaps = [...input.retrievalGaps]
+    const inheritedRetrievalGapCount = currentRetrievalGaps.length
+    const inheritedVisibleEvidence = uniqueTurnReadEvidence(input.visibleEvidence)
+    const phaseCitedReadIds = new Set<string>()
+    const carryForwardEvidence = (): TurnReadEvidence[] => {
+      const selected = selectCarryForwardEvidence(
+        input.phase,
+        inheritedVisibleEvidence,
+        currentVisibleEvidence,
+        [...phaseCitedReadIds],
+      )
+      this.log("debug", "phase.evidence_window.selected", {
+        taskId: currentContext.taskId,
+        phase: input.phase,
+        inheritedEvidenceCount: inheritedVisibleEvidence.length,
+        availableEvidenceCount: currentVisibleEvidence.length,
+        citedEvidenceCount: phaseCitedReadIds.size,
+        selectedEvidenceCount: selected.length,
+      })
+      return selected
+    }
 
     for (;;) {
       const phaseInput: TurnPhaseInput = {
+        workflow: input.input.workflow ?? "turn",
         userInput: input.input.userInput,
         chapterSequence: input.input.chapterSequence,
+        allowWorkspaceChapterReads: input.input.allowWorkspaceChapterReads ?? true,
         ...(input.input.presentation === undefined ? {} : { presentation: input.input.presentation }),
         sourceId: input.sourceId,
         sourceUnitIds: input.sourceUnitIds,
         phaseRunIds: input.phaseRunIds,
-        readEvidence: currentEvidence,
+        readEvidence: currentVisibleEvidence,
         retrievalGaps: currentRetrievalGaps,
-        workspaceCatalog: input.catalogSnapshot,
+        ...(phaseUsesWorkspaceCatalog(input.phase) ? { workspaceCatalog: input.catalogSnapshot } : {}),
         ...(input.input.projectSettings === undefined ? {} : { projectSettings: input.input.projectSettings }),
-        artifacts: input.artifacts,
+        artifacts: selectPhaseArtifacts(input.phase, input.artifacts),
       }
+      const phaseBudget = remainingBudget(input.budget, {
+        modelCalls: input.usage.modelCalls + phaseUsage.modelCalls,
+        inputTokens: input.usage.inputTokens + phaseUsage.inputTokens,
+        outputTokens: input.usage.outputTokens + phaseUsage.outputTokens,
+      })
+      const modelRequestTimeoutMs = input.input.projectSettings?.execution.maxModelRequestTimeMs
+        ?? defaultProjectSettings.execution.maxModelRequestTimeMs
       const request: PhaseRequestEnvelope = {
         schemaVersion: SCHEMA_VERSION,
         envelopeId: this.dependencies.createId(),
@@ -429,16 +872,33 @@ export class TurnOrchestrator {
         promptRef: prompt.ref,
         promptDigest: prompt.digest,
         contextViewRef: digest({ contextId: currentContext.contextId, segments: currentContext.segments }),
-        committedReadIds: [...currentContext.readLedger.committedReadIds],
-        visiblePendingIds: [...currentContext.readLedger.visiblePendingIds],
-        remainingBudget: remainingBudget(input.budget, {
-          modelCalls: input.usage.modelCalls + phaseUsage.modelCalls,
-          inputTokens: input.usage.inputTokens + phaseUsage.inputTokens,
-          outputTokens: input.usage.outputTokens + phaseUsage.outputTokens,
-        }),
+        committedReadIds: currentVisibleEvidence
+          .filter((evidence) => evidence.visibility === "committed")
+          .map((evidence) => evidence.readId),
+        visiblePendingIds: currentVisibleEvidence
+          .filter((evidence) => evidence.visibility === "pending")
+          .map((evidence) => evidence.readId),
+        remainingBudget: {
+          ...phaseBudget,
+          modelRequestDeadlineAtMs: Math.min(
+            phaseBudget.deadlineAtMs,
+            this.dependencies.now() + modelRequestTimeoutMs,
+          ),
+        },
         input: phaseInput,
       }
       const startedAtMs = this.dependencies.now()
+      await this.dependencies.persistence.updateTask(
+        currentContext.taskId,
+        input.phase === "commit_review" ? "committing" : "running",
+        input.phase,
+        this.dependencies.now(),
+      )
+
+      if (input.usage.modelCalls + phaseUsage.modelCalls >= input.budget.maxCalls) {
+        throw new TurnBudgetExceededError("model_calls", "Model call budget exhausted before the next phase")
+      }
+
       await this.dependencies.persistence.startPhaseRun({
         phaseRunId: currentPhaseRunId,
         projectId: input.input.projectId,
@@ -459,27 +919,23 @@ export class TurnOrchestrator {
         committedReadCount: request.committedReadIds.length,
         visiblePendingCount: request.visiblePendingIds.length,
         evidenceCount: currentEvidence.length,
+        visibleEvidenceCount: currentVisibleEvidence.length,
         retrievalGapCount: currentRetrievalGaps.length,
         priorArtifactCount: Object.keys(input.artifacts).length,
         remainingCalls: request.remainingBudget.remainingCalls,
         remainingInputTokens: request.remainingBudget.remainingInputTokens,
         remainingOutputTokens: request.remainingBudget.remainingOutputTokens,
         deadlineRemainingMs: request.remainingBudget.deadlineAtMs - this.dependencies.now(),
+        modelRequestDeadlineRemainingMs: (request.remainingBudget.modelRequestDeadlineAtMs ?? request.remainingBudget.deadlineAtMs) - this.dependencies.now(),
       })
 
-      await this.dependencies.persistence.updateTask(
-        currentContext.taskId,
-        input.phase === "commit_review" ? "committing" : "running",
-        input.phase,
-        this.dependencies.now(),
-      )
-
-      if (input.usage.modelCalls + phaseUsage.modelCalls >= input.budget.maxCalls) {
-        throw new Error("Model call budget exhausted before the next phase")
-      }
       let execution: PhaseModelExecution
       try {
-        execution = await this.dependencies.model.execute(request)
+        execution = await this.dependencies.model.execute(
+          request,
+          input.signal === undefined ? undefined : { signal: input.signal },
+        )
+        throwIfExecutionCancelled(input.signal)
       } catch (error) {
         this.log("error", "phase.model_request.failed", {
           taskId: currentContext.taskId,
@@ -491,7 +947,7 @@ export class TurnOrchestrator {
         })
         await this.dependencies.persistence.finishPhaseRun({
           phaseRunId: currentPhaseRunId,
-          status: "failed",
+          status: input.signal?.aborted ? "cancelled" : "failed",
           result: {
             error: error instanceof Error ? error.message : String(error),
             ...(isRecordWithRawResponse(error) ? { rawModelOutput: error.rawResponse } : {}),
@@ -512,13 +968,10 @@ export class TurnOrchestrator {
         requestedReadCount: parsedResult.requestedReads.length,
         citedReadCount: parsedResult.citedReadIds.length,
         citedReadIds: parsedResult.citedReadIds,
-        readableReadIds: [
-          ...currentContext.readLedger.committedReadIds,
-          ...currentContext.readLedger.visiblePendingIds,
-        ],
+        readableReadIds: [...request.committedReadIds, ...request.visiblePendingIds],
         invalidCitedReadIds: parsedResult.citedReadIds.filter((readId) => !(
-          currentContext.readLedger.committedReadIds.includes(readId)
-          || currentContext.readLedger.visiblePendingIds.includes(readId)
+          request.committedReadIds.includes(readId)
+          || request.visiblePendingIds.includes(readId)
         )),
         retrievalGapRequestIds: currentRetrievalGaps.map((gap) => gap.requestId),
         citedRetrievalGapIds: parsedResult.citedReadIds.filter((readId) => (
@@ -531,6 +984,8 @@ export class TurnOrchestrator {
         cacheMissInputTokens: execution.usage.cacheMissInputTokens,
       })
       assertCitationsWereRead(currentContext, parsedResult.citedReadIds)
+      assertCitationsAreVisible(request, parsedResult.citedReadIds)
+      for (const readId of parsedResult.citedReadIds) phaseCitedReadIds.add(readId)
       const attemptUsage = phaseUsageFromExecution(execution)
       phaseUsage = addPhaseUsage(phaseUsage, attemptUsage)
       const resultSegment = {
@@ -554,13 +1009,19 @@ export class TurnOrchestrator {
         finishedAtMs: this.dependencies.now(),
       })
       await this.dependencies.persistence.saveContext(currentContext, this.dependencies.now())
-      if (input.phase !== "commit_review" && parsedResult.outcome === "blocked") {
-        throw new Error(`Phase ${input.phase} is blocked: ${parsedResult.reason}`)
-      }
-      if (input.phase !== "commit_review" && (parsedResult.outcome === "revise"
+      if (parsedResult.outcome === "blocked"
+        || parsedResult.outcome === "revise"
         || parsedResult.outcome === "reject"
-        || parsedResult.outcome === "retire")) {
-        throw new Error(`Phase ${input.phase} requires workflow decision ${parsedResult.outcome}: ${parsedResult.reason}`)
+        || parsedResult.outcome === "retire") {
+        this.log("warn", "phase.model_advisory", {
+          taskId: currentContext.taskId,
+          phase: input.phase,
+          phaseRunId: currentPhaseRunId,
+          outcome: parsedResult.outcome,
+          reason: parsedResult.reason,
+          selfReview: parsedResult.selfReview,
+          message: "AI workflow decisions are advisory; structural persistence gates determine whether execution can continue",
+        })
       }
       if (parsedResult.requestedReads.length === 0) {
         const artifact = parsePhaseArtifact(input.phase, parsedResult.artifact)
@@ -569,7 +1030,8 @@ export class TurnOrchestrator {
           phaseRunId: currentPhaseRunId,
           context: currentContext,
           readEvidence: currentEvidence,
-          retrievalGaps: currentRetrievalGaps,
+          visibleEvidence: carryForwardEvidence(),
+          retrievalGaps: currentRetrievalGaps.slice(inheritedRetrievalGapCount),
           artifact,
           usage: phaseUsage,
         }
@@ -610,7 +1072,8 @@ export class TurnOrchestrator {
           phaseRunId: currentPhaseRunId,
           context: currentContext,
           readEvidence: currentEvidence,
-          retrievalGaps: currentRetrievalGaps,
+          visibleEvidence: carryForwardEvidence(),
+          retrievalGaps: currentRetrievalGaps.slice(inheritedRetrievalGapCount),
           artifact: this.parseAndValidatePhaseArtifact(
             input.phase,
             parsedResult.artifact,
@@ -629,9 +1092,12 @@ export class TurnOrchestrator {
         input.input.workspaceRootRef,
         input.catalogSnapshot,
         currentEvidence,
+        currentVisibleEvidence,
+        input.input.allowWorkspaceChapterReads ?? true,
       )
       currentContext = readResult.context
       currentEvidence = [...currentEvidence, ...readResult.evidence]
+      currentVisibleEvidence = [...currentVisibleEvidence, ...readResult.evidence]
       this.log("debug", "phase.reads.completed", {
         taskId: currentContext.taskId,
         phase: input.phase,
@@ -664,7 +1130,8 @@ export class TurnOrchestrator {
           phaseRunId: currentPhaseRunId,
           context: currentContext,
           readEvidence: currentEvidence,
-          retrievalGaps: currentRetrievalGaps,
+          visibleEvidence: carryForwardEvidence(),
+          retrievalGaps: currentRetrievalGaps.slice(inheritedRetrievalGapCount),
           artifact: parsePhaseArtifact(input.phase, parsedResult.artifact),
           usage: phaseUsage,
         }
@@ -755,6 +1222,171 @@ export class TurnOrchestrator {
     return { context: nextContext, evidence }
   }
 
+  private async readEvolutionFrontierEvidence(
+    context: TurnContext,
+    input: TurnOrchestratorInput,
+  ): Promise<Readonly<{ context: TurnContext; evidence: TurnReadEvidence[] }>> {
+    const limit = input.projectSettings?.retrieval.maxCandidates
+      ?? defaultProjectSettings.retrieval.maxCandidates
+    const frontiers = await this.dependencies.persistence.listSchedulableFrontiers(input.projectId, limit)
+    if (frontiers.length === 0) return { context, evidence: [] }
+    const anchorIds = [...new Set(frontiers.flatMap((frontier) => [
+      frontier.frontierAnchorRef,
+      ...frontier.lastSceneAnchorRefs,
+      ...frontier.lastTimeAnchorRefs,
+      ...frontier.lastLocationAnchorRefs,
+      ...frontier.correspondenceRefs,
+    ]))]
+    const currentProjections = await this.dependencies.retrieval.findCurrentForOwners(
+      { projectId: input.projectId },
+      anchorIds,
+      Math.max(limit, anchorIds.length),
+    )
+    const projectionsByOwnerId = new Map(currentProjections.map((projection) => [projection.ownerId, projection]))
+    const evidence: TurnReadEvidence[] = []
+    const returned: Array<Readonly<{
+      readId: string
+      reason: string
+      segment: TurnContext["segments"][number]
+    }>> = []
+
+    for (const frontier of frontiers) {
+      const relatedOwnerRefs = [...new Set([
+        frontier.frontierAnchorRef,
+        ...frontier.lastSceneAnchorRefs,
+        ...frontier.lastTimeAnchorRefs,
+        ...frontier.lastLocationAnchorRefs,
+        ...frontier.correspondenceRefs,
+      ])].flatMap((ownerId) => {
+        const projection = projectionsByOwnerId.get(ownerId)
+        return projection === undefined ? [] : [{
+          ownerKind: projection.ownerKind,
+          ownerId: projection.ownerId,
+          revisionId: projection.ownerRevisionId,
+          exactKeys: projection.exactKeys,
+          semanticText: projection.semanticText,
+        }]
+      })
+      const semanticText = JSON.stringify({
+        disposition: frontier.disposition,
+        reason: frontier.reason,
+        revisitCondition: frontier.revisitCondition ?? null,
+        lastSceneAnchorCount: frontier.lastSceneAnchorRefs.length,
+        lastTimeAnchorCount: frontier.lastTimeAnchorRefs.length,
+        lastLocationAnchorCount: frontier.lastLocationAnchorRefs.length,
+        correspondenceCount: frontier.correspondenceRefs.length,
+      })
+      const readId = this.dependencies.createId()
+      const storedEvidence = await this.dependencies.evidence.writeImmutable({
+        evidenceId: readId,
+        projectId: input.projectId,
+        contextId: context.contextId,
+        sourceKind: "graph",
+        ownerId: frontier.frontierAnchorRef,
+        version: String(frontier.lastProcessedAt),
+        digest: digest(semanticText),
+        locator: frontier.id,
+        content: semanticText,
+        readReason: "Load a bounded committed world-evolution frontier before autonomous evolution",
+        createdAtMs: this.dependencies.now(),
+      })
+      const tokenEstimate = estimateRetrievalEvidenceTokens({
+        ownerKind: "frontier",
+        ownerId: frontier.frontierAnchorRef,
+        exactKeys: [],
+        semanticText,
+        relatedOwnerRefs,
+      })
+      returned.push({
+        readId,
+        reason: storedEvidence.readReason,
+        segment: {
+          segmentId: this.dependencies.createId(),
+          kind: "committed_read",
+          ownerIds: [readId],
+          visibility: "committed",
+          canonicalDigest: storedEvidence.digest,
+          tokenEstimate,
+          sequence: context.segments.length + returned.length,
+        },
+      })
+      evidence.push({
+        readId,
+        visibility: "committed",
+        ownerKind: "frontier",
+        ownerId: frontier.frontierAnchorRef,
+        exactKeys: [],
+        semanticText,
+        sourceRefs: [{
+          frontierRecordId: frontier.id,
+          frontierAnchorRef: frontier.frontierAnchorRef,
+          lastSceneAnchorRefs: frontier.lastSceneAnchorRefs,
+          lastTimeAnchorRefs: frontier.lastTimeAnchorRefs,
+          lastLocationAnchorRefs: frontier.lastLocationAnchorRefs,
+          correspondenceRefs: frontier.correspondenceRefs,
+        }],
+        relatedOwnerRefs,
+        digest: storedEvidence.digest,
+      })
+    }
+
+    for (const projection of currentProjections) {
+      const storedEvidence = await this.dependencies.evidence.writeImmutable({
+        evidenceId: this.dependencies.createId(),
+        projectId: input.projectId,
+        contextId: context.contextId,
+        sourceKind: "graph",
+        ownerId: projection.ownerId,
+        version: projection.ownerRevisionId,
+        digest: digest(projection.semanticText),
+        locator: projection.projectionId,
+        content: projection.semanticText,
+        readReason: "Resolve current graph anchors for a scheduled world-evolution frontier",
+        createdAtMs: this.dependencies.now(),
+      })
+      const tokenEstimate = estimateRetrievalEvidenceTokens(projection)
+      returned.push({
+        readId: storedEvidence.evidenceId,
+        reason: storedEvidence.readReason,
+        segment: {
+          segmentId: this.dependencies.createId(),
+          kind: "committed_read",
+          ownerIds: [storedEvidence.evidenceId],
+          visibility: "committed",
+          canonicalDigest: storedEvidence.digest,
+          tokenEstimate,
+          sequence: context.segments.length + returned.length,
+        },
+      })
+      evidence.push({
+        readId: storedEvidence.evidenceId,
+        visibility: "committed",
+        ownerKind: projection.ownerKind,
+        ownerId: projection.ownerId,
+        revisionId: projection.ownerRevisionId,
+        exactKeys: projection.exactKeys,
+        semanticText: projection.semanticText,
+        sourceRefs: projection.sourceRefs,
+        digest: projection.digest,
+        stateRole: "current",
+      })
+    }
+    this.log("debug", "world.evolve.frontiers.loaded", {
+      taskId: context.taskId,
+      frontierCount: frontiers.length,
+      anchorCount: anchorIds.length,
+      resolvedAnchorCount: currentProjections.length,
+    })
+    return {
+      context: recordContextRead(context, {
+        requestId: this.dependencies.createId(),
+        returned,
+        rejectedReadIds: [],
+      }),
+      evidence,
+    }
+  }
+
   private async executeReads(
     context: TurnContext,
     requests: PhaseResultEnvelope["requestedReads"],
@@ -764,6 +1396,8 @@ export class TurnOrchestrator {
     workspaceRootRef: string,
     catalogSnapshot: WorkspaceCatalogSnapshot,
     existingEvidence: readonly TurnReadEvidence[],
+    budgetEvidence: readonly TurnReadEvidence[],
+    allowWorkspaceChapterReads: boolean,
   ): Promise<{ context: TurnContext; evidence: readonly TurnReadEvidence[] }> {
     const returned = [] as Array<{ readId: string; reason: string; segment: TurnContext["segments"][number] }>
     const evidence: TurnReadEvidence[] = []
@@ -771,8 +1405,12 @@ export class TurnOrchestrator {
     const seenEvidenceKeys = new Set(existingEvidence.map((item) => `${item.ownerId}:${item.digest}`))
     const selectedRequests = requests.slice(0, settings?.maxRequestsPerRound ?? requests.length)
     const evidenceTokenLimit = settings?.maxEvidenceTokens ?? Number.POSITIVE_INFINITY
-    let evidenceTokens = 0
+    let evidenceTokens = budgetEvidence
+      .filter(countsAgainstRetrievalEvidenceBudget)
+      .reduce((total, item) => total + estimateRetrievalEvidenceTokens(item), 0)
     let evidenceBudgetTruncated = false
+    let includedRelatedOwnerRefs = 0
+    let omittedRelatedOwnerRefs = 0
     if (selectedRequests.length < requests.length) {
       this.log("debug", "retrieval.requests.truncated", {
         taskId: context.taskId,
@@ -784,12 +1422,18 @@ export class TurnOrchestrator {
     for (const request of selectedRequests) {
       const maxCandidates = Math.min(request.query.maxCandidates, settings?.maxCandidates ?? request.query.maxCandidates)
       const maxDepth = Math.min(request.query.maxDepth, settings?.maxDepth ?? request.query.maxDepth)
-      const workspaceEntries = selectWorkspaceEntries(catalogSnapshot, request, maxCandidates)
+      const workspaceEntries = selectWorkspaceEntries(
+        catalogSnapshot,
+        request,
+        maxCandidates,
+        allowWorkspaceChapterReads,
+      )
       for (const entry of workspaceEntries) {
         const evidenceKey = `${entry.relativePath}:${entry.digest}`
         if (seenEvidenceKeys.has(evidenceKey)) continue
         const content = await this.dependencies.workspace.readMarkdown(workspaceRootRef, entry.relativePath)
-        const tokenEstimate = estimateTokens(content)
+        const workspaceEvidence = workspaceTurnEvidence("budget-preview", entry, content)
+        const tokenEstimate = estimateRetrievalEvidenceTokens(workspaceEvidence)
         if (evidenceTokens + tokenEstimate > evidenceTokenLimit) {
           evidenceBudgetTruncated = true
           continue
@@ -828,18 +1472,62 @@ export class TurnOrchestrator {
       const searchesGraph = request.query.sourceKinds.some((kind) => (
         kind === "graph" || kind === "revision" || kind === "source"
       ))
-      const anchored = searchesGraph ? await this.dependencies.retrieval.searchExact(
+      const searchesGraphOwners = request.query.sourceKinds.some((kind) => (
+        kind === "graph" || kind === "revision"
+      ))
+      const anchored = searchesGraph ? await this.dependencies.retrieval.findCurrentForOwners(
         { projectId, pendingScopeId: scopeId }, request.query.anchorIds, maxCandidates,
       ) : []
       const exact = searchesGraph ? await this.dependencies.retrieval.searchExact(
         { projectId, pendingScopeId: scopeId }, request.query.exactKeys, maxCandidates,
       ) : []
-      const semantic = searchesGraph ? await Promise.all(request.query.semanticTexts.map((text) => this.dependencies.retrieval.searchText(
+      const semantic = searchesGraphOwners ? await Promise.all(request.query.semanticTexts.map((text) => this.dependencies.retrieval.searchText(
         { projectId, pendingScopeId: scopeId }, text, maxCandidates,
       ))) : []
+      const sourceIds = [...new Set([...anchored, ...exact]
+        .filter((projection) => projection.ownerKind === "source")
+        .flatMap((projection) => sourceIdsFromRefs(projection.sourceRefs)))]
+      const sourceSemantic = searchesGraph && request.query.sourceKinds.includes("source")
+        ? await Promise.all(request.query.semanticTexts.map((text) => this.dependencies.retrieval.searchSourceText(
+          { projectId, pendingScopeId: scopeId },
+          text,
+          maxCandidates,
+          sourceIds.length === 0 ? undefined : sourceIds,
+        )))
+        : []
+      const sourceOnly = request.query.sourceKinds.every((kind) => kind === "source")
+      const primarySourceMatch = sourceSemantic.find((matches) => matches.length > 0)?.[0]
+      const sourceNeighborhoodRadius = Math.max(0, Math.floor((maxCandidates - 1) / 2))
+      const sourceNeighborhood = !sourceOnly || primarySourceMatch === undefined
+        ? []
+        : await this.dependencies.retrieval.expandSourceNeighborhood(
+          { projectId, pendingScopeId: scopeId },
+          sourceSequenceAnchorsFromRefs(primarySourceMatch.sourceRefs),
+          sourceNeighborhoodRadius,
+          maxCandidates,
+        )
+      const orderedCandidates = sourceOnly
+        ? [...sourceNeighborhood, ...exact, ...anchored, ...sourceSemantic.flat()]
+        : [...anchored, ...exact, ...sourceNeighborhood, ...sourceSemantic.flat(), ...semantic.flat()]
       const projections = uniqueRetrievalProjections(
-        [...anchored, ...exact, ...semantic.flat()],
+        orderedCandidates.filter((projection) => (
+          projectionMatchesRequestedSourceKinds(projection, request.query.sourceKinds)
+        )),
         maxCandidates,
+      )
+      const sourceUnitIds = [...new Set(projections
+        .filter((projection) => projection.ownerKind === "source")
+        .flatMap((projection) => sourceUnitIdsFromRefs(projection.sourceRefs)))]
+      const settlements = await this.dependencies.persistence.listSettlementsForSourceUnits(projectId, sourceUnitIds)
+      const sourceProjectionCount = projections.filter((projection) => projection.ownerKind === "source").length
+      const maxRelatedOwnersPerSourceUnit = sourceProjectionCount === 0
+        ? 0
+        : Math.max(1, Math.ceil(maxCandidates / sourceProjectionCount))
+      const relatedOwnersBySourceUnitId = await enrichRelatedOwners(
+        this.dependencies.retrieval,
+        projectId,
+        indexRelatedOwnersBySourceUnitId(settlements),
+        maxRelatedOwnersPerSourceUnit,
       )
       this.log("debug", "retrieval.request.completed", {
         taskId: context.taskId,
@@ -851,24 +1539,56 @@ export class TurnOrchestrator {
         anchorMatches: anchored.length,
         exactMatches: exact.length,
         semanticMatches: semantic.flat().length,
+        sourceSemanticMatches: sourceSemantic.flat().length,
+        sourceNeighborhoodMatches: sourceNeighborhood.length,
+        sourceNeighborhoodRadius,
         workspaceMatches: workspaceEntries.length,
         selectedCandidates: projections.length,
+        requestedSourceKinds: request.query.sourceKinds,
       })
       for (const projection of projections) {
         if (projection.visibility === "retired") continue
         if (seenReadIds.has(projection.projectionId)) continue
-        const tokenEstimate = estimateTokens(projection.semanticText)
+        const evidenceKey = `${projection.ownerId}:${projection.digest}`
+        if (seenEvidenceKeys.has(evidenceKey)) continue
+        const availableRelatedOwnerRefs = projection.ownerKind === "source"
+          ? relatedOwnersForProjection(projection.sourceRefs, relatedOwnersBySourceUnitId)
+          : []
+        const evidenceBudgetView = {
+          ownerKind: projection.ownerKind,
+          ownerId: projection.ownerId,
+          exactKeys: projection.exactKeys,
+          semanticText: projection.semanticText,
+        }
+        let selectedRelatedOwnerRefs: RelatedOwnerRef[] = []
+        let tokenEstimate = estimateRetrievalEvidenceTokens(evidenceBudgetView)
+        for (const relatedOwnerRef of availableRelatedOwnerRefs) {
+          const nextRelatedOwnerRefs = [...selectedRelatedOwnerRefs, relatedOwnerRef]
+          const nextEstimate = estimateRetrievalEvidenceTokens({
+            ...evidenceBudgetView,
+            relatedOwnerRefs: nextRelatedOwnerRefs,
+          })
+          if (evidenceTokens + nextEstimate > evidenceTokenLimit) {
+            omittedRelatedOwnerRefs += 1
+            evidenceBudgetTruncated = true
+            continue
+          }
+          selectedRelatedOwnerRefs = nextRelatedOwnerRefs
+          tokenEstimate = nextEstimate
+          includedRelatedOwnerRefs += 1
+        }
         if (evidenceTokens + tokenEstimate > evidenceTokenLimit) {
           evidenceBudgetTruncated = true
           continue
         }
         seenReadIds.add(projection.projectionId)
+        seenEvidenceKeys.add(evidenceKey)
         evidenceTokens += tokenEstimate
         const storedEvidence = await this.dependencies.evidence.writeImmutable({
           evidenceId: this.dependencies.createId(),
           projectId,
           contextId: context.contextId,
-          sourceKind: "graph",
+          sourceKind: evidenceSourceKindForProjection(projection),
           ownerId: projection.ownerId,
           version: projection.ownerRevisionId,
           digest: digest(projection.semanticText),
@@ -899,9 +1619,20 @@ export class TurnOrchestrator {
           exactKeys: projection.exactKeys,
           semanticText: projection.semanticText,
           sourceRefs: projection.sourceRefs,
+          ...(selectedRelatedOwnerRefs.length === 0 ? {} : { relatedOwnerRefs: selectedRelatedOwnerRefs }),
           digest: projection.digest,
+          ...(projection.stateRole === undefined ? {} : { stateRole: projection.stateRole }),
         })
       }
+    }
+    if (omittedRelatedOwnerRefs > 0) {
+      this.log("debug", "retrieval.related_owner_budget.truncated", {
+        taskId: context.taskId,
+        includedRelatedOwnerRefs,
+        omittedRelatedOwnerRefs,
+        evidenceTokens,
+        maxEvidenceTokens: evidenceTokenLimit,
+      })
     }
     if (evidenceBudgetTruncated) {
       this.log("debug", "retrieval.evidence_budget.reached", {
@@ -963,6 +1694,7 @@ export class TurnOrchestrator {
 
   private async persistDraftUnits(
     input: TurnOrchestratorInput,
+    scopeId: string,
     sourceId: string,
     artifacts: Partial<Record<AIPhase, unknown>>,
   ): Promise<string[]> {
@@ -985,6 +1717,22 @@ export class TurnOrchestrator {
       }
     }))
     await this.dependencies.documents.stageSourceUnits(sourceUnits)
+    for (const [index, unit] of sourceUnits.entries()) {
+      const contentMarkdown = units[index]
+      if (contentMarkdown === undefined) throw new Error(`Missing staged source unit content: ${String(index)}`)
+      await this.dependencies.retrieval.stageProjection({
+        projectionId: this.dependencies.createId(),
+        projectId: input.projectId,
+        scopeId,
+        ownerKind: "source",
+        ownerId: unit.id,
+        ownerRevisionId: unit.id,
+        exactKeys: buildSourceUnitExactKeys(contentMarkdown),
+        semanticText: contentMarkdown,
+        sourceRefs: [{ sourceId, sourceUnitId: unit.id, sequence: unit.sequence }],
+        digest: unit.digest,
+      })
+    }
     return sourceUnits.map((unit) => unit.id)
   }
 
@@ -1066,7 +1814,11 @@ export class TurnOrchestrator {
       }
       return reference
     }
-    const sourceRefs = [{ sourceId }]
+    const sourceRefs = [{
+      sourceId,
+      taskId,
+      taskKind: input.workflow ?? "turn",
+    }]
     const mutations: GraphMutation[] = governance.mutations.map((mutation) => {
       switch (mutation.operation) {
         case "create_node":
@@ -1126,11 +1878,27 @@ export class TurnOrchestrator {
     const revisions: GraphRevision[] = []
     const revisionByMutation = new Map<number, string>()
     for (const [index, mutation] of mutations.entries()) {
-      const revision = await this.materializeMutation(input.projectId, scopeId, mutation, governance, index, sourceUnitIds, createdAtMs)
+      const revision = await this.materializeMutation(
+        input.projectId,
+        scopeId,
+        mutation,
+        governance,
+        index,
+        readEvidence.map((evidence) => evidence.readId),
+        createdAtMs,
+      )
       revisions.push(revision)
       revisionByMutation.set(index, revision.revisionId)
     }
     await this.dependencies.graph.stageRevisions(input.projectId, scopeId, revisions)
+    await this.stageInheritedMutationProjections(
+      input.projectId,
+      scopeId,
+      mutations,
+      governance.retrievalProjections,
+      revisionByMutation,
+      sourceRefs,
+    )
     const sceneBindingIds = new Map<number, string>()
     const sceneBindings: SceneSpacetimeBindingRecord[] = governance.sceneSpacetimeBindings.map((binding) => {
       const id = this.dependencies.createId()
@@ -1165,6 +1933,16 @@ export class TurnOrchestrator {
         .map((mutationIndex) => {
           const graphRevisionId = revisionByMutation.get(mutationIndex)
           if (graphRevisionId === undefined) throw new Error(`Missing graph revision for mutation ${String(mutationIndex)}`)
+          const predecessorRevisionIds = settlement.predecessorRevisionReadRefs.flatMap((readId) => {
+            const revisionId = resolveReadRevisionId(readId, readEvidence)
+            if (revisionId !== undefined) return [revisionId]
+            this.log("warn", "turn.predecessor_revision_reference.advisory", {
+              taskId,
+              readId,
+              message: "Ignored a non-revision read evidence reference; the graph revision chain remains authoritative",
+            })
+            return []
+          })
           return {
             id: this.dependencies.createId(),
             projectId: input.projectId,
@@ -1178,8 +1956,8 @@ export class TurnOrchestrator {
             }),
             effectiveExistingSceneRefs: settlement.effectiveExistingSceneAnchorRefs.map(resolveReference),
             currentEntryRefs: settlement.currentEntryRefs.map(resolveReference),
-            predecessorRevisionRequired: settlement.predecessorRevisionRequired,
-            predecessorRevisionIds: settlement.predecessorRevisionReadRefs.map((readId) => resolveReadRevisionId(readId, readEvidence)),
+            predecessorRevisionRequired: settlement.predecessorRevisionRequired && predecessorRevisionIds.length > 0,
+            predecessorRevisionIds,
             historicalReturnRefs: settlement.historicalReturnRefs.map(resolveReference),
             reason: settlement.reason,
             selfReview: settlement.selfReview,
@@ -1293,6 +2071,69 @@ export class TurnOrchestrator {
     }))]
   }
 
+  private async stageInheritedMutationProjections(
+    projectId: string,
+    scopeId: string,
+    mutations: readonly GraphMutation[],
+    projections: GraphGovernanceArtifact["retrievalProjections"],
+    revisionByMutation: ReadonlyMap<number, string>,
+    sourceRefs: readonly { sourceId: string }[],
+  ): Promise<void> {
+    for (const [mutationIndex, mutation] of mutations.entries()) {
+      if (mutation.operation !== "edit_node" && mutation.operation !== "edit_link") continue
+      const ownerId = mutation.operation === "edit_node" ? mutation.nodeId : mutation.linkId
+      if (projections.some((projection) => (
+        projection.ownerMutationIndex === mutationIndex
+        || projection.ownerRef === ownerId
+      ))) continue
+
+      const ownerKind = mutation.operation === "edit_node" ? "node" as const : "link" as const
+      const revisionId = revisionByMutation.get(mutationIndex)
+      if (revisionId === undefined) throw new Error(`Missing revision for mutation ${String(mutationIndex)}`)
+
+      const revisions = await this.dependencies.graph.listRevisions(projectId, ownerKind, ownerId)
+      let inherited: Awaited<ReturnType<RetrievalRepository["findForOwnerRevision"]>>
+      for (const previousRevision of revisions
+        .filter((revision) => revision.revisionId !== revisionId)
+        .reverse()) {
+        inherited = await this.dependencies.retrieval.findForOwnerRevision(
+          projectId,
+          ownerKind,
+          ownerId,
+          previousRevision.revisionId,
+        )
+        if (inherited !== undefined) break
+      }
+      if (inherited === undefined) continue
+
+      const currentValue = mutation.operation === "edit_node"
+        ? await this.dependencies.graph.getNode({ projectId, pendingScopeId: scopeId }, ownerId)
+        : await this.dependencies.graph.getLink({ projectId, pendingScopeId: scopeId }, ownerId)
+      if (currentValue === undefined) throw new Error(`Missing staged graph owner for mutation ${ownerId}`)
+
+      await this.dependencies.retrieval.stageProjection({
+        projectionId: this.dependencies.createId(),
+        projectId,
+        scopeId,
+        ownerKind,
+        ownerId,
+        ownerRevisionId: revisionId,
+        exactKeys: inherited.exactKeys,
+        semanticText: describeInheritedGraphValue(currentValue, inherited.semanticText),
+        sourceRefs: [...inherited.sourceRefs, ...sourceRefs],
+        digest: digest({ ownerKind, ownerId, revisionId, inherited: inherited.projectionId, currentValue }),
+      })
+      this.log("debug", "graph.retrieval_projection.inherited", {
+        projectId,
+        scopeId,
+        ownerKind,
+        ownerId,
+        revisionId,
+        inheritedProjectionId: inherited.projectionId,
+      })
+    }
+  }
+
   private async materializeMutation(
     projectId: ProjectId,
     scopeId: string,
@@ -1358,15 +2199,56 @@ type ExecutePhaseInput = Readonly<{
   sourceUnitIds: readonly string[]
   phase: AIPhase
   phaseRunId: string
+  attempt: number
   phaseRunIds: string[]
   context: TurnContext
   artifacts: Partial<Record<AIPhase, unknown>>
   readEvidence: readonly TurnReadEvidence[]
+  visibleEvidence: readonly TurnReadEvidence[]
   retrievalGaps: readonly TurnRetrievalGap[]
   catalogSnapshot: WorkspaceCatalogSnapshot
   budget: ModelCallBudget
   usage: { modelCalls: number; inputTokens: number; outputTokens: number; cacheHits: number; cacheMisses: number }
+  signal?: AbortSignal
 }>
+
+type TurnExecutionState = {
+  taskId: string
+  turnId: string
+  scopeId: string
+  contextId: string
+  sourceId: string
+  createdAtMs: number
+  baseRuleVersion: string
+  catalogSnapshot: WorkspaceCatalogSnapshot
+  context: TurnContext
+  artifacts: Partial<Record<AIPhase, unknown>>
+  phaseRunIds: string[]
+  phaseRuns: Map<AIPhase, string>
+  phaseAttempts: Map<AIPhase, number>
+  sourceUnitIds: string[]
+  readEvidence: TurnReadEvidence[]
+  visibleEvidence: TurnReadEvidence[]
+  retrievalGaps: TurnRetrievalGap[]
+  totalUsage: PhaseUsage
+  budget: ModelCallBudget
+  startPhaseIndex: number
+  signal?: AbortSignal
+}
+
+function throwIfExecutionCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw executionCancellationReason(signal)
+}
+
+function executionCancellationReason(signal: AbortSignal | undefined): Error {
+  const reason = signal?.reason
+  if (reason instanceof Error) return reason
+  const error = new Error(
+    typeof reason === "string" && reason.length > 0 ? reason : "Turn execution cancelled",
+  )
+  error.name = "AbortError"
+  return error
+}
 
 function isMandatoryWorkspaceEntry(entry: WorkspaceCatalogEntry): boolean {
   if (entry.entryKind !== "file") return false
@@ -1441,6 +2323,7 @@ function selectWorkspaceEntries(
   catalogSnapshot: WorkspaceCatalogSnapshot,
   request: PhaseResultEnvelope["requestedReads"][number],
   limit: number,
+  allowWorkspaceChapterReads: boolean,
 ): WorkspaceCatalogEntry[] {
   const roles = new Set<WorkspaceCatalogEntry["role"]>()
   if (request.query.sourceKinds.includes("rule")) roles.add("world_rules")
@@ -1448,7 +2331,7 @@ function selectWorkspaceEntries(
     roles.add("settings")
     roles.add("references")
   }
-  if (request.query.sourceKinds.includes("source")) roles.add("chapters")
+  if (allowWorkspaceChapterReads && request.query.sourceKinds.includes("source")) roles.add("chapters")
   if (roles.size === 0) return []
   const terms = [...request.query.exactKeys, ...request.query.semanticTexts]
     .map((term) => term.trim().toLocaleLowerCase())
@@ -1484,18 +2367,28 @@ function mutationTargetId(mutation: GraphMutation | undefined): string | undefin
   return mutation.linkId
 }
 
-function resolveReadRevisionId(readId: string, readEvidence: readonly TurnReadEvidence[]): string {
-  const evidence = readEvidence.find((item) => item.readId === readId)
-  if (evidence?.revisionId === undefined) {
-    throw new Error(`Predecessor revision read evidence has no fixed revision: ${readId}`)
+function describeInheritedGraphValue(value: { content?: unknown }, fallback: string): string {
+  const content = value.content
+  if (typeof content === "string" && content.trim().length > 0) return content
+  if (typeof content === "object" && content !== null) {
+    const record = content as Record<string, unknown>
+    const preferred = ["semanticText", "text", "summary", "name", "description"]
+      .flatMap((key) => typeof record[key] === "string" ? [record[key] as string] : [])
+    if (preferred.length > 0) return preferred.join("；")
   }
-  return evidence.revisionId
+  return fallback
+}
+
+function resolveReadRevisionId(readId: string, readEvidence: readonly TurnReadEvidence[]): string | undefined {
+  const evidence = readEvidence.find((item) => item.readId === readId)
+  return evidence?.revisionId
 }
 
 type ExecutePhaseResult = Readonly<{
   phaseRunId: string
   context: TurnContext
   readEvidence: readonly TurnReadEvidence[]
+  visibleEvidence: readonly TurnReadEvidence[]
   retrievalGaps: readonly TurnRetrievalGap[]
   artifact: unknown
   usage: { modelCalls: number; inputTokens: number; outputTokens: number; cacheHits: number; cacheMisses: number }
@@ -1513,6 +2406,26 @@ function emptyPhaseUsage(): PhaseUsage {
   return { modelCalls: 0, inputTokens: 0, outputTokens: 0, cacheHits: 0, cacheMisses: 0 }
 }
 
+function cacheRateResult(usage: PhaseUsage): Readonly<{ kvCacheHitRate?: number }> {
+  const totalCacheTokens = usage.cacheHits + usage.cacheMisses
+  return totalCacheTokens === 0 ? {} : { kvCacheHitRate: usage.cacheHits / totalCacheTokens }
+}
+
+function assertEvolutionFrontierContinuity(readEvidence: readonly TurnReadEvidence[]): void {
+  const frontiers = readEvidence.filter((evidence) => evidence.ownerKind === "frontier")
+  if (frontiers.length === 0) return
+  const currentGraphOwners = new Set(readEvidence
+    .filter((evidence) => (evidence.ownerKind === "node" || evidence.ownerKind === "link")
+      && evidence.stateRole === "current")
+    .map((evidence) => `${evidence.ownerKind}:${evidence.ownerId}`))
+  const hasResolvedFrontier = frontiers.some((frontier) => frontier.relatedOwnerRefs?.some((owner) => (
+    currentGraphOwners.has(`${owner.ownerKind}:${owner.ownerId}`)
+  )) === true)
+  if (!hasResolvedFrontier) {
+    throw new Error("committed frontier has no resolvable current graph anchor")
+  }
+}
+
 function phaseUsageFromExecution(execution: PhaseModelExecution): PhaseUsage {
   return {
     modelCalls: execution.usage.modelCalls ?? 1,
@@ -1521,6 +2434,35 @@ function phaseUsageFromExecution(execution: PhaseModelExecution): PhaseUsage {
     cacheHits: execution.usage.cacheHitInputTokens ?? 0,
     cacheMisses: execution.usage.cacheMissInputTokens ?? 0,
   }
+}
+
+function phaseUsageFromStored(value: unknown): PhaseUsage {
+  if (typeof value !== "object" || value === null) return emptyPhaseUsage()
+  const record = value as Record<string, unknown>
+  const number = (key: string): number => typeof record[key] === "number" && Number.isFinite(record[key]) ? record[key] as number : 0
+  return {
+    modelCalls: number("modelCalls") || (number("inputTokens") > 0 || number("outputTokens") > 0 ? 1 : 0),
+    inputTokens: number("inputTokens"),
+    outputTokens: number("outputTokens"),
+    cacheHits: number("cacheHitInputTokens"),
+    cacheMisses: number("cacheMissInputTokens"),
+  }
+}
+
+function readStoredTurnPhaseInput(value: unknown): TurnPhaseInput {
+  if (typeof value !== "object" || value === null) throw new Error("The task checkpoint has invalid phase input")
+  const record = value as Record<string, unknown>
+  if (typeof record.userInput !== "string" || typeof record.chapterSequence !== "number") {
+    throw new Error("The task checkpoint is missing turn input")
+  }
+  if (!Array.isArray(record.sourceUnitIds)
+    || !Array.isArray(record.readEvidence)
+    || !Array.isArray(record.retrievalGaps)
+    || typeof record.artifacts !== "object"
+    || record.artifacts === null) {
+    throw new Error("The task checkpoint is missing dynamic turn state")
+  }
+  return record as unknown as TurnPhaseInput
 }
 
 function addPhaseUsage(left: PhaseUsage, right: PhaseUsage): PhaseUsage {
@@ -1553,6 +2495,10 @@ function createBudget(input: TurnOrchestratorInput, nowMs: number): ModelCallBud
     maxOutputTokens,
     remainingOutputTokens: maxOutputTokens,
     deadlineAtMs: nowMs + (input.deadlineMs ?? defaultTurnExecutionProfile.maxTurnWallTimeMs),
+    modelRequestDeadlineAtMs: nowMs + (
+      input.projectSettings?.execution.maxModelRequestTimeMs
+      ?? defaultProjectSettings.execution.maxModelRequestTimeMs
+    ),
     retrievalExecutionDeadlineAtMs: nowMs + (input.retrievalExecutionDeadlineMs ?? 15_000),
     retrievalPhaseDeadlineAtMs: nowMs + (input.retrievalPhaseDeadlineMs ?? 60_000),
   }
@@ -1585,14 +2531,292 @@ function assertUsageWithinBudget(
   usage: { modelCalls: number; inputTokens: number; outputTokens: number },
   nowMs: number,
 ): void {
-  if (usage.modelCalls > budget.maxCalls) throw new Error("Model call budget exceeded")
-  if (usage.inputTokens > budget.maxInputTokens) throw new Error("Model input token budget exceeded")
-  if (usage.outputTokens > budget.maxOutputTokens) throw new Error("Model output token budget exceeded")
-  if (nowMs > budget.deadlineAtMs) throw new Error("Turn deadline exceeded")
+  if (usage.modelCalls > budget.maxCalls) throw new TurnBudgetExceededError("model_calls", "Model call budget exceeded")
+  if (usage.inputTokens > budget.maxInputTokens) throw new TurnBudgetExceededError("input_tokens", "Model input token budget exceeded")
+  if (usage.outputTokens > budget.maxOutputTokens) throw new TurnBudgetExceededError("output_tokens", "Model output token budget exceeded")
+  if (nowMs > budget.deadlineAtMs) throw new TurnBudgetExceededError("wall_time", "Turn deadline exceeded")
+}
+
+function normalizeDeadlineInterruption(
+  error: unknown,
+  budget: ModelCallBudget,
+  nowMs: number,
+): unknown {
+  if (error instanceof TurnBudgetExceededError || nowMs <= budget.deadlineAtMs) return error
+  return new TurnBudgetExceededError("wall_time", "Turn deadline exceeded while the model request was in flight")
+}
+
+function createInterruptionRecord(
+  error: unknown,
+  phase: AIPhase | undefined,
+  phaseRunId: string | undefined,
+  interruptedAtMs: number,
+): Readonly<Record<string, unknown>> {
+  const message = error instanceof Error ? error.message : String(error)
+  const blockedMetrics = error instanceof TurnBudgetExceededError ? [error.metric] : []
+  return {
+    kind: blockedMetrics.length === 0 ? "execution_error" : "limit_exhausted",
+    message,
+    recoverable: true,
+    blockedMetrics,
+    ...(phase === undefined ? {} : { phase }),
+    ...(phaseRunId === undefined ? {} : { phaseRunId }),
+    interruptedAtMs,
+  }
 }
 
 function estimateTokens(value: unknown): number {
   return Math.max(1, Math.ceil((typeof value === "string" ? value : JSON.stringify(value)).length / 4))
+}
+
+function estimateRetrievalEvidenceTokens(evidence: Readonly<{
+  ownerKind: string
+  ownerId: string
+  exactKeys: readonly string[]
+  semanticText: string
+  relatedOwnerRefs?: readonly RelatedOwnerRef[]
+}>): number {
+  return estimateTokens({
+    ownerKind: evidence.ownerKind,
+    ownerId: evidence.ownerId,
+    exactKeys: evidence.exactKeys,
+    semanticText: evidence.semanticText,
+    ...(evidence.relatedOwnerRefs === undefined ? {} : {
+      relatedOwnerRefs: evidence.relatedOwnerRefs.map((relatedOwner) => ({
+        ownerKind: relatedOwner.ownerKind,
+        ownerId: relatedOwner.ownerId,
+        ...(relatedOwner.exactKeys === undefined ? {} : { exactKeys: relatedOwner.exactKeys }),
+        ...(relatedOwner.semanticText === undefined ? {} : { semanticText: relatedOwner.semanticText }),
+      })),
+    }),
+  })
+}
+
+function sourceUnitIdsFromRefs(sourceRefs: readonly unknown[]): string[] {
+  return [...new Set(sourceRefs.flatMap((sourceRef) => {
+    if (!isRecord(sourceRef) || typeof sourceRef.sourceUnitId !== "string") return []
+    return [sourceRef.sourceUnitId]
+  }))]
+}
+
+function sourceIdsFromRefs(sourceRefs: readonly unknown[]): string[] {
+  return [...new Set(sourceRefs.flatMap((sourceRef) => {
+    if (!isRecord(sourceRef) || typeof sourceRef.sourceId !== "string") return []
+    return [sourceRef.sourceId]
+  }))]
+}
+
+function sourceSequenceAnchorsFromRefs(sourceRefs: readonly unknown[]): Array<{
+  sourceId: string
+  sequence: number
+}> {
+  return [...new Map(sourceRefs.flatMap((sourceRef) => {
+    if (!isRecord(sourceRef)
+      || typeof sourceRef.sourceId !== "string"
+      || typeof sourceRef.sequence !== "number"
+      || !Number.isSafeInteger(sourceRef.sequence)
+      || sourceRef.sequence < 0) return []
+    return [[`${sourceRef.sourceId}:${String(sourceRef.sequence)}`, {
+      sourceId: sourceRef.sourceId,
+      sequence: sourceRef.sequence,
+    }] as const]
+  })).values()]
+}
+
+function indexRelatedOwnersBySourceUnitId(
+  settlements: readonly SettlementRecord[],
+): ReadonlyMap<string, readonly { ownerKind: string; ownerId: string; revisionId?: string }[]> {
+  const indexed = new Map<string, Array<{ ownerKind: string; ownerId: string; revisionId?: string }>>()
+  for (const settlement of settlements) {
+    const owners = indexed.get(settlement.sourceUnitId) ?? []
+    if (Array.isArray(settlement.graphRefs)) {
+      for (const graphRef of settlement.graphRefs) {
+        if (!isRecord(graphRef)) continue
+        const ownerKind = typeof graphRef.targetKind === "string"
+          ? graphRef.targetKind
+          : typeof graphRef.ownerKind === "string" ? graphRef.ownerKind : undefined
+        const ownerId = typeof graphRef.targetId === "string"
+          ? graphRef.targetId
+          : typeof graphRef.ownerId === "string" ? graphRef.ownerId : undefined
+        if (ownerKind === undefined || ownerId === undefined) continue
+        owners.push({
+          ownerKind,
+          ownerId,
+          ...(typeof graphRef.revisionId === "string" ? { revisionId: graphRef.revisionId } : {}),
+        })
+      }
+    }
+    indexed.set(settlement.sourceUnitId, owners)
+  }
+  return new Map(Array.from(indexed.entries()).map(([sourceUnitId, owners]) => [
+    sourceUnitId,
+    deduplicateRelatedOwners(owners),
+  ]))
+}
+
+function relatedOwnersForProjection(
+  sourceRefs: readonly unknown[],
+  relatedOwnersBySourceUnitId: ReadonlyMap<string, readonly {
+    ownerKind: string
+    ownerId: string
+    revisionId?: string
+    exactKeys?: readonly string[]
+    semanticText?: string
+  }[]>,
+): readonly {
+  ownerKind: string
+  ownerId: string
+  revisionId?: string
+  exactKeys?: readonly string[]
+  semanticText?: string
+}[] {
+  return deduplicateRelatedOwners(sourceUnitIdsFromRefs(sourceRefs).flatMap((sourceUnitId) => (
+    relatedOwnersBySourceUnitId.get(sourceUnitId) ?? []
+  )))
+}
+
+async function enrichRelatedOwners(
+  retrieval: RetrievalRepository,
+  projectId: ProjectId,
+  relatedOwnersBySourceUnitId: ReadonlyMap<string, readonly {
+    ownerKind: string
+    ownerId: string
+    revisionId?: string
+  }[]>,
+  maxOwnersPerSourceUnit: number,
+): Promise<ReadonlyMap<string, readonly {
+  ownerKind: string
+  ownerId: string
+  revisionId?: string
+  exactKeys?: readonly string[]
+  semanticText?: string
+}[]>> {
+  const enriched = new Map<string, readonly {
+    ownerKind: string
+    ownerId: string
+    revisionId?: string
+    exactKeys?: readonly string[]
+    semanticText?: string
+  }[]>()
+  for (const [sourceUnitId, owners] of relatedOwnersBySourceUnitId) {
+    const selectedOwners = owners.slice(0, maxOwnersPerSourceUnit)
+    const withProjections = await Promise.all(selectedOwners.map(async (owner) => {
+      if ((owner.ownerKind !== "node" && owner.ownerKind !== "link") || owner.revisionId === undefined) return owner
+      const projection = await retrieval.findForOwnerRevision(
+        projectId,
+        owner.ownerKind,
+        owner.ownerId,
+        owner.revisionId,
+      )
+      return projection === undefined
+        ? owner
+        : {
+            ...owner,
+            exactKeys: projection.exactKeys,
+            semanticText: projection.semanticText,
+          }
+    }))
+    enriched.set(sourceUnitId, withProjections)
+  }
+  return enriched
+}
+
+function deduplicateRelatedOwners(
+  owners: readonly {
+    ownerKind: string
+    ownerId: string
+    revisionId?: string
+    exactKeys?: readonly string[]
+    semanticText?: string
+  }[],
+): readonly {
+  ownerKind: string
+  ownerId: string
+  revisionId?: string
+  exactKeys?: readonly string[]
+  semanticText?: string
+}[] {
+  return Array.from(new Map(owners.map((owner) => [
+    `${owner.ownerKind}:${owner.ownerId}:${owner.revisionId ?? ""}`,
+    owner,
+  ])).values())
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function countsAgainstRetrievalEvidenceBudget(evidence: TurnReadEvidence): boolean {
+  return !isProtectedContextEvidence(evidence)
+}
+
+function isProtectedContextEvidence(evidence: TurnReadEvidence): boolean {
+  return evidence.ownerKind === "workspace:world_rules"
+    || evidence.ownerKind === "workspace:presentation"
+    || evidence.ownerId === "设定集/readme.md"
+    || evidence.ownerId === "参考文件/readme.md"
+}
+
+function selectCarryForwardEvidence(
+  phase: AIPhase,
+  inheritedEvidence: readonly TurnReadEvidence[],
+  evidence: readonly TurnReadEvidence[],
+  citedReadIds: readonly string[],
+): TurnReadEvidence[] {
+  const selectedReadIds = new Set(citedReadIds)
+  if (phase !== "interpret") {
+    for (const item of inheritedEvidence) selectedReadIds.add(item.readId)
+  }
+  return uniqueTurnReadEvidence(evidence.filter((item) => (
+    isProtectedContextEvidence(item) || selectedReadIds.has(item.readId)
+  )))
+}
+
+function uniqueTurnReadEvidence(evidence: readonly TurnReadEvidence[]): TurnReadEvidence[] {
+  return [...new Map(evidence.map((item) => [item.readId, item])).values()]
+}
+
+function selectPhaseArtifacts(
+  phase: AIPhase,
+  artifacts: Partial<Record<AIPhase, unknown>>,
+): Partial<Record<AIPhase, unknown>> {
+  return Object.fromEntries(phaseArtifactDependencies[phase].flatMap((dependency) => (
+    artifacts[dependency] === undefined ? [] : [[dependency, artifacts[dependency]]]
+  )))
+}
+
+function phaseUsesWorkspaceCatalog(phase: AIPhase): boolean {
+  return workspaceCatalogPhases.has(phase)
+}
+
+function assertCitationsAreVisible(
+  request: PhaseRequestEnvelope,
+  citedReadIds: readonly string[],
+): void {
+  const visibleReadIds = new Set([...request.committedReadIds, ...request.visiblePendingIds])
+  const invisibleReadIds = citedReadIds.filter((readId) => !visibleReadIds.has(readId))
+  if (invisibleReadIds.length > 0) {
+    throw new Error(`citedReadIds contains evidence outside the current model view: ${invisibleReadIds.join(", ")}`)
+  }
+}
+
+function projectionMatchesRequestedSourceKinds(
+  projection: { ownerKind: string },
+  sourceKinds: readonly string[],
+): boolean {
+  if (projection.ownerKind === "source") return sourceKinds.includes("source")
+  if (projection.ownerKind === "node" || projection.ownerKind === "link") {
+    return sourceKinds.includes("graph") || sourceKinds.includes("revision")
+  }
+  return false
+}
+
+function evidenceSourceKindForProjection(
+  projection: { ownerKind: string },
+): "chapter" | "graph" | "revision" {
+  if (projection.ownerKind === "source") return "chapter"
+  if (projection.ownerKind === "revision") return "revision"
+  return "graph"
 }
 
 function uniqueRetrievalProjections<T extends { projectionId: string }>(

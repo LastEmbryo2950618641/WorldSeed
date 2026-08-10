@@ -155,13 +155,11 @@ export function assertSpacetimeGovernanceCoverage(
       sourceUnitCount,
       "Source unit settlement records",
     )
-    const coveredSourceUnits = new Set(governance.sceneSpacetimeBindings.flatMap((binding) => binding.sourceUnitIndexes))
-    const missingSourceUnits = Array.from({ length: sourceUnitCount }, (_, index) => index)
-      .filter((index) => !coveredSourceUnits.has(index))
-    const invalidSourceUnits = [...coveredSourceUnits].filter((index) => index >= sourceUnitCount)
-    if (missingSourceUnits.length > 0 || invalidSourceUnits.length > 0) {
-      throw new Error(`Scene source coverage is incomplete. Missing: ${missingSourceUnits.join(", ") || "none"}. Invalid: ${invalidSourceUnits.join(", ") || "none"}.`)
-    }
+    assertExactIndexSet(
+      governance.sceneSpacetimeBindings.flatMap((binding) => binding.sourceUnitIndexes),
+      sourceUnitCount,
+      "Scene source coverage",
+    )
   }
 
   const coveredMutationIndexes = governance.mutationSpacetimeSettlements.flatMap((settlement) => settlement.mutationIndexes)
@@ -209,6 +207,33 @@ export function assertSemanticReviewCoversGovernance(
     governance.affectedFrontierRefs,
     "affected frontier",
   )
+}
+
+export function assertFrontierSettlementCoversReview(
+  reviewInput: unknown,
+  settlementInput: unknown,
+): void {
+  const review = semanticReviewArtifactSchema.parse(reviewInput)
+  const settlement = frontierSettlementArtifactSchema.parse(settlementInput)
+  assertExactReferenceSet(
+    settlement.frontiers.map((frontier) => frontier.frontierAnchorRef),
+    review.approvedAffectedFrontierRefs,
+    "frontier settlement",
+  )
+}
+
+function assertExactReferenceSet(actual: readonly string[], expected: readonly string[], label: string): void {
+  const actualSet = new Set(actual)
+  const expectedSet = new Set(expected)
+  const missing = [...expectedSet].filter((reference) => !actualSet.has(reference))
+  const extra = [...actualSet].filter((reference) => !expectedSet.has(reference))
+  if (actual.length !== expected.length || actualSet.size !== actual.length || missing.length > 0 || extra.length > 0) {
+    throw new Error([
+      `${label} must contain every approved reference exactly once`,
+      `missing=[${missing.join(",")}]`,
+      `extra=[${extra.join(",")}]`,
+    ].join("; "))
+  }
 }
 
 function assertReadableGraphReferences(
@@ -290,7 +315,17 @@ function collectGraphGovernanceReferences(governance: GraphGovernanceArtifact): 
 function assertExactIndexSet(indexes: readonly number[], expectedLength: number, label: string): void {
   const expected = Array.from({ length: expectedLength }, (_, index) => index)
   if (indexes.length !== expectedLength || new Set(indexes).size !== indexes.length || expected.some((index) => !indexes.includes(index))) {
-    throw new Error(`${label} must contain every index exactly once`)
+    const missing = expected.filter((index) => !indexes.includes(index))
+    const duplicates = [...new Set(indexes.filter((index, position) => indexes.indexOf(index) !== position))]
+    const outOfRange = [...new Set(indexes.filter((index) => index < 0 || index >= expectedLength))]
+    throw new Error([
+      `${label} must contain every index exactly once`,
+      `expected=[${expected.join(",")}]`,
+      `received=[${indexes.join(",")}]`,
+      `missing=[${missing.join(",")}]`,
+      `duplicates=[${duplicates.join(",")}]`,
+      `outOfRange=[${outOfRange.join(",")}]`,
+    ].join("; "))
   }
 }
 

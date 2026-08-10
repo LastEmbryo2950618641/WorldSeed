@@ -33,7 +33,22 @@ export const modelPhaseResultSchema = z.object({
   unresolvedDependencies: z.array(modelDependencySchema).default([]),
   reason: z.string().min(1),
   selfReview: z.string().min(1),
-}).strict()
+}).strict().superRefine((result, context) => {
+  if (result.outcome === "request_read" && result.requestedReads.length === 0) {
+    context.addIssue({
+      code: "custom",
+      message: "request_read requires at least one requested read",
+      path: ["requestedReads"],
+    })
+  }
+  if (result.outcome !== "request_read" && result.requestedReads.length > 0) {
+    context.addIssue({
+      code: "custom",
+      message: "Only request_read may contain requested reads",
+      path: ["requestedReads"],
+    })
+  }
+})
 
 export type ModelPhaseResult = z.infer<typeof modelPhaseResultSchema>
 

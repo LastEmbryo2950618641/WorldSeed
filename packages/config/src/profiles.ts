@@ -145,14 +145,16 @@ export const defaultGraphCapacityProfile = Object.freeze(graphCapacityProfileSch
 }))
 
 export const defaultTurnExecutionProfile = Object.freeze(turnExecutionProfileSchema.parse({
-  maxTurnModelCalls: 63,
-  maxTurnWallTimeMs: 780000,
+  maxTurnModelCalls: 400,
+  maxTurnWallTimeMs: 7_200_000,
   maxDraftAuditRounds: 3,
   maxGraphGovernanceRounds: 3,
   maxSettlementReviewRounds: 2,
   maxForegroundAutonomyCandidates: 6,
   foregroundAutonomyContextTokenBudget: 6000,
 }))
+
+export const defaultTurnWallTimeMs = defaultTurnExecutionProfile.maxTurnWallTimeMs
 
 export const defaultProjectSettings = Object.freeze(projectSettingsSchema.parse({
   version: 2,
@@ -162,7 +164,8 @@ export const defaultProjectSettings = Object.freeze(projectSettingsSchema.parse(
     contextCompactionThresholdRatio: 0.95,
     outputTokenLimitMode: "model",
     maxWallTimeMs: defaultTurnExecutionProfile.maxTurnWallTimeMs,
-    maxRetrievalRounds: 4,
+    maxModelRequestTimeMs: 3_600_000,
+    maxRetrievalRounds: 10,
   },
   retrieval: {
     maxRequestsPerRound: 10,
@@ -180,6 +183,9 @@ export const defaultProjectSettings = Object.freeze(projectSettingsSchema.parse(
     maxVisitedLinks: defaultGraphCapacityProfile.maxVisitedLinks,
     maxNeighborhoodAnchors: defaultGraphCapacityProfile.maxNeighborhoodAnchors,
     layoutMode: "layered_collision_avoidance",
+  },
+  history: {
+    retentionLimit: null,
   },
 }))
 

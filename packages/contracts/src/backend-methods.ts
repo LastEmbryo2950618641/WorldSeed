@@ -18,6 +18,7 @@ export const backendMethodValues = [
   "model.profiles.save",
   "turn.start",
   "turn.resume",
+  "turn.recoverable.list",
   "turn.pause",
   "turn.cancel",
   "turn.status",

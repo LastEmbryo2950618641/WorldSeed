@@ -10,6 +10,7 @@ import {
   saveModelProfiles as persistModelProfiles,
   type GraphSlice,
   type OpenProject,
+  type RecoverableTaskList,
   type TaskSnapshot,
   type TurnResult,
   type WorkspaceReport,
@@ -67,6 +68,9 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     if (project === undefined) {
       setProjectSettings(undefined)
+      setTask(undefined)
+      setGraphSlice(undefined)
+      setPostCommitNotice(undefined)
       return
     }
     let active = true
@@ -74,8 +78,19 @@ export function App(): React.JSX.Element {
     void invokeBackend<ProjectSettings>("project.settings.read", {
       projectId: project.projectId,
       workspaceRootRef: project.workspaceRootRef,
-    }).then((settings) => {
-      if (active) setProjectSettings(settings)
+    }).then(async (settings) => {
+      if (!active) return
+      setProjectSettings(settings)
+      const tasks = await invokeBackend<RecoverableTaskList>("turn.recoverable.list", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+      })
+      if (!active) return
+      const latest = tasks[0]
+      setTask(latest)
+      if (latest?.status === "awaiting_user_decision") {
+        setPostCommitNotice("已恢复最近一次暂停的推演任务；请在右侧运行监控中决定继续、重试或保持暂停。")
+      }
     }).catch((cause: unknown) => {
       if (active) setError(cause instanceof Error ? cause.message : String(cause))
     })
@@ -163,6 +178,38 @@ export function App(): React.JSX.Element {
     setSavedContent(content)
   }
 
+  const monitorTask = async (taskId: string): Promise<void> => {
+    let consecutiveFailures = 0
+    for (;;) {
+      let snapshot: TaskSnapshot
+      try {
+        snapshot = await invokeBackend<TaskSnapshot>("turn.status", { taskId })
+        consecutiveFailures = 0
+      } catch (cause) {
+        consecutiveFailures += 1
+        if (consecutiveFailures >= 3) throw cause
+        await new Promise((resolve) => setTimeout(resolve, 1_000))
+        continue
+      }
+      setTask(snapshot)
+      if (snapshot.status === "completed") {
+        setPrompt("")
+        try {
+          await refreshWorkspace()
+        } catch (cause) {
+          setPostCommitNotice(`本轮正文与图数据已提交，但工作区刷新失败：${cause instanceof Error ? cause.message : String(cause)}`)
+        }
+        if (snapshot.result !== undefined) {
+          await loadCommittedGraph(snapshot.result)
+          await openFile(snapshot.result.chapterPath)
+        }
+        return
+      }
+      if (["awaiting_user_decision", "paused", "cancelled", "failed"].includes(snapshot.status)) return
+      await new Promise((resolve) => setTimeout(resolve, 350))
+    }
+  }
+
   const startTurn = async (): Promise<void> => {
     if (project === undefined || prompt.trim().length === 0 || task?.status === "running" || !wordCountValid) return
     if (activeModelProfile === undefined) {
@@ -195,30 +242,50 @@ export function App(): React.JSX.Element {
           },
         }),
       })
-      setTask({ status: "running" })
-      for (;;) {
-        const snapshot = await invokeBackend<TaskSnapshot>("turn.status", { taskId: started.taskId })
-        setTask(snapshot)
-        if (snapshot.status === "completed") {
-          setPrompt("")
-          try {
-            await refreshWorkspace()
-          } catch (cause) {
-            setPostCommitNotice(`本轮正文与图数据已提交，但工作区刷新失败：${cause instanceof Error ? cause.message : String(cause)}`)
-          }
-          if (snapshot.result !== undefined) {
-            await loadCommittedGraph(snapshot.result)
-            await openFile(snapshot.result.chapterPath)
-          }
-          break
-        }
-        if (snapshot.status === "failed") break
-        await new Promise((resolve) => setTimeout(resolve, 350))
-      }
+      setTask({ handle: { taskId: started.taskId, status: "running" }, status: "running" })
+      await monitorTask(started.taskId)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
-      setTask({ status: "failed", error: { message: cause instanceof Error ? cause.message : String(cause) } })
+      setTask((current) => current === undefined
+        ? { status: "failed", error: { message: cause instanceof Error ? cause.message : String(cause) } }
+        : { ...current, error: { message: cause instanceof Error ? cause.message : String(cause) } })
     }
+  }
+
+  const resumeTask = async (mode: "continue" | "retry_phase", _resetMetricIds: readonly string[]): Promise<void> => {
+    const taskId = task?.handle?.taskId
+    if (taskId === undefined || projectSettings === undefined) throw new Error("当前任务没有可恢复标识")
+    const handle = await invokeBackend<{ taskId: string; status: string }>("turn.resume", {
+      taskId,
+      mode,
+      ...(activeModelProfile === undefined ? {} : {
+        model: {
+          baseUrl: activeModelProfile.baseUrl,
+          model: activeModelProfile.model,
+          credentialRef: activeModelProfile.credentialRef,
+          thinkingModeEnabled: activeModelProfile.thinkingModeEnabled,
+          reasoningEffort: activeModelProfile.reasoningEffort,
+          jsonModeEnabled: activeModelProfile.jsonModeEnabled,
+        },
+      }),
+      maxModelCalls: projectSettings.execution.maxModelCalls,
+      deadlineMs: projectSettings.execution.maxWallTimeMs,
+      maxRetrievalRounds: projectSettings.execution.maxRetrievalRounds,
+    })
+    setTask((current) => {
+      const { interruption: _interruption, ...rest } = current ?? { status: "running" }
+      return { ...rest, handle, status: "running" }
+    })
+    void monitorTask(taskId).catch((cause: unknown) => {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    })
+  }
+
+  const pauseTask = async (): Promise<void> => {
+    const taskId = task?.handle?.taskId
+    if (taskId === undefined) throw new Error("当前任务没有可暂停标识")
+    const handle = await invokeBackend<{ taskId: string; status: string }>("turn.pause", { taskId })
+    setTask((current) => ({ ...current, handle, status: "paused" }))
   }
 
   const continueGraphLoad = async (): Promise<void> => {
@@ -312,7 +379,16 @@ export function App(): React.JSX.Element {
       </Panel>
       <PanelResizeHandle className="resize-handle"><PanelRightClose size={12} /></PanelResizeHandle>
       <Panel defaultSize={25} minSize={20} maxSize={38} collapsible>
-        <RightRail task={task} graphSlice={graphSlice} graphSettings={projectSettings?.graph} />
+        <RightRail
+          task={task}
+          graphSlice={graphSlice}
+          graphSettings={projectSettings?.graph}
+          executionSettings={projectSettings?.execution}
+          historyRetentionLimit={projectSettings?.history.retentionLimit}
+          onOpenProjectSettings={() => { setProjectSettingsOpen(true); }}
+          onResumeTask={resumeTask}
+          onPauseTask={pauseTask}
+        />
       </Panel>
     </PanelGroup>
     <footer className="statusbar">
@@ -325,6 +401,7 @@ export function App(): React.JSX.Element {
       projectName={project.displayName}
       settings={projectSettings}
       activeModelName={activeModelProfile?.name ?? "未配置模型"}
+      historyEntryCount={8}
       onClose={() => { setProjectSettingsOpen(false); }}
       onSave={saveProjectSettings}
       onOpenModelSettings={() => { setProjectSettingsOpen(false); setModelDialogOpen(true); }}

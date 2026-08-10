@@ -33,13 +33,15 @@ describe("current configuration", () => {
       layoutMode: "layered_collision_avoidance",
     })
     expect(defaultProjectSettings.execution).toMatchObject({
-      maxModelCalls: 63,
+      maxModelCalls: 400,
       contextWindowTokens: 1_000_000,
       contextCompactionThresholdRatio: 0.95,
       outputTokenLimitMode: "model",
-      maxWallTimeMs: 780000,
-      maxRetrievalRounds: 4,
+      maxWallTimeMs: 7_200_000,
+      maxModelRequestTimeMs: 3_600_000,
+      maxRetrievalRounds: 10,
     })
+    expect(defaultProjectSettings.history.retentionLimit).toBeNull()
   })
 
   it("matches the documented autonomy scaling at the default value", () => {
@@ -84,7 +86,7 @@ describe("current configuration", () => {
     expect(defaultDeepSeekRuntimeConfig.jsonModeEnabled).toBe(false)
     expect(defaultDeepSeekRuntimeConfig.thinkingModeEnabled).toBe(true)
     expect(defaultDeepSeekRuntimeConfig.reasoningEffort).toBe("high")
-    expect(defaultDeepSeekRuntimeConfig.timeoutMs).toBe(300_000)
+    expect(defaultDeepSeekRuntimeConfig.timeoutMs).toBe(7_200_000)
     expect(deepSeekRuntimeConfigSchema.safeParse({
       ...defaultDeepSeekRuntimeConfig,
       model: "deepseek-v4-flash",

@@ -2,7 +2,7 @@
 
 ## 1. 目标与边界
 
-本文把 [底层动态图设计](system-design.md) 转换为可实现的后端代码结构。它定义进程边界、模块职责、依赖方向、端口接口、持久化布局、执行管线、并发策略和测试边界，不重新定义世界语义。所有后端实现还必须遵守 [后端编码原则](backend-coding-principles.md)，该文档规定复用边界、业务隔离、依赖方向、契约版本和架构测试要求。V1 的冻结值、Migration、DeepSeek 配置和编码入口见 [V1 编码前冻结基线](v1-freeze.md)。单轮上下文、选择性读取和 DeepSeek KV 缓存复用见 [单轮上下文与 KV 缓存设计](context-and-kv-cache.md)，阶段 JSON 契约见 [AI 阶段契约](ai-phase-contracts.md)，场景、多时间流和动态空间见 [通用时空锚点设计](spacetime-anchor-design.md)。
+本文把 [底层动态图设计](system-design.md) 转换为可实现的后端代码结构。它定义进程边界、模块职责、依赖方向、端口接口、持久化布局、执行管线、并发策略和测试边界，不重新定义世界语义。所有后端实现还必须遵守 [后端编码原则](backend-coding-principles.md)，该文档规定复用边界、业务隔离、依赖方向、契约版本和架构测试要求。V1 的冻结值、Migration、DeepSeek 配置和编码入口见 [V1 编码前冻结基线](v1-freeze.md)。单轮上下文、选择性读取和 DeepSeek KV 缓存复用见 [单轮上下文与 KV 缓存设计](context-and-kv-cache.md)，阶段 JSON 契约见 [AI 阶段契约](ai-phase-contracts.md)，场景、多时间流和动态空间见 [通用时空锚点设计](spacetime-anchor-design.md)，任意异常后的检查点、用户确认、续时和进程恢复见 [推演中断、确认与恢复设计](turn-interruption-recovery.md)，长期保存、返回历史状态、世界线分叉和内部 Git 隔离见 [推演历史、世界线与版本恢复设计](world-history-versioning.md)。
 
 后端只负责机械能力：
 
@@ -13,6 +13,8 @@
 - 执行 AI 已决定的图修改、归档、检索、上下文组装和提交指令；
 - 管理用户 Markdown 工作目录与独立的应用内部存储；
 - 提供任务进度、事件流、预算统计、失败恢复和只读诊断。
+
+每次模型调用同时受三类边界约束：单次请求截止时间、整轮截止时间和模型供应商自身的网络超时。项目参数 `execution.maxModelRequestTimeMs` 默认 1 小时，可由用户调整到 30 秒至 1 小时；单次请求超时只产生可恢复的中断记录，保留当前检查点并等待用户选择，不会把已完成阶段或 pending 作用域丢弃。
 
 后端不负责：
 
@@ -57,6 +59,8 @@ bootstrap ───────> transport + infrastructure + application
 ```
 
 `contracts` 不依赖 `application` 或 `infrastructure`，`core` 不依赖其他业务包。`application` 不导入数据库驱动、桌面框架或具体模型 SDK；基础设施只实现应用层定义的端口。
+
+跨进程响应只允许暴露公开 DTO。任务记录中的执行器、模型、端口、依赖对象和原始输入等运行时对象不得通过 `turn.status` 或其他 MessagePort 响应返回；阶段结果和 AI 思考仍持久化，但由公开快照按协议返回。若响应传输发生结构化克隆失败，MessagePort 适配器必须记录诊断并尝试返回可恢复的小型错误响应，不能让调用静默等待到超时。
 
 ### 2.4 不采用领域实体服务
 
@@ -231,7 +235,7 @@ SQLite 中同时维护：
 
 后端不建立 `WorldClock`、`MapCoordinate`、`PortalType` 或其他世界领域对象。时间参照、空间参照、同步点、通道、比例和不确定性仍是普通节点、连接及其修订。
 
-应用层只保存 AI提交的 `SceneSpacetimeBinding`、`MutationSpacetimeSettlement` 和逐前沿 `FrontierSpacetimeSettlement`。这些记录只包含场景或修改索引、普通图与修订引用、作用域、来源、原因和自审，用于快速恢复场景局部与执行机械门禁，不复制图载荷，也不成为第二套世界事实。
+应用层只保存 AI提交的 `SceneSpacetimeBinding`、`MutationSpacetimeSettlement` 和逐前沿 `FrontierSpacetimeSettlement`。这些记录只包含场景或修改索引、普通图与修订引用、作用域、来源、原因和自审，用于快速恢复场景局部与执行机械门禁，不复制图载荷，也不成为第二套世界事实。前沿集合由 AI 定义为可独立继续、暂停或归档的局部边界，不按修改项、节点或连接自动展开；代码只校验结算锚点集合与语义复核批准集合一致，不替 AI 选择前沿。
 
 数据库系统时间统一命名为 `created_at`、`updated_at`、`last_processed_at` 或 `next_attempt_at`。这些字段只参与任务排序、调度和诊断，禁止作为世界时间锚点进入模型事实上下文。
 
@@ -326,7 +330,8 @@ flowchart LR
     E --> M["候选合并与机械去重"]
     F --> M
     V --> M
-    M --> L["按作用域与预算截断"]
+    M --> S["原文命中按同源相邻序号有界展开"]
+    S --> L["按作用域与预算截断"]
     L --> A["AI 判断相关性并请求局部展开"]
 ```
 
@@ -342,6 +347,20 @@ interface RetrievalIndex {
 ```
 
 `RetrievalRequest` 必须包含 `projectId`、允许的可见性、可选 `scopeId`、候选上限和预算；基础设施不能默认跨项目或跨 pending 作用域搜索。
+
+对图节点和连接，候选排序还必须结合 `node_heads`/`link_heads` 的当前头：同一所有者的当前修订投影先于历史修订进入候选集合，再按上限截断；历史修订仍然保留在结果集合中，以支持回溯过去状态、原始话语和旧事实。pending 作用域存在时，pending 头覆盖 committed 头；pending 头归档后不得继续作为当前候选。
+
+`anchorIds` 使用独立的 owner 解析端口，直接从当前 node/link head 取得对应投影，不得复用 `searchExact()`。精确键和语义搜索返回候选后，应用按 owner 执行当前状态闭包：历史图投影只有在同一可见作用域的当前头投影可以同时返回时才进入最终候选。运行时 Evidence 明确携带 `current` 或 `historical` 角色；该角色由 head 表机械导出，不写回世界语义载荷。
+
+候选裁剪以 owner 证据组为单位。当前头优先，历史投影随后；若剩余候选或 token 容量不足以容纳当前头和历史投影，则不返回该历史投影。source、规则和参考文件不参与图 head 闭包，避免把原文单元或工作区文件错误解释为可变图状态。
+
+对内部 `source` 原文投影，语义命中的是进入连续原文的入口，不等于完整段落已经召回。仅当请求的 `sourceKinds` 只包含 `source` 时，应用层才以当前请求的首个高相关 source unit 为中心，按同一 `sourceId` 的相邻 `sequence` 机械展开有界窗口；混合 `graph`、`revision` 与 `source` 的请求只返回各自的直接候选，避免图入口检索的早期噪声耗尽累计原文证据预算。窗口半径由 `maxCandidates` 推导，最终内容仍同时服从候选上限和累计 `maxEvidenceTokens`。该机制只利用不可变来源身份和顺序，不识别人物、对白、地点、章节类型或其他世界语义，也不读取用户工作区中的章节文件。
+
+证据账本必须保留检索投影的真实来源身份：内部原文 `source` 投影记为 `chapter`，图投影记为 `graph`，修订投影记为 `revision`。模型侧仍通过 `ownerKind` 判断具体投影所有者；账本来源不得把逐字原文伪装成图摘要。
+
+同一轮内重复读取相同投影时，应用层必须以稳定证据键去重；稳定键至少包含所有者身份与投影摘要，不能只依赖每次查询生成的临时 projection/read ID。重复命中不得再次写 Evidence、追加上下文段或消耗累计证据预算；只有所有者当前修订或投影内容实际变化后，才能作为新证据进入本轮上下文。该规则与具体人物、事件和世界类型无关。
+
+模型可见证据使用单轮接纳窗口。`interpret` 从初始候选中筛选本轮相关证据；任何阶段合法引用的新证据都会加入该窗口，之后的规则组装、资料检索、正文、治理和审查阶段只能增补，不能仅因本阶段未再次引用而删除先前证据。新增读取继续按稳定证据键去重，并以当前已接纳窗口计入累计 `maxEvidenceTokens`，因此该规则不会退化为全量上下文，也不能通过阶段切换绕过预算。完整 Evidence 仍保存在持久账本中，窗口淘汰不等于物理删除。
 
 ## 10. 规则与资料模块
 
@@ -401,9 +420,11 @@ type ModelExecutionResult<TOutput> = {
 }
 ```
 
-`DeepSeekAdapter` 使用 `openai` SDK 的兼容客户端发送请求。统一运行配置分别控制 `thinkingModeEnabled`、`reasoningEffort` 与 `jsonModeEnabled`：思考开启时发送 `thinking.enabled` 和 `reasoning_effort: low | high | max`，关闭时发送 `thinking.disabled` 且不发送强度；JSON Mode 默认关闭。模型仍由末尾输出契约要求返回单个 JSON 对象，适配器提取首个完整对象后通过 Zod `outputSchema` 校验；JSON 合法不代表语义已经被后端批准。一次真实同请求对照表明 `high`、`low`、`disabled` 都能返回最终 `content`，因此空 `content` 不能简单归因于某个固定思考强度，必须保留响应通道日志与有限重试。
+`DeepSeekAdapter` 使用 `openai` SDK 的兼容客户端发送请求。统一运行配置分别控制 `thinkingModeEnabled`、`reasoningEffort` 与 `jsonModeEnabled`：思考开启时发送 `thinking.enabled` 和 `reasoning_effort: low | high | max`，关闭时发送 `thinking.disabled` 且不发送强度；JSON Mode 默认关闭。模型仍由末尾输出契约要求返回单个 JSON 对象，适配器提取首个完整对象后通过 Zod `outputSchema` 校验；JSON 合法不代表语义已经被后端批准。一次真实同请求对照表明 `high`、`low`、`disabled` 都能返回最终 `content`，因此空 `content` 不能简单归因于某个固定思考强度，必须保留响应通道日志与有限重试。供应商单次输出上限只是故障边界，不是阶段目标；控制阶段提示词必须在请求尾部明确输入只读、完整性不等于复述、数组项不得重复，并要求单个 JSON 对象闭合后立即停止。若供应商返回 `finish_reason=length`，即使前缀看似可解析也按截断处理并紧凑重生成，同时只在 debug 日志保存有限首尾片段用于识别重复输出；日志同时区分 `reasoningTokens` 与估算的最终内容 Token，避免把异常内容误判为深度思考。
 
-轮次 deadline 生成的 `AbortSignal` 只能作为 OpenAI SDK 的请求选项传入，不能混入 HTTP JSON body。单请求默认超时为 `300000ms`，且始终受轮次剩余 deadline 的更小值约束；这是为了容纳图治理等复杂阶段，同时避免请求越过整轮预算。模型只返回 `reasoning_content` 而最终 `content` 为空时，适配器将其分类为供应商响应不完整，并以完整的 `user -> assistant -> user` 消息结构进行有限修复，不把空字符串交给 JSON 解析器。
+轮次 deadline 生成的 `AbortSignal` 只能作为 OpenAI SDK 的请求选项传入，不能混入 HTTP JSON body。单请求默认超时为 `3600000ms`，且始终受轮次剩余 deadline 的更小值约束；这样不会用过短的单请求保护时间截断仍在正常处理的模型阶段，同时仍避免请求越过整轮预算。用户或环境可以把单请求超时调小，但这会使请求更早进入可恢复的错误确认流程。若请求在整轮 deadline 处被 Abort，编排器将其统一记录为 `wall_time` 限制耗尽，而不是丢失为无指标的普通异常。模型只返回 `reasoning_content` 而最终 `content` 为空时，适配器将其分类为供应商响应不完整，并以完整的 `user -> assistant -> user` 消息结构进行有限修复，不把空字符串交给 JSON 解析器。
+
+用户主动取消使用另一条运行时 signal：`BackendFacade` 为每个 start/resume 执行代次持有独立 `AbortController`，经 `TurnExecutionHooks -> AIModelPort.execute options -> DeepSeek SDK request options` 传递，并与单请求及整轮超时 signal 合并。controller 不进入任何持久化协议。取消会中止当前网络请求并在阶段边界停止编排；异步完成回调必须校验当前 controller 身份，不能在取消后覆盖任务状态。取消只终止执行，保留 pending scope 和检查点，不提交也不物理删除它们。
 
 V1 不依赖 Tool Calling。模型需要查询或提出修改时，先返回 Worldseed 自己的结构化 JSON，应用层执行 `request_read` 或暂存 mutation，再把结果放入下一次模型输入。未来接入 Tool Calling 时，只能在 `DeepSeekAdapter` 内转换为相同的 `AIPhaseResult`，不能改变应用层协议。
 
@@ -417,7 +438,7 @@ apps/backend/src/infrastructure/models/deepseek/
 └── deepseek-errors.ts
 ```
 
-第一阶段默认所有 AI 阶段使用 `deepseek-v4-flash`，保持模型变量单一。模型、base URL、超时、最大调用次数和 token 上限都进入项目运行配置与任务预算快照。应用不设置整轮累计输出截止线；对已知模型传递其供应商允许的单次输出上限，未知模型不硬编码供应商能力。
+第一阶段默认所有 AI 阶段使用 `deepseek-v4-flash`，保持模型变量单一。模型、base URL、超时、最大调用次数和 token 上限都进入项目运行配置与任务预算快照。应用不设置整轮累计输出截止线；已知模型的正文阶段按用户字数范围计算单次输出预算，非正文阶段使用阶段级结构化护栏，未知模型不硬编码供应商能力。
 
 ### 11.2 Prompt 注册表
 
@@ -617,6 +638,8 @@ operation_events
 
 `frontier_refs` 为每个前沿分别保存 `last_scene_anchor_refs`、`last_time_anchor_refs`、`last_location_anchor_refs` 和 `correspondence_refs`。原 `last_effective_time` 不得继续表示世界时间，应拆为世界图引用和纯系统调度字段 `last_processed_at`。不同前沿没有已读对应结构时，调度器不能仅凭系统时间比较其世界进度。
 
+`TurnPersistencePort` 同时提供有界的 committed 前沿读取端口。它只返回活动或推迟状态、调度顺序以及前沿已经保存的原因、重访条件和锚点引用，不解释内容语义。`world.evolve` 在首个模型阶段前把这些记录转换为 committed Evidence，并通过 owner 身份解析读取对应当前图投影。非空世界存在可用前沿时，提交门禁要求本轮读取集合至少包含一个前沿记录及其场景、时间、地点锚点证据；空世界不应用该门禁。
+
 ### 16.2 内部目录
 
 ```text
@@ -689,7 +712,8 @@ interface BackendFacade {
 
 - `project.create`、`project.open`、`project.validate`；
 - `workspace.list`、`workspace.read`、`workspace.save`、`workspace.importFiles`、`workspace.importFolder`、`workspace.archive`、`workspace.restore`；
-- `turn.start`、`turn.resume`、`turn.pause`、`turn.cancel`、`turn.status`；
+- `turn.start`、`turn.resume`、`turn.recoverable.list`、`turn.pause`、`turn.cancel`、`turn.status`；
+- `turn.recoverable.list` 只读当前项目中状态为 `awaiting_user_decision` 或 `paused` 的任务，按更新时间倒序返回检查点摘要和阶段运行记录；项目打开后由 UI 加载最近一条，恢复任务保持暂停，不自动发起模型请求。
 - `world.query`、`world.evolve`；
 - `chapter.list`、`chapter.read`、`chapter.startRevision`、`chapter.submitRevision`、`chapter.retireRevision`；
 - `graph.search`、`graph.neighborhood`、`graph.revisions`；

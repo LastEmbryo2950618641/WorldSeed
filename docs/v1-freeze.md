@@ -108,7 +108,7 @@ project.create / project.open / project.validate
 workspace.list / workspace.read / workspace.save
 workspace.importFiles / workspace.importFolder
 workspace.archive / workspace.restore
-turn.start / turn.resume / turn.pause / turn.cancel / turn.status
+turn.start / turn.resume / turn.recoverable.list / turn.pause / turn.cancel / turn.status
 world.query / world.evolve
 chapter.list / chapter.read / chapter.startRevision / chapter.submitRevision / chapter.retireRevision
 graph.search / graph.neighborhood / graph.revisions
@@ -257,7 +257,7 @@ DEEPSEEK_API_KEY                 # 仅开发环境回退读取
 WORLDSEED_DEEPSEEK_BASE_URL      # 默认 https://api.deepseek.com
 WORLDSEED_DEEPSEEK_MODEL         # 默认 deepseek-chat
 WORLDSEED_DEEPSEEK_PROXY_URL     # 可选 HTTP/HTTPS 代理
-WORLDSEED_DEEPSEEK_TIMEOUT_MS    # 默认 300000
+WORLDSEED_DEEPSEEK_TIMEOUT_MS    # 默认 7200000，与默认整轮墙钟窗口一致
 WORLDSEED_DEEPSEEK_JSON_MODE_ENABLED      # 默认 false
 WORLDSEED_DEEPSEEK_THINKING_MODE_ENABLED  # 默认 true
 WORLDSEED_DEEPSEEK_REASONING_EFFORT       # low | high | max，默认 high
@@ -287,7 +287,7 @@ type DeepSeekRuntimeConfig = {
 const defaultDeepSeekRuntimeConfig = {
   baseUrl: "https://api.deepseek.com",
   model: "deepseek-chat",
-  timeoutMs: 300000,
+  timeoutMs: 7200000,
   maxAttempts: 2,
   maxSchemaRepairAttempts: 2,
   jsonModeEnabled: false,
@@ -345,8 +345,8 @@ V1 沿用以下已经写入底层设计的默认值：
 
 ```ts
 const defaultTurnExecutionProfile = {
-  maxTurnModelCalls: 63,
-  maxTurnWallTimeMs: 780000,
+  maxTurnModelCalls: 400,
+  maxTurnWallTimeMs: 7200000,
   maxDraftAuditRounds: 3,
   maxGraphGovernanceRounds: 3,
   maxSettlementReviewRounds: 2,

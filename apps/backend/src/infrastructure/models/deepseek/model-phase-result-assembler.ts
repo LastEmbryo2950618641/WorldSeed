@@ -8,8 +8,10 @@ import {
   type ModelPhaseResult,
   type PhaseRequestEnvelope,
   type PhaseResultEnvelope,
+  type ReadRequest,
 } from "@worldseed/contracts"
 import {
+  assertFrontierSettlementCoversReview,
   assertPhaseReferenceContract,
   assertSemanticReviewCoversGovernance,
   assertSpacetimeGovernanceCoverage,
@@ -24,13 +26,24 @@ import type { TurnPhaseInput } from "../../../application/index.js"
 export function phaseModelResultJsonSchema(phase: AIPhase): unknown {
   const resultSchema = asRecord(modelPhaseResultJsonSchema())
   const resultProperties = asRecord(resultSchema.properties)
-  return {
+  return stripSchemaMetadata({
     ...resultSchema,
     properties: {
       ...resultProperties,
       artifact: phaseArtifactJsonSchema(phase),
     },
-  }
+  })
+}
+
+function stripSchemaMetadata(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => stripSchemaMetadata(item))
+  if (typeof value !== "object" || value === null) return value
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "$schema")
+      .map(([key, entry]) => [key, stripSchemaMetadata(entry)]),
+  )
 }
 
 export function parseModelPhaseResult(value: unknown): ModelPhaseResult {
@@ -74,13 +87,7 @@ export function assembleModelPhaseResult(
         directions: query?.directions ?? ["both" as const],
         maxCandidates: query?.maxCandidates ?? 24,
         maxDepth: query?.maxDepth ?? 2,
-        sourceKinds: query?.sourceKinds ?? [
-          "rule" as const,
-          "reference" as const,
-          "graph" as const,
-          "revision" as const,
-          "source" as const,
-        ],
+        sourceKinds: normalizeRequestedSourceKinds(exactKeys, query?.sourceKinds),
       },
     }
   })
@@ -103,6 +110,26 @@ export function assembleModelPhaseResult(
     reason: semantic.reason,
     selfReview: semantic.selfReview,
   })
+}
+
+function normalizeRequestedSourceKinds(
+  exactKeys: readonly string[],
+  requestedSourceKinds: ReadRequest["query"]["sourceKinds"] | undefined,
+): ReadRequest["query"]["sourceKinds"] {
+  const sourceKinds = [...new Set(requestedSourceKinds ?? [
+    "rule" as const,
+    "reference" as const,
+    "graph" as const,
+    "revision" as const,
+    "source" as const,
+  ])]
+  const queriesPersistentWorld = sourceKinds.some((kind) => (
+    kind === "graph" || kind === "revision" || kind === "source"
+  ))
+  if (exactKeys.length > 0 && queriesPersistentWorld && !sourceKinds.includes("source")) {
+    sourceKinds.push("source")
+  }
+  return sourceKinds
 }
 
 function normalizeOptionalModelFields(phase: AIPhase, artifact: unknown): unknown {
@@ -391,6 +418,9 @@ function assertCrossPhaseArtifactContract(request: PhaseRequestEnvelope, artifac
   }
   if (request.phase === "semantic_review") {
     assertSemanticReviewCoversGovernance(input.artifacts.graph_governance, artifact)
+  }
+  if (request.phase === "frontier_settlement") {
+    assertFrontierSettlementCoversReview(input.artifacts.semantic_review, artifact)
   }
 }
 

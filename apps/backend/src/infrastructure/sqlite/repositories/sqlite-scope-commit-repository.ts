@@ -14,6 +14,33 @@ type ProjectTransaction = Transaction<ProjectDatabase>
 export class SqliteScopeCommitRepository implements ScopeCommitRepository {
   public constructor(private readonly database: Kysely<ProjectDatabase>) {}
 
+  public async resetPending(scopeId: ScopeId): Promise<void> {
+    await this.database.transaction().execute(async (transaction) => {
+      const scope = await transaction.selectFrom("artifact_scopes")
+        .select("visibility")
+        .where("id", "=", scopeId)
+        .executeTakeFirstOrThrow()
+      if (scope.visibility !== "pending") return
+
+      await sql`DELETE FROM retrieval_fts WHERE scope_id = ${scopeId}`.execute(transaction)
+      await transaction.deleteFrom("retrieval_exact_keys")
+        .where("projection_id", "in", transaction.selectFrom("retrieval_projections").select("id").where("scope_id", "=", scopeId))
+        .execute()
+      await transaction.deleteFrom("retrieval_projections").where("scope_id", "=", scopeId).execute()
+      await transaction.deleteFrom("graph_revision_spacetime").where("scope_id", "=", scopeId).execute()
+      await transaction.deleteFrom("scene_spacetime_bindings").where("scope_id", "=", scopeId).execute()
+      await transaction.deleteFrom("settlement_records").where("scope_id", "=", scopeId).execute()
+      await transaction.deleteFrom("frontier_refs").where("scope_id", "=", scopeId).execute()
+      await transaction.deleteFrom("ai_decision_records").where("scope_id", "=", scopeId).execute()
+      await transaction.deleteFrom("document_versions").where("scope_id", "=", scopeId).execute()
+      await transaction.deleteFrom("node_heads").where("scope_key", "=", scopeId).execute()
+      await transaction.deleteFrom("link_heads").where("scope_key", "=", scopeId).execute()
+      await transaction.deleteFrom("nodes").where("scope_id", "=", scopeId).execute()
+      await transaction.deleteFrom("links").where("scope_id", "=", scopeId).execute()
+      await transaction.deleteFrom("graph_revisions").where("scope_id", "=", scopeId).execute()
+    })
+  }
+
   public async commit(scopeId: ScopeId): Promise<ScopeCommitResult> {
     return this.database.transaction().execute(async (transaction) => {
       const scope = await transaction.selectFrom("artifact_scopes").selectAll().where("id", "=", scopeId).executeTakeFirstOrThrow()

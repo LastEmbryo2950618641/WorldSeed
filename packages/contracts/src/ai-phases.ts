@@ -52,5 +52,12 @@ export const phaseResultEnvelopeSchema = z.object({
       path: ["requestedReads"],
     })
   }
+  if (result.outcome !== "request_read" && result.requestedReads.length > 0) {
+    context.addIssue({
+      code: "custom",
+      message: "Only request_read may contain requested reads",
+      path: ["requestedReads"],
+    })
+  }
 })
 export type PhaseResultEnvelope = z.infer<typeof phaseResultEnvelopeSchema>

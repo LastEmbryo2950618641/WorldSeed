@@ -65,7 +65,7 @@ describe("DeepSeekAiModelAdapter", () => {
         input = completionInput
         return Promise.resolve({
           content: JSON.stringify({
-            outcome: "continue",
+            outcome: "request_read",
             artifact: {
               workflow: "turn",
               userIntent: "继续观察",
@@ -113,6 +113,89 @@ describe("DeepSeekAiModelAdapter", () => {
     expect(finalMessage).toContain("node-1")
     expect(execution.result.citedReadIds).toEqual([readId])
     expect(execution.result.requestedReads[0]?.query.anchorIds).toEqual([graphOwnerId])
+  })
+
+  it("keeps source-unit return paths internal while exposing source evidence by read alias", async () => {
+    const readId = randomUUID()
+    const sourceId = randomUUID()
+    const sourceUnitId = randomUUID()
+    const relatedNodeId = randomUUID()
+    const request = createRequest({
+      committedReadIds: [readId],
+      input: {
+        userInput: "回忆纸库里发生过什么。",
+        chapterSequence: 18,
+        sourceId: randomUUID(),
+        sourceUnitIds: [],
+        phaseRunIds: [],
+        readEvidence: [{
+          readId,
+          visibility: "committed",
+          ownerKind: "source",
+          ownerId: sourceUnitId,
+          revisionId: sourceUnitId,
+          exactKeys: ["纸库的灯亮着"],
+          semanticText: "纸库的灯亮着，蓝工装人从库里抱出旧簿册。",
+          sourceRefs: [{ sourceId, sourceUnitId, sequence: 18 }],
+          relatedOwnerRefs: [{
+            ownerKind: "node",
+            ownerId: relatedNodeId,
+            exactKeys: ["纸库"],
+            semanticText: "纸库门口的封条与旧簿册入口",
+          }],
+          digest: "source-unit-digest",
+        }],
+        retrievalGaps: [],
+        artifacts: {},
+      },
+    })
+    let finalMessage = ""
+    const client: DeepSeekCompletionClient = {
+      complete: (input) => {
+        finalMessage = input.messages.at(-1)?.content ?? ""
+        return Promise.resolve({
+          content: JSON.stringify({
+            outcome: "continue",
+            artifact: {
+              workflow: "query",
+              userIntent: "回忆纸库历史",
+              worldIntent: "只回答已发生事实",
+              presentationIntent: "plain",
+              userClaims: [],
+              requiredTimeAnchor: false,
+              requiredLocationAnchor: false,
+              initialReadHypotheses: [],
+            },
+            requestedReads: [],
+            citedReadIds: ["read-1"],
+            unresolvedDependencies: [],
+            reason: "原文单元证据已足够",
+            selfReview: "仅通过证据别名引用原文单元",
+          }),
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        })
+      },
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 0 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    const execution = await adapter.execute(request)
+
+    expect(finalMessage).toContain("read-1")
+    expect(finalMessage).toContain("纸库的灯亮着")
+    expect(finalMessage).toContain("relatedOwnerRefs")
+    expect(finalMessage).toContain("node-1")
+    expect(finalMessage).toContain("纸库门口的封条与旧簿册入口")
+    expect(finalMessage).not.toContain(sourceId)
+    expect(finalMessage).not.toContain(sourceUnitId)
+    expect(finalMessage).not.toContain(relatedNodeId)
+    expect(finalMessage).not.toContain('"sourceRefs"')
+    expect(finalMessage).not.toContain('"revisionId"')
+    expect(execution.result.citedReadIds).toEqual([readId])
   })
 
   it("does not instruct planning phases to invent local graph handles", async () => {
@@ -201,6 +284,105 @@ describe("DeepSeekAiModelAdapter", () => {
     })
   })
 
+  it("explains external predecessors for the first current-turn scene", async () => {
+    const readId = randomUUID()
+    const request = createRequest({
+      phase: "graph_governance",
+      committedReadIds: [readId],
+      input: {
+        userInput: "延续上一章的清晨场景。",
+        chapterSequence: 2,
+        sourceId: randomUUID(),
+        sourceUnitIds: [],
+        phaseRunIds: [],
+        readEvidence: [{
+          readId,
+          visibility: "committed",
+          ownerKind: "node",
+          ownerId: randomUUID(),
+          exactKeys: ["上一章场景"],
+          semanticText: "上一章场景锚点",
+          sourceRefs: [],
+          digest: "scene-digest",
+        }],
+        retrievalGaps: [],
+        artifacts: {
+          dependency_audit: {
+            missingDependencies: [],
+            unplannedContent: [],
+            sceneContinuity: [{
+              sceneIndex: 0,
+              sceneDescription: "本章第一个场景",
+              predecessorSceneIndexes: [],
+              predecessorSceneRefs: ["read-1"],
+              predecessorRequired: true,
+              predecessorReason: "承接上一章",
+              correspondenceRequired: false,
+              correspondenceReason: "无额外对应要求",
+              timeContinuity: "pass",
+              locationContinuity: "pass",
+              crossReferenceContinuity: "pass",
+              reason: "从上一章场景进入本章",
+            }],
+            informationBoundary: "pass",
+          },
+        },
+      },
+    })
+    let finalMessage = ""
+    const client: DeepSeekCompletionClient = {
+      complete: (input) => {
+        finalMessage = input.messages.at(-1)?.content ?? ""
+        return Promise.resolve({
+          content: JSON.stringify({
+            outcome: "continue",
+            artifact: {
+              mutations: [],
+              retrievalProjections: [],
+              settlementRecords: [],
+              mutationSpacetimeSettlements: [],
+              sceneSpacetimeBindings: [{
+                sceneIndex: 0,
+                sceneAnchorRef: "read-1",
+                sourceUnitIndexes: [],
+                temporalReferenceRefs: ["read-1"],
+                timeAnchorRefs: ["read-1"],
+                spatialReferenceRefs: ["read-1"],
+                locationAnchorRefs: ["read-1"],
+                predecessorSceneIndexes: [],
+                predecessorSceneAnchorRefs: ["read-1"],
+                transitionPathRefs: ["read-1"],
+                correspondenceRefs: [],
+                explanation: "通过上一章图锚点进入本章",
+                selfReview: "本轮索引为空，外部前驱由图锚点和过渡路径承接",
+              }],
+              affectedFrontierRefs: [],
+              archiveOutletRefs: [],
+              decisionRecords: [],
+            },
+            citedReadIds: ["read-1"],
+            reason: "已按跨轮前驱规则绑定",
+            selfReview: "前驱索引与依赖审计一致",
+          }),
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        })
+      },
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 0 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    await adapter.execute(request)
+
+    expect(finalMessage).toContain("copy predecessorSceneIndexes exactly")
+    expect(finalMessage).toContain("never invent scene 0")
+    expect(finalMessage).toContain("predecessorSceneAnchorRefs")
+    expect(finalMessage).toContain("predecessorSceneRefs are evidence aliases")
+  })
+
   it("never silently falls back to Fake AI when the API key is missing", async () => {
     const unavailable = createModelFromEnvironment(promptRoot, {})
     expect(unavailable).toBeInstanceOf(UnavailableAiModelAdapter)
@@ -246,7 +428,7 @@ describe("DeepSeekAiModelAdapter", () => {
     expect(execution.usage.provider).toBe("deepseek")
     expect(adapter.info).toMatchObject({ provider: "deepseek", model: "deepseek-v4-flash", available: true })
     expect(completionInput).not.toHaveProperty("responseFormat")
-    expect(completionInput?.maxTokens).toBe(384_000)
+    expect(completionInput).not.toHaveProperty("maxTokens")
   })
 
   it("enables provider JSON Mode only through the centralized runtime switch", async () => {
@@ -335,7 +517,34 @@ describe("DeepSeekAiModelAdapter", () => {
     expect(execution.result.phase).toBe("interpret")
   })
 
-  it("passes the turn deadline signal through the SDK request options", async () => {
+  it("retries undici transport termination before failing the phase", async () => {
+    const request = createRequest()
+    const fake = await new FakeAiModelAdapter(randomUUID).execute(request)
+    let calls = 0
+    const client: DeepSeekCompletionClient = {
+      complete: async () => {
+        calls += 1
+        if (calls === 1) throw new TypeError("terminated")
+        return {
+          content: JSON.stringify(toModelResult(fake.result)),
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        }
+      },
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 0, maxAttempts: 2 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    const execution = await adapter.execute(request)
+
+    expect(calls).toBe(2)
+    expect(execution.result.phase).toBe("interpret")
+  })
+
+  it("honors the shorter per-request deadline before the turn deadline", async () => {
     const server = createServer((request) => { request.resume() })
     await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve) })
     const address = server.address() as AddressInfo
@@ -358,7 +567,8 @@ describe("DeepSeekAiModelAdapter", () => {
         remainingInputTokens: 1000,
         maxOutputTokens: 1000,
         remainingOutputTokens: 1000,
-        deadlineAtMs: Date.now() + 80,
+        deadlineAtMs: Date.now() + 5_000,
+        modelRequestDeadlineAtMs: Date.now() + 80,
       },
     })
     const startedAt = Date.now()
@@ -425,10 +635,40 @@ describe("DeepSeekAiModelAdapter", () => {
     await adapter.execute(request)
 
     expect(calls).toBe(2)
-    expect(repairInput?.messages).toHaveLength(6)
-    expect(repairInput?.messages.some((message) => message.role === "assistant" && message.content === truncated)).toBe(true)
+    expect(repairInput?.messages).toHaveLength(5)
+    expect(repairInput?.messages.filter((message) => message.role === "assistant")).toHaveLength(0)
     expect(repairInput?.messages.at(-1)?.content).toContain("Regenerate the complete object")
     expect(repairInput?.messages.at(-1)?.content).toContain("provider's configured output limit")
+  })
+
+  it("repairs a complete-looking response when the provider reports output truncation", async () => {
+    const request = createRequest()
+    const fake = await new FakeAiModelAdapter(randomUUID).execute(request)
+    let calls = 0
+    let repairInput: Parameters<DeepSeekCompletionClient["complete"]>[0] | undefined
+    const client: DeepSeekCompletionClient = {
+      complete: (input) => {
+        calls += 1
+        if (calls === 2) repairInput = input
+        return Promise.resolve({
+          content: JSON.stringify(toModelResult(fake.result)),
+          finishReason: calls === 1 ? "length" : "stop",
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        })
+      },
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 1 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    await adapter.execute(request)
+
+    expect(calls).toBe(2)
+    expect(repairInput?.messages.at(-1)?.content).toContain("Regenerate the complete object")
+    expect(repairInput?.messages.at(-1)?.content).toContain("Use compact JSON")
   })
 
   it("repairs reasoning-only responses without parsing an empty final content string", async () => {
@@ -453,8 +693,73 @@ describe("DeepSeekAiModelAdapter", () => {
     await adapter.execute(request)
 
     expect(completionInputs).toHaveLength(2)
-    expect(completionInputs[1]?.messages.at(-2)).toEqual({ role: "assistant", content: "" })
+    expect(completionInputs[1]?.messages.some((message) => message.role === "assistant")).toBe(false)
     expect(completionInputs[1]?.messages.at(-1)?.content).toContain("without final content")
+  })
+
+  it("terminates reasoning fallback scanning when the outer JSON object fails the phase schema", async () => {
+    const request = createRequest()
+    const fake = await new FakeAiModelAdapter(randomUUID).execute(request)
+    let calls = 0
+    const client: DeepSeekCompletionClient = {
+      complete: () => {
+        calls += 1
+        return Promise.resolve(calls === 1
+          ? {
+              content: "",
+              reasoningContent: JSON.stringify({ not: "a phase result" }),
+              usage: { prompt_tokens: 10, completion_tokens: 5 },
+            }
+          : {
+              content: JSON.stringify(toModelResult(fake.result)),
+              usage: { prompt_tokens: 10, completion_tokens: 5 },
+            })
+      },
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 1 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    const execution = await adapter.execute(request)
+
+    expect(calls).toBe(2)
+    expect(execution.result).toEqual(fake.result)
+  })
+
+  it("accepts a schema-valid phase result emitted at the end of reasoning", async () => {
+    const request = createRequest()
+    const fake = await new FakeAiModelAdapter(randomUUID).execute(request)
+    const modelResult = toModelResult(fake.result)
+    let calls = 0
+    const reasoningContent = [
+      "I have completed the internal analysis and will now emit the required object.",
+      JSON.stringify(modelResult),
+    ].join("\n")
+    const client: DeepSeekCompletionClient = {
+      complete: () => {
+        calls += 1
+        return Promise.resolve({
+          content: "",
+          reasoningContent,
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        })
+      },
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 0 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    const execution = await adapter.execute(request)
+
+    expect(calls).toBe(1)
+    expect(execution.result).toEqual(fake.result)
+    expect(execution.usage.reasoningContent).toBe(reasoningContent)
   })
 
   it("repeats the complete phase contract at the end of initial and repair requests", async () => {
@@ -497,6 +802,7 @@ describe("DeepSeekAiModelAdapter", () => {
       expect(finalMessage).toContain('"truthStatus"')
       expect(finalMessage).toContain('"not_assumed"')
       expect(finalMessage).toContain('"current_turn_new"')
+      expect(finalMessage).not.toContain('"$schema"')
     }
   })
 
@@ -566,6 +872,7 @@ describe("DeepSeekAiModelAdapter", () => {
     await adapter.execute(request)
 
     const finalMessage = input?.messages.at(-1)?.content ?? ""
+    expect(input).not.toHaveProperty("maxTokens")
     expect(finalMessage).toContain('"contentMarkdown"')
     expect(finalMessage).toContain('"adoptedDecisionIndexes"')
     expect(finalMessage).not.toContain("Draft path rule")
@@ -668,6 +975,7 @@ describe("DeepSeekAiModelAdapter", () => {
     const gapRequestId = randomUUID()
     const request = createRequest({
       input: {
+        workflow: "turn",
         userInput: "test",
         chapterSequence: 1,
         sourceId: randomUUID(),
@@ -789,6 +1097,78 @@ describe("DeepSeekAiModelAdapter", () => {
     expect(execution.result.requestedReads[0]?.query.maxCandidates).toBe(24)
   })
 
+  it("keeps internal source projections available for exact persistent-world reads", async () => {
+    const request = createRequest({ phase: "source_retrieval" })
+    let finalMessage = ""
+    const client: DeepSeekCompletionClient = {
+      complete: (input) => {
+        finalMessage = input.messages.at(-1)?.content ?? ""
+        return Promise.resolve({
+          content: JSON.stringify({
+            outcome: "request_read",
+            artifact: { missingEvidence: [], nextExpansionHints: ["精确查找旧话语"] },
+            requestedReads: [{
+              reason: "查找已经写入世界的精确原话",
+              expectedEvidence: "精确原文及其世界图上下文",
+              query: {
+                exactKeys: ["接得上，不等于就是真的。"],
+                sourceKinds: ["graph", "revision"],
+              },
+            }],
+            reason: "需要精确来源",
+            selfReview: "不直接读取工作区章节文件",
+          }),
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        })
+      },
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 0 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    const execution = await adapter.execute(request)
+
+    expect(execution.result.requestedReads[0]?.query.sourceKinds).toEqual(["graph", "revision", "source"])
+    expect(finalMessage).toContain("internal committed immutable source-unit projection")
+    expect(finalMessage).toContain("workspace chapter-read prohibition does not exclude source projections")
+  })
+
+  it("does not add source projections to exact rule and reference reads", async () => {
+    const request = createRequest({ phase: "source_retrieval" })
+    const client: DeepSeekCompletionClient = {
+      complete: () => Promise.resolve({
+        content: JSON.stringify({
+          outcome: "request_read",
+          artifact: { missingEvidence: [], nextExpansionHints: ["读取规则索引"] },
+          requestedReads: [{
+            reason: "读取指定规则与参考索引",
+            expectedEvidence: "README.md",
+            query: {
+              exactKeys: ["README.md"],
+              sourceKinds: ["rule", "reference", "rule"],
+            },
+          }],
+          reason: "需要工作区索引",
+          selfReview: "不查询持久世界来源",
+        }),
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+      }),
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 0 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    const execution = await adapter.execute(request)
+
+    expect(execution.result.requestedReads[0]?.query.sourceKinds).toEqual(["rule", "reference"])
+  })
+
   it("accepts the semantic source retrieval artifact", async () => {
     const request = createRequest({ phase: "source_retrieval" })
     const client: DeepSeekCompletionClient = {
@@ -908,6 +1288,63 @@ describe("DeepSeekAiModelAdapter", () => {
       archiveOutletRefs: [],
     })
     expect(JSON.stringify(execution.result.artifact)).not.toMatch(/[0-9a-f]{8}-[0-9a-f-]{27}/u)
+  })
+
+  it("states exact graph-governance scene and source-unit coverage without contradictory empty bindings", async () => {
+    let finalMessage = ""
+    const request = createRequest({
+      phase: "graph_governance",
+      input: {
+        userInput: "继续推演五个连续场景。",
+        chapterSequence: 17,
+        sourceId: randomUUID(),
+        sourceUnitIds: Array.from({ length: 8 }, () => randomUUID()),
+        phaseRunIds: [],
+        readEvidence: [],
+        retrievalGaps: [],
+        artifacts: {
+          dependency_audit: {
+            missingDependencies: [],
+            unplannedContent: [],
+            sceneContinuity: Array.from({ length: 5 }, (_, sceneIndex) => ({
+              sceneIndex,
+              sceneDescription: `场景 ${String(sceneIndex)}`,
+              predecessorSceneIndexes: sceneIndex === 0 ? [] : [sceneIndex - 1],
+              predecessorSceneRefs: [],
+              predecessorRequired: sceneIndex > 0,
+              predecessorReason: "连续场景",
+              correspondenceRequired: false,
+              correspondenceReason: "无需额外对应",
+              timeContinuity: "pass",
+              locationContinuity: "pass",
+              crossReferenceContinuity: "pass",
+              reason: "连续",
+            })),
+            informationBoundary: "pass",
+          },
+        },
+      },
+    })
+    const client: DeepSeekCompletionClient = {
+      complete: (input) => {
+        finalMessage = input.messages.at(-1)?.content ?? ""
+        return Promise.resolve({ content: "{}", usage: { prompt_tokens: 10, completion_tokens: 5 } })
+      },
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 0 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    await expect(adapter.execute(request)).rejects.toThrow("could not satisfy the phase contract")
+
+    expect(finalMessage).toContain("Required dependency-audit scene indexes are exactly: 0, 1, 2, 3, 4")
+    expect(finalMessage).toContain("Required narrative source unit indexes are exactly: 0, 1, 2, 3, 4, 5, 6, 7")
+    expect(finalMessage).toContain("must bind at least one source unit index")
+    expect(finalMessage).not.toContain("still create its binding with empty sourceUnitIndexes")
+    expect(finalMessage).not.toContain("mutationSpacetimeSettlements must cover every mutation index exactly once: none")
   })
 
   it("maps graph evidence read aliases to graph owners deterministically", async () => {
@@ -1277,6 +1714,76 @@ describe("DeepSeekAiModelAdapter", () => {
     expect(execution.result.artifact).toMatchObject({ selectedWorkspacePaths: [readPath] })
   })
 
+  it("repairs rule snapshots whose reason keys do not exactly match selected paths", async () => {
+    const readId = randomUUID()
+    const readPath = "设定集/readme.md"
+    const request = createRequest({
+      phase: "rule_assembly",
+      committedReadIds: [readId],
+      input: {
+        userInput: "开始。",
+        chapterSequence: 1,
+        sourceId: randomUUID(),
+        sourceUnitIds: [],
+        phaseRunIds: [],
+        readEvidence: [{
+          readId,
+          visibility: "committed",
+          ownerKind: "workspace:settings",
+          ownerId: readPath,
+          exactKeys: [readPath],
+          semanticText: "设定索引",
+          sourceRefs: [],
+          digest: "settings-digest",
+        }],
+        retrievalGaps: [],
+        artifacts: {},
+      },
+    })
+    let calls = 0
+    let firstMessage = ""
+    const client: DeepSeekCompletionClient = {
+      complete: (input) => {
+        calls += 1
+        if (calls === 1) firstMessage = input.messages.at(-1)?.content ?? ""
+        return Promise.resolve({
+          content: JSON.stringify({
+            outcome: "continue",
+            artifact: {
+              selectedWorkspacePaths: [readPath],
+              selectionReasons: calls === 1 ? {} : { [readPath]: "使用已读设定索引" },
+              unresolvedRuleConflicts: [],
+            },
+            requestedReads: [],
+            citedReadIds: ["read-1"],
+            unresolvedDependencies: [],
+            reason: "组装已读规则",
+            selfReview: "未复制目录或文件内容",
+          }),
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        })
+      },
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 1 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    await adapter.execute(request)
+
+    expect(calls).toBe(2)
+    expect(firstMessage).toContain("currently has 1 readable workspace path(s)")
+    expect(firstMessage).toContain("Return the smallest complete JSON result")
+    expect(firstMessage).toContain("Treat the model-facing request as read-only input")
+    expect(firstMessage).toContain("Completeness means one valid result for this phase")
+    expect(firstMessage).toContain("stop generating immediately")
+    expect(firstMessage).toContain("FINAL OUTPUT DISCIPLINE")
+    expect(firstMessage).toContain("This phase has no long-text field")
+    expect(firstMessage).toContain('"selectedWorkspacePaths":[]')
+  })
+
   it("accepts semantic reviews that report only selected graph mutation advice", async () => {
     const request = createRequest({
       phase: "semantic_review",
@@ -1452,6 +1959,7 @@ function createRequest(overrides: Partial<PhaseRequestEnvelope> = {}): PhaseRequ
       deadlineAtMs: Date.now() + 10_000,
     },
     input: {
+      workflow: "turn",
       userInput: "test",
       chapterSequence: 1,
       sourceId: randomUUID(),

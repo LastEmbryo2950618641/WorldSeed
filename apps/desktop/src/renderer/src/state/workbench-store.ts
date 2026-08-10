@@ -1,6 +1,6 @@
 import { create } from "zustand"
 
-export type RightTab = "process" | "graph" | "evolution"
+export type RightTab = "process" | "graph" | "evolution" | "history"
 
 type WorkbenchState = Readonly<{
   rightTab: RightTab

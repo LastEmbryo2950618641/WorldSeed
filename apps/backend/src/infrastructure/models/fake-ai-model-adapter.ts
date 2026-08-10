@@ -12,6 +12,7 @@ import {
 
 import type {
   AIModelPort,
+  ModelExecutionOptions,
   PhaseModelExecution,
   TurnPhaseInput,
 } from "../../application/index.js"
@@ -24,7 +25,8 @@ export class FakeAiModelAdapter implements AIModelPort {
     contextWindowTokens: 64_000,
   } as const
 
-  public execute(request: PhaseRequestEnvelope): Promise<PhaseModelExecution> {
+  public execute(request: PhaseRequestEnvelope, options?: ModelExecutionOptions): Promise<PhaseModelExecution> {
+    if (options?.signal?.aborted) return Promise.reject(executionCancellationReason(options.signal))
     const startedAt = Date.now()
     const input = request.input as TurnPhaseInput
     const artifact = this.createArtifact(request.phase, input)
@@ -63,7 +65,7 @@ export class FakeAiModelAdapter implements AIModelPort {
     switch (phase) {
       case "interpret":
         return {
-          workflow: "turn",
+          workflow: input.workflow,
           userIntent: input.userInput,
           worldIntent: input.userInput,
           presentationIntent: "Use the selected project presentation rules",
@@ -73,10 +75,18 @@ export class FakeAiModelAdapter implements AIModelPort {
           initialReadHypotheses: [],
         }
       case "rule_assembly":
-        return {
-          selectedWorkspacePaths: input.readEvidence.map((evidence) => evidence.ownerId),
-          selectionReasons: { base: "The platform base rules are mandatory" },
-          unresolvedRuleConflicts: [],
+        {
+          const selectedWorkspacePaths = [...new Set(input.readEvidence
+            .filter((evidence) => evidence.ownerKind.startsWith("workspace:"))
+            .map((evidence) => evidence.ownerId))]
+          return {
+            selectedWorkspacePaths,
+            selectionReasons: Object.fromEntries(selectedWorkspacePaths.map((path) => [
+              path,
+              "The workspace source was read and applies to this turn",
+            ])),
+            unresolvedRuleConflicts: [],
+          }
         }
       case "source_retrieval":
         return { missingEvidence: [], nextExpansionHints: [] }
@@ -314,6 +324,10 @@ export class FakeAiModelAdapter implements AIModelPort {
       }],
     }
   }
+}
+
+function executionCancellationReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("Model execution cancelled")
 }
 
 function estimateTokens(value: unknown): number {

@@ -396,6 +396,63 @@ interface RetrievalBudgetLedgerRepository {
 
 任务重启不能把读取次数、token 或耗时回退为默认值。模型调用预算仍由 `ModelCallBudget` 统计；一次 `source_retrieval` 规划或复核调用同时消耗模型调用预算，不能作为免费机械阶段处理。
 
+### 4.8 完整账本与阶段可见视图
+
+`TurnContext`、不可变 Evidence 和阶段运行记录保存完整历史；模型请求只装配当前阶段需要的可见视图。两者属于同一条上下文链，不能把“没有在本次请求中发送”误解为“已经从持久化上下文删除”。
+
+```text
+完整持久账本
+  -> 阶段依赖选择
+  -> 强制规则与索引入口
+  -> 本轮已经接纳的 Evidence
+  -> 本阶段新返回的 Evidence
+  -> 当前阶段直接依赖的 artifact
+  -> 单次模型请求可见视图
+```
+
+阶段可见视图遵守以下约束：
+
+1. 用户规则正文、两个强制 `readme.md` 和本轮选择的表现规则属于当前回合保护资料，不因普通阶段切换而丢失；
+2. `interpret` 负责从初始候选中选择与本轮任务相关的动态 Evidence；被任一阶段通过 `citedReadIds` 合法引用后，该 Evidence 进入本轮已接纳窗口，后续阶段只能增补，不能因自身没有再次引用而删除；
+3. `committedReadIds` 与 `visiblePendingIds` 只列本次请求中实际可见的 Evidence，不能暴露完整读取账本中的不可见 ID；
+4. 每个阶段只接收其直接依赖的 artifact。完整 artifact 历史仍保存在阶段运行记录中，用于恢复和审计；
+5. 目录快照只进入需要选择资料的阶段；后续正文、治理和审查阶段不重复序列化完整目录；
+6. 阶段内多轮检索可以累加候选，但只有该阶段实际引用的新增 Evidence 能进入已接纳窗口。规则组装、命名、审查和治理等阶段没有清除先前已接纳世界证据的权限；
+7. 当前节点或连接的多个历史修订不能因为 owner 相同被机械删除。普通当前状态查询优先当前有效修订；明确历史查询可以保留多个修订，具体选择由 AI 依据查询意图和返回证据决定；
+8. 已接纳窗口使用稳定所有者与投影摘要去重，并受累计 `maxEvidenceTokens` 约束；新增检索必须在剩余窗口预算内进行，不能通过跨阶段重复读取绕过限制；
+9. 可见视图裁剪只改变默认可见范围。被裁剪 Evidence 的不可变内容、版本、来源定位和读取账本记录继续保留，可由后续查询重新读取。
+
+### 4.9 身份锚点与当前状态闭包
+
+`anchorIds` 表示已经由本轮证据或持久化前沿给出的图 owner 身份，不是文本、标题或精确键。检索执行器必须直接在当前 `node_heads`、`link_heads` 及对应投影中解析这些 owner；禁止把身份 ID 传给 `retrieval_exact_keys`，也禁止要求模型把技术 ID 重新写进语义索引才能命中。
+
+文本检索可以命中同一 owner 的任意历史修订，但返回模型前必须形成 owner 级当前状态闭包：只要一个历史节点或连接投影进入候选，同一 owner 在当前可见作用域中的当前头投影也必须进入同一证据组，并明确区分“当前头”和“历史修订”。pending 头覆盖 committed 头；已归档或不可见的 pending 头不能冒充当前状态。历史修订继续保留，供 AI恢复演化过程、旧话语和过去事实；当前头只负责说明现在采用什么，不能抹除历史。
+
+闭包继续受候选和 Evidence Token 预算约束。预算不足时，执行器按 owner 证据组裁剪：宁可少返回一个历史候选，也不能留下只有历史修订、没有当前头的残缺组。该规则不判断历史内容是否“正确”，不选择人物、地点、物品或其他领域类型，只保证 AI在解释旧证据时同时看得到同一身份的当前入口。
+
+独立 `world.evolve` 的初始动态资料还必须包含有界的 committed 活动或推迟前沿候选。代码仅按可见性、前沿状态、处理顺序和配置上限机械取样，返回每个前沿已保存的原因、重访条件、最后场景、时间、地点及对应结构引用；AI阅读这些局部规则后自主决定扩展、推迟、归档或重构。项目已有 committed 图与可用前沿时，后台演化至少读取一个前沿及其可达时空锚后才能提交；只有空世界可以在没有旧图前驱的情况下创建种子局部。
+
+阶段 artifact 依赖是工作流协议，不是世界领域枚举。依赖表只描述有限阶段之间的数据流，不定义人物、势力、地点、事件或图出口语义。
+
+```text
+interpret             <- 无阶段 artifact
+rule_assembly         <- interpret
+source_retrieval      <- interpret + rule_assembly
+emergence_planning    <- interpret + rule_assembly + source_retrieval
+emergence_review      <- emergence_planning + source_retrieval
+draft                 <- interpret + rule_assembly + source_retrieval + emergence_planning + emergence_review
+chapter_naming        <- draft
+dependency_audit      <- draft + source_retrieval + emergence_planning + emergence_review
+graph_governance      <- draft + dependency_audit + emergence_planning + emergence_review
+semantic_review       <- draft + dependency_audit + graph_governance
+settlement_review     <- dependency_audit + graph_governance + semantic_review
+frontier_settlement   <- graph_governance + semantic_review + settlement_review
+commit_review         <- dependency_audit + graph_governance + semantic_review + settlement_review + frontier_settlement
+response_review       <- source_retrieval + draft + dependency_audit
+```
+
+查询和独立演化没有产生的 artifact 直接省略，不能用空占位对象冒充已经执行的阶段。
+
 ## 5. 工作区动态读取流程
 
 ```mermaid
@@ -668,7 +725,7 @@ context_evidence_refs
 
 ## 9. 可配置参数
 
-模型上下文容量与整轮累计用量分开。项目默认声明 `contextWindowTokens = 1000000`、`contextCompactionThresholdRatio = 0.95`；下一次上下文装配预计达到 `950000` Token 时，必须先运行 `context_compaction -> context_compaction_review`。累计输入和输出 Token 只用于成本与诊断，不作为硬截止线；模型请求不固定 `max_tokens`，由供应商自身输出上限决定。
+模型上下文容量与整轮累计用量分开。项目默认声明 `contextWindowTokens = 1000000`、`contextCompactionThresholdRatio = 0.95`；下一次上下文装配预计达到 `950000` Token 时，必须先运行 `context_compaction -> context_compaction_review`。累计输入和输出 Token 只用于成本与诊断，不作为硬截止线；正文阶段根据用户字数范围计算供应商单次输出预算，控制阶段使用各自较小的结构化护栏，防止任何控制 JSON 无限膨胀。护栏不是整轮累计输出上限。
 
 ```ts
 type RetrievalBudget = {
@@ -816,6 +873,10 @@ type GraphRetrievalBudget = {
 - 混合文件和图请求按照统一轮次口径计数，重启后预算不会回退；
 - 达到任意预算后能够停止，并返回不确定性而不是伪造事实；
 - 所有模型阶段都由同一个 `ContextAssembler` 构造系统区、动态区和用户回合区；
+- 完整读取账本和模型可见视图彼此分离，阶段切换不会把完整账本重新序列化给模型；
+- 模型只能引用本次请求中实际可见的 Evidence ID，不能通过完整账本 ID 列表引用未发送内容；
+- 动态 Evidence 经 `citedReadIds` 进入本轮已接纳窗口，后续阶段不会因职责不同而清除已经确认的世界证据；
+- 每个阶段只接收直接依赖的 artifact，目录快照只在资料选择阶段可见；
 - 系统提示词不会被上下文压缩；
 - 当前回合未完成前，用户输入、表现规则、时空锚点和未解决依赖不会被摘要替代；
 - 用户规则只允许无损规范化，不能被有损摘要替代；

@@ -1,7 +1,10 @@
-import type { ProjectId, ProjectSettings } from "@worldseed/contracts"
+import { randomUUID } from "node:crypto"
+
+import type { ProjectId, ProjectSettings, TaskStatus, AIPhase } from "@worldseed/contracts"
 
 import {
   TurnOrchestrator,
+  buildSourceUnitExactKeys,
   type AIModelPort,
   type PromptResourcePort,
 } from "../application/index.js"
@@ -19,6 +22,7 @@ import {
   SqliteWorkspaceCatalogSnapshotRepository,
   openProjectDatabase,
 } from "../infrastructure/sqlite/index.js"
+import type { StoredPhaseRun, StoredTask } from "../application/turns/ports/index.js"
 import { NodePromptResourceAdapter } from "../infrastructure/prompts/index.js"
 import type { Kysely } from "kysely"
 import type { ProjectDatabase } from "../infrastructure/sqlite/database-types.js"
@@ -44,7 +48,7 @@ export class ProjectRuntime {
     workspace: WorkspacePort = new NodeWorkspaceAdapter(),
   ): Promise<ProjectRuntime> {
     const database = await openProjectDatabase(internalStore.projectDatabaseRef)
-    return new ProjectRuntime(
+    const runtime = new ProjectRuntime(
       projectId,
       workspaceRootRef,
       internalStore,
@@ -53,6 +57,8 @@ export class ProjectRuntime {
       internalStorePort,
       promptPackageRoot,
     )
+    await runtime.ensureCommittedSourceUnitIndexes()
+    return runtime
   }
 
   public createTurnOrchestrator(model: AIModelPort, createId: () => string, now: () => number): TurnOrchestrator {
@@ -82,6 +88,23 @@ export class ProjectRuntime {
     return new SqliteTaskScopeRepository(this.database)
   }
 
+  public listRecoverableTasks(): Promise<readonly StoredTask[]> {
+    return this.taskScopes.listRecoverableTasks(this.projectId)
+  }
+
+  public recoverStaleRunningTasks(
+    activeTaskIds: readonly string[],
+    updatedAtMs: number,
+    interruption: unknown,
+  ): Promise<readonly StoredTask[]> {
+    return this.taskScopes.recoverStaleRunningTasks({
+      projectId: this.projectId,
+      activeTaskIds,
+      updatedAtMs,
+      interruption,
+    })
+  }
+
   public readSettings(): Promise<ProjectSettings> {
     return new SqliteProjectSettingsStore(this.database, Date.now).read(this.projectId)
   }
@@ -90,9 +113,13 @@ export class ProjectRuntime {
     return new SqliteProjectSettingsStore(this.database, Date.now).save(this.projectId, settings)
   }
 
-  public async listPhaseRuns(taskId: string): Promise<readonly unknown[]> {
+  public async listPhaseRuns(taskId: string): Promise<readonly StoredPhaseRun[]> {
     return new SqliteTurnPersistence(this.database, () => "phase-read")
       .listPhaseRuns(taskId)
+  }
+
+  public async persistenceUpdateTask(taskId: string, status: TaskStatus, lastPhase?: AIPhase, error?: unknown): Promise<void> {
+    await new SqliteTurnPersistence(this.database, () => "task-update").updateTask(taskId, status, lastPhase, Date.now(), error)
   }
 
   public async validate(): Promise<Awaited<ReturnType<WorkspacePort["validate"]>>> {
@@ -126,5 +153,35 @@ export class ProjectRuntime {
 
   private createPromptResourcePort(): PromptResourcePort {
     return new NodePromptResourceAdapter(this.promptPackageRoot)
+  }
+
+  private async ensureCommittedSourceUnitIndexes(): Promise<void> {
+    const retrieval = new SqliteRetrievalRepository(this.database)
+    const sourceUnits = await retrieval.listUnindexedCommittedSourceUnits(this.projectId)
+    for (const sourceUnit of sourceUnits) {
+      const content = await this.internalStorePort.readDocument(sourceUnit.contentRef)
+      await retrieval.indexCommittedSourceProjection({
+        projectionId: randomUUID(),
+        projectId: this.projectId,
+        scopeId: sourceUnit.scopeId,
+        ownerKind: "source",
+        ownerId: sourceUnit.sourceUnitId,
+        ownerRevisionId: sourceUnit.sourceUnitId,
+        exactKeys: buildSourceUnitExactKeys(content),
+        semanticText: content,
+        sourceRefs: [{
+          sourceId: sourceUnit.sourceId,
+          sourceUnitId: sourceUnit.sourceUnitId,
+          sequence: sourceUnit.sequence,
+        }],
+        digest: sourceUnit.digest,
+      })
+    }
+    if (sourceUnits.length > 0) {
+      runtimeLog("info", "project-runtime", "source_unit_indexes.backfilled", {
+        projectId: this.projectId,
+        indexedCount: sourceUnits.length,
+      })
+    }
   }
 }

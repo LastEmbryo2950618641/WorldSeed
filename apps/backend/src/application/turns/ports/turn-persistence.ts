@@ -7,7 +7,7 @@ import type {
   TurnId,
 } from "@worldseed/contracts"
 
-export type PhaseRunStatus = "running" | "completed" | "failed"
+export type PhaseRunStatus = "running" | "completed" | "failed" | "cancelled"
 
 export type CreateTurnContextRecord = Readonly<{
   context: TurnContext
@@ -148,11 +148,14 @@ export interface TurnPersistencePort {
   stageRuleSnapshot(snapshot: RuleSnapshotRecord): Promise<void>
   stageDecisionRecords(records: readonly DecisionRecord[]): Promise<void>
   stageSettlementRecords(records: readonly SettlementRecord[]): Promise<void>
+  listSettlementsForSourceUnits(projectId: ProjectId, sourceUnitIds: readonly string[]): Promise<readonly SettlementRecord[]>
   stageSceneSpacetimeBindings(records: readonly SceneSpacetimeBindingRecord[]): Promise<void>
   stageGraphRevisionSpacetime(records: readonly GraphRevisionSpacetimeRecord[]): Promise<void>
   stageFrontiers(records: readonly FrontierRecord[]): Promise<void>
+  listSchedulableFrontiers(projectId: ProjectId, limit: number): Promise<readonly FrontierRecord[]>
   updateTask(taskId: string, status: TaskStatus, lastPhase?: AIPhase, updatedAtMs?: number, error?: unknown): Promise<void>
   findContext(contextId: string): Promise<TurnContext | undefined>
+  findContextByTask(taskId: string): Promise<TurnContext | undefined>
   listPhaseRuns(taskId: string): Promise<readonly StoredPhaseRun[]>
 }
 

@@ -6,6 +6,8 @@ import { defaultProjectSettings } from "@worldseed/config"
 import { invokeBackend } from "../src/renderer/src/api/client.js"
 import { EditorArea } from "../src/renderer/src/features/editor/EditorArea.js"
 import { RightRail } from "../src/renderer/src/features/status/RightRail.js"
+import { buildHistorySwitchingScenario, HistoryPanel } from "../src/renderer/src/features/status/HistoryPanel.js"
+import { TaskCheckpointDialog } from "../src/renderer/src/features/status/TaskCheckpointPrototype.js"
 import { ProjectSettingsDialog } from "../src/renderer/src/features/settings/ProjectSettingsDialog.js"
 import { ModelConfigurationDialog } from "../src/renderer/src/features/settings/ModelConfigurationDialog.js"
 import {
@@ -152,6 +154,7 @@ describe("right rail process UI contract", () => {
 
     expect(html).toContain("已向模型发起请求")
     expect(html).toContain("等待 AI 返回结构化思考与输出")
+    expect(html).toContain("0 / 400")
   })
 
   it("shows cost, KV cache hit rate, and collapsible AI panels", () => {
@@ -180,21 +183,158 @@ describe("right rail process UI contract", () => {
             selfReview: "依赖合理",
             artifact: { intent: "观察周围" },
           },
-          usage: {},
+          usage: {
+            modelCalls: 3,
+            inputTokens: 1200,
+            outputTokens: 450,
+            cacheHitInputTokens: 816,
+            cacheMissInputTokens: 384,
+          },
           startedAtMs: 1,
           finishedAtMs: 2,
         }],
       },
     }))
 
-    expect(html).toContain("deepseek / deepseek-v4-flash")
+    expect(html).not.toContain("实际运行模型")
+    expect(html).toContain("3 / 400")
+    expect(html).toContain("1.2k / 不限制")
+    expect(html).toContain("450 / 模型限制")
     expect(html).toContain("68%")
     expect(html).toContain("AI 思考")
     expect(html).toContain("AI 输出")
+    expect(html).toContain("运行监控")
+    expect(html).toContain("最近稳定检查点")
+    expect(html).toContain("全部重置")
     expect(html).toContain("读取当前场景锚点")
     expect(html).toContain("审查正文响应")
     expect(html).toContain("压缩动态上下文")
     expect(html).toContain("尚未进入该阶段")
+  })
+
+  it("updates live usage totals when another phase run is returned", () => {
+    const baseTask = {
+      status: "running",
+      lastPhase: "interpret",
+      phaseRuns: [{
+        phaseRunId: "phase-1",
+        phase: "interpret",
+        status: "completed",
+        attempt: 1,
+        usage: { modelCalls: 1, inputTokens: 100, outputTokens: 40 },
+        startedAtMs: 1,
+        finishedAtMs: 2,
+      }],
+    } as const
+    const updatedTask = {
+      ...baseTask,
+      lastPhase: "rule_assembly",
+      phaseRuns: [...baseTask.phaseRuns, {
+        phaseRunId: "phase-2",
+        phase: "rule_assembly",
+        status: "completed",
+        attempt: 1,
+        usage: { modelCalls: 2, inputTokens: 250, outputTokens: 60 },
+        startedAtMs: 3,
+        finishedAtMs: 4,
+      }],
+    } as const
+
+    const initialHtml = renderToStaticMarkup(React.createElement(RightRail, { graphSlice: undefined, task: baseTask }))
+    const updatedHtml = renderToStaticMarkup(React.createElement(RightRail, { graphSlice: undefined, task: updatedTask }))
+
+    expect(initialHtml).toContain("1 / 400")
+    expect(initialHtml).toContain("100 / 不限制")
+    expect(updatedHtml).toContain("3 / 400")
+    expect(updatedHtml).toContain("350 / 不限制")
+    expect(updatedHtml).toContain("100 / 模型限制")
+  })
+
+  it("renders a blocked checkpoint with explicit user-controlled recovery", () => {
+    const html = renderToStaticMarkup(React.createElement(TaskCheckpointDialog, {
+      task: {
+        handle: { taskId: "task-1", status: "awaiting_user_decision" },
+        status: "awaiting_user_decision",
+        lastPhase: "draft",
+        interruption: {
+          kind: "limit_exhausted",
+          message: "Turn deadline exceeded",
+          blockedMetrics: ["wall_time"],
+          phase: "draft",
+        },
+        phaseRuns: [{
+          phaseRunId: "phase-1",
+          phase: "interpret",
+          status: "completed",
+          attempt: 1,
+          usage: { modelCalls: 1, inputTokens: 100, outputTokens: 30 },
+          startedAtMs: 1,
+          finishedAtMs: 2,
+        }],
+      },
+      onClose: vi.fn(),
+      onResume: vi.fn(async () => undefined),
+      onPause: vi.fn(async () => undefined),
+    }))
+
+    expect(html).toContain("推演已暂停")
+    expect(html).toContain("draft")
+    expect(html).toContain("本轮执行指标已达到上限")
+    expect(html).toContain("Turn deadline exceeded")
+    expect(html).toContain("已保留内容")
+    expect(html).toContain("重试当前阶段")
+    expect(html).toContain("继续执行")
+    expect(html).toContain("请先重置 1 项限制")
+    expect(html.match(/disabled=""/gu)?.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe("history panel prototype contract", () => {
+  it("renders timeline controls, retention status, and branch actions", () => {
+    const html = renderToStaticMarkup(React.createElement(HistoryPanel, {
+      retentionLimit: null,
+      taskRunning: false,
+      onOpenSettings: vi.fn(),
+    }))
+
+    expect(html).toContain("推演历史")
+    expect(html).toContain("8 / 无上限")
+    expect(html).toContain("返回上一轮")
+    expect(html).toContain("手动保存 · 码头会面前")
+    expect(html).toContain("从这里继续")
+    expect(html).toContain("模拟多历史切换与继续")
+    expect(html).toContain("history-simulation-button")
+  })
+
+  it("keeps two resumed history branches isolated across repeated switching", () => {
+    const scenario = buildHistorySwitchingScenario("历史保存点 A", "历史保存点 B")
+    const finalStep = scenario.steps.at(-1)
+    const branchA = finalStep?.branches.find((branch) => branch.id === "branch-a")
+    const branchB = finalStep?.branches.find((branch) => branch.id === "branch-b")
+
+    expect(scenario.steps.map((step) => step.activeBranchId)).toEqual([
+      "branch-a",
+      "branch-a",
+      "branch-b",
+      "branch-b",
+      "branch-a",
+      "branch-b",
+      "branch-a",
+    ])
+    expect(branchA?.records).toEqual(["模拟 A-1 · 追查旧铜钥匙", "模拟 A-2 · 返回后继续追问"])
+    expect(branchB?.records).toEqual(["模拟 B-1 · 前往旧港"])
+    expect(branchA?.context).not.toContain("林序没有追查钥匙，而是登上前往旧港的渡船。")
+    expect(branchB?.context).not.toContain("苏禾承认她从旧桥取走了铜钥匙。")
+    expect(scenario.checks.every((check) => check.passed)).toBe(true)
+  })
+
+  it("keeps earlier simulation frames immutable after later branch work", () => {
+    const scenario = buildHistorySwitchingScenario("历史保存点 A", "历史保存点 B")
+    const branchAAfterFirstWork = scenario.steps[1]?.branches.find((branch) => branch.id === "branch-a")
+    const branchAAfterReturn = scenario.steps[4]?.branches.find((branch) => branch.id === "branch-a")
+
+    expect(branchAAfterFirstWork?.records).toEqual(["模拟 A-1 · 追查旧铜钥匙"])
+    expect(branchAAfterReturn?.records).toEqual(["模拟 A-1 · 追查旧铜钥匙", "模拟 A-2 · 返回后继续追问"])
   })
 })
 
@@ -246,6 +386,7 @@ describe("project settings UI contract", () => {
     expect(html).toContain("推演执行")
     expect(html).toContain("资料检索")
     expect(html).toContain("世界图")
+    expect(html).toContain("推演历史")
     expect(html).toContain("模型服务")
     expect(html).toContain("最大模型调用次数")
     expect(html).toContain("下一轮推演开始生效")

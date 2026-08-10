@@ -44,11 +44,13 @@ const ids = {
   revision2: "00000000-0000-4000-8000-000000000042",
   revision3: "00000000-0000-4000-8000-000000000043",
   revision4: "00000000-0000-4000-8000-000000000044",
+  revision5: "00000000-0000-4000-8000-000000000045",
   evidence: "00000000-0000-4000-8000-000000000051",
   document: "00000000-0000-4000-8000-000000000061",
   source: "00000000-0000-4000-8000-000000000062",
   chapter: "00000000-0000-4000-8000-000000000063",
   projection: "00000000-0000-4000-8000-000000000071",
+  projection2: "00000000-0000-4000-8000-000000000073",
 }
 
 const temporaryDirectories: string[] = []
@@ -220,6 +222,57 @@ describe("SQLite repository contract", () => {
       digest: "document-digest",
       createdAtMs: 20,
     })
+    const sourceUnitIds = [
+      "00000000-0000-4000-8000-000000000081",
+      "00000000-0000-4000-8000-000000000082",
+      "00000000-0000-4000-8000-000000000083",
+    ]
+    await documentRepository.stageSourceUnits(sourceUnitIds.map((sourceUnitId, sequence) => ({
+      id: sourceUnitId,
+      projectId: ids.project,
+      sourceId: ids.source,
+      sequence,
+      contentRef: `objects/documents/${sourceUnitId}.md`,
+      digest: `source-unit-${String(sequence)}`,
+      settlementStatus: "pending",
+      createdAtMs: 20,
+    })))
+    await retrievalRepository.stageProjection({
+      projectionId: "00000000-0000-4000-8000-000000000084",
+      projectId: ids.project,
+      scopeId: ids.scope1,
+      ownerKind: "source",
+      ownerId: sourceUnitIds[0],
+      ownerRevisionId: sourceUnitIds[0],
+      exactKeys: ["第二章 晨雾里的旧桥"],
+      semanticText: "第二章 晨雾里的旧桥",
+      sourceRefs: [{ sourceId: ids.source, sourceUnitId: sourceUnitIds[0], sequence: 0 }],
+      digest: "source-heading-digest",
+    })
+    await retrievalRepository.stageProjection({
+      projectionId: "00000000-0000-4000-8000-000000000085",
+      projectId: ids.project,
+      scopeId: ids.scope1,
+      ownerKind: "source",
+      ownerId: sourceUnitIds[1],
+      ownerRevisionId: sourceUnitIds[1],
+      exactKeys: ["林序和苏禾在桥头交谈。"],
+      semanticText: "林序和苏禾在桥头交谈。",
+      sourceRefs: [{ sourceId: ids.source, sourceUnitId: sourceUnitIds[1], sequence: 1 }],
+      digest: "source-dialogue-digest",
+    })
+    await retrievalRepository.stageProjection({
+      projectionId: "00000000-0000-4000-8000-000000000086",
+      projectId: ids.project,
+      scopeId: ids.scope1,
+      ownerKind: "source",
+      ownerId: sourceUnitIds[2],
+      ownerRevisionId: sourceUnitIds[2],
+      exactKeys: ["其他内容。"],
+      semanticText: "其他内容。",
+      sourceRefs: [{ sourceId: ids.source, sourceUnitId: sourceUnitIds[2], sequence: 2 }],
+      digest: "source-other-digest",
+    })
     await retrievalRepository.stageProjection({
       projectionId: ids.projection,
       projectId: ids.project,
@@ -227,7 +280,7 @@ describe("SQLite repository contract", () => {
       ownerKind: "node",
       ownerId: ids.node1,
       ownerRevisionId: ids.revision1,
-      exactKeys: ["anchor-key"],
+      exactKeys: ["anchor-key", "historical-only-key"],
       semanticText: "old bridge anchor",
       sourceRefs: [],
       digest: "projection-digest",
@@ -243,6 +296,17 @@ describe("SQLite repository contract", () => {
       semanticText: "北港商会与旧桥钥匙",
       sourceRefs: [],
       digest: "chinese-projection-digest",
+    })
+
+    expect(await retrievalRepository.findForOwnerRevision(
+      ids.project,
+      "node",
+      ids.node1,
+      ids.revision1,
+    )).toMatchObject({
+      ownerId: ids.node1,
+      ownerRevisionId: ids.revision1,
+      exactKeys: ["anchor-key", "historical-only-key"],
     })
 
     expect(await graphRepository.getNode({ projectId: ids.project }, ids.node1)).toBeUndefined()
@@ -276,8 +340,31 @@ describe("SQLite repository contract", () => {
     expect(await documentRepository.listCommittedChapters(ids.project)).toHaveLength(1)
     expect(await retrievalRepository.searchExact({ projectId: ids.project }, ["anchor-key"], 10)).toHaveLength(1)
     expect(await retrievalRepository.searchText({ projectId: ids.project }, "bridge", 10)).toHaveLength(1)
-    expect(await retrievalRepository.searchText({ projectId: ids.project }, "旧桥", 10)).toHaveLength(1)
+    expect(await retrievalRepository.searchText({ projectId: ids.project }, "旧桥", 10)).toHaveLength(2)
     expect(await retrievalRepository.searchText({ projectId: ids.project }, "旧桥钥匙现在位于哪里", 10)).toHaveLength(1)
+    expect((await retrievalRepository.searchText({ projectId: ids.project }, "苏禾 林序 关系", 10))
+      .some((projection) => projection.ownerId === sourceUnitIds[1])).toBe(true)
+    const sourceMatches = await retrievalRepository.searchSourceText(
+      { projectId: ids.project },
+      "林序和苏禾在桥头交谈",
+      10,
+      [ids.source],
+    )
+    expect(sourceMatches.map((projection) => projection.ownerId)).toContain(sourceUnitIds[1])
+    expect(sourceMatches.every((projection) => projection.ownerKind === "source")).toBe(true)
+    expect((await retrievalRepository.searchSourceText(
+      { projectId: ids.project },
+      "苏禾 林序 关系",
+      10,
+      [ids.source],
+    )).map((projection) => projection.ownerId)).toContain(sourceUnitIds[1])
+    const sourceNeighborhood = await retrievalRepository.expandSourceNeighborhood(
+      { projectId: ids.project },
+      [{ sourceId: ids.source, sequence: 1 }],
+      1,
+      10,
+    )
+    expect(sourceNeighborhood.map((projection) => projection.ownerId)).toEqual(sourceUnitIds)
     expect(await graphRepository.listRevisions(ids.project, "node", ids.node1)).toHaveLength(1)
 
     await scopeRepository.create({
@@ -292,6 +379,21 @@ describe("SQLite repository contract", () => {
       promptSnapshot: {},
       createdAtMs: 30,
     })
+    await graphRepository.stageRevisions(ids.project, ids.scope2, [
+      graphRevision(ids.revision5, ids.scope2, "node", ids.node1, { id: ids.node1, content: { label: "updated anchor" } }),
+    ])
+    await retrievalRepository.stageProjection({
+      projectionId: ids.projection2,
+      projectId: ids.project,
+      scopeId: ids.scope2,
+      ownerKind: "node",
+      ownerId: ids.node1,
+      ownerRevisionId: ids.revision5,
+      exactKeys: ["anchor-key"],
+      semanticText: "new bridge anchor",
+      sourceRefs: [],
+      digest: "new-projection-digest",
+    })
     await scopeRepository.create({
       projectId: ids.project,
       taskId: ids.task3,
@@ -305,6 +407,30 @@ describe("SQLite repository contract", () => {
       createdAtMs: 31,
     })
     await commitRepository.commit(ids.scope2)
+    const currentFirst = await retrievalRepository.searchExact({ projectId: ids.project }, ["anchor-key"], 1)
+    expect(currentFirst).toHaveLength(1)
+    expect(currentFirst[0]).toMatchObject({
+      projectionId: ids.projection2,
+      ownerRevisionId: ids.revision5,
+    })
+    const history = await retrievalRepository.searchExact({ projectId: ids.project }, ["anchor-key"], 10)
+    expect(history.map((projection) => projection.projectionId)).toEqual([ids.projection2, ids.projection])
+    const historicalClosure = await retrievalRepository.searchExact(
+      { projectId: ids.project },
+      ["historical-only-key"],
+      10,
+    )
+    expect(historicalClosure.map((projection) => ({
+      projectionId: projection.projectionId,
+      stateRole: projection.stateRole,
+    }))).toEqual([
+      { projectionId: ids.projection2, stateRole: "current" },
+      { projectionId: ids.projection, stateRole: "historical" },
+    ])
+    expect((await retrievalRepository.searchText({ projectId: ids.project }, "bridge", 1))[0]).toMatchObject({
+      projectionId: ids.projection2,
+      ownerRevisionId: ids.revision5,
+    })
     await expect(commitRepository.commit(ids.scope3)).rejects.toThrow("stale committed sequence")
 
     await scopeRepository.create({

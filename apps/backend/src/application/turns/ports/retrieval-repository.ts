@@ -12,6 +12,7 @@ export type RetrievalProjection = Readonly<{
   semanticText: string
   sourceRefs: readonly unknown[]
   digest: string
+  stateRole?: "current" | "historical"
 }>
 
 export type RetrievalSearchScope = Readonly<{
@@ -19,8 +20,36 @@ export type RetrievalSearchScope = Readonly<{
   pendingScopeId?: ScopeId
 }>
 
+export type SourceSequenceAnchor = Readonly<{
+  sourceId: string
+  sequence: number
+}>
+
 export interface RetrievalRepository {
   stageProjection(projection: Omit<RetrievalProjection, "visibility">): Promise<RetrievalProjection>
+  findForOwnerRevision(
+    projectId: ProjectId,
+    ownerKind: "node" | "link",
+    ownerId: string,
+    ownerRevisionId: string,
+  ): Promise<RetrievalProjection | undefined>
+  findCurrentForOwners(
+    scope: RetrievalSearchScope,
+    ownerIds: readonly string[],
+    limit: number,
+  ): Promise<readonly RetrievalProjection[]>
   searchExact(scope: RetrievalSearchScope, keys: readonly string[], limit: number): Promise<readonly RetrievalProjection[]>
   searchText(scope: RetrievalSearchScope, expression: string, limit: number): Promise<readonly RetrievalProjection[]>
+  searchSourceText(
+    scope: RetrievalSearchScope,
+    expression: string,
+    limit: number,
+    sourceIds?: readonly string[],
+  ): Promise<readonly RetrievalProjection[]>
+  expandSourceNeighborhood(
+    scope: RetrievalSearchScope,
+    anchors: readonly SourceSequenceAnchor[],
+    maxDistance: number,
+    limit: number,
+  ): Promise<readonly RetrievalProjection[]>
 }

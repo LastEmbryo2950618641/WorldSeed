@@ -8,3 +8,6 @@ coverage/
 .env.*
 !.env.example
 *.log
+.playwright-cli/
+.runtime-logs/
+output/

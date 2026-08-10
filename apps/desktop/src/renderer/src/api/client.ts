@@ -37,12 +37,23 @@ export type TurnResult = Readonly<{
 }>
 
 export type TaskSnapshot = Readonly<{
+  handle?: Readonly<{ taskId: string; status: string }>
   status: string
   lastPhase?: string
   result?: TurnResult
   error?: { message?: string }
   phaseRuns?: readonly PhaseRunSnapshot[]
+  interruption?: Readonly<{
+    kind?: string
+    message?: string
+    blockedMetrics?: readonly string[]
+    phase?: string
+    phaseRunId?: string
+    interruptedAtMs?: number
+  }>
 }>
+
+export type RecoverableTaskList = readonly TaskSnapshot[]
 
 export type PhaseRunSnapshot = Readonly<{
   phaseRunId: string
@@ -150,6 +161,16 @@ const demoMarkdownByPath: Readonly<Record<string, string>> = {
   "表现输出/笔风规则/克制叙述.md": "# 克制叙述\n\n减少解释性旁白，用动作、物件和对话暗示关系变化；避免一次性揭露过多设定。\n",
 }
 
+let demoTurnStatusPollCount = 0
+let demoTurnStartedAtMs = Date.now()
+
+const demoPhaseUsage = [
+  { phase: "interpret", inputTokens: 1_100, outputTokens: 250, cacheHitInputTokens: 700, cacheMissInputTokens: 400 },
+  { phase: "rule_assembly", inputTokens: 900, outputTokens: 180, cacheHitInputTokens: 650, cacheMissInputTokens: 250 },
+  { phase: "source_retrieval", inputTokens: 1_400, outputTokens: 220, cacheHitInputTokens: 800, cacheMissInputTokens: 600, retrievalRounds: 1 },
+  { phase: "draft", inputTokens: 2_600, outputTokens: 900, cacheHitInputTokens: 1_400, cacheMissInputTokens: 1_200 },
+] as const
+
 async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unknown> {
   await new Promise((resolve) => setTimeout(resolve, 120))
   switch (method) {
@@ -199,22 +220,40 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
     case "model.profiles.save":
       return payload
     case "turn.start":
+      demoTurnStatusPollCount = 0
+      demoTurnStartedAtMs = Date.now()
       return { taskId: "61111111-1111-4111-8111-111111111111", status: "created" }
-    case "turn.status":
-      return {
+    case "turn.recoverable.list":
+      return []
+    case "turn.status": {
+      demoTurnStatusPollCount = Math.min(demoTurnStatusPollCount + 1, demoPhaseUsage.length)
+      const phaseRuns = demoPhaseUsage.slice(0, demoTurnStatusPollCount).map((usage, index) => ({
+        phaseRunId: `demo-phase-${String(index + 1)}`,
+        phase: usage.phase,
         status: "completed",
-        result: {
+        attempt: 1,
+        usage: { ...usage, modelCalls: 1 },
+        startedAtMs: demoTurnStartedAtMs + index * 350,
+        finishedAtMs: demoTurnStartedAtMs + index * 350 + 250,
+      }))
+      const completed = demoTurnStatusPollCount === demoPhaseUsage.length
+      return {
+        status: completed ? "completed" : "running",
+        lastPhase: phaseRuns.at(-1)?.phase,
+        phaseRuns,
+        ...(completed ? { result: {
           chapterPath: "章节正文/第二章 北桥灯火.md",
           chapterHeading: "第二章 北桥灯火",
           graphAnchorIds: demoNodeIds,
-          modelCalls: 11,
-          inputTokens: 18420,
-          outputTokens: 3720,
+          modelCalls: 4,
+          inputTokens: 6_000,
+          outputTokens: 1_550,
           modelProvider: "demo",
           modelName: "browser-prototype",
-          kvCacheHitRate: 0.68,
-        },
+          kvCacheHitRate: 0.59,
+        } } : {}),
       }
+    }
     case "graph.neighborhood": {
       const anchorIds = typeof payload === "object" && payload !== null && "anchorIds" in payload
         && Array.isArray((payload as { anchorIds: unknown }).anchorIds)

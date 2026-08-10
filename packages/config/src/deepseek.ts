@@ -2,6 +2,8 @@ import { z } from "zod"
 
 import { deepSeekReasoningEffortSchema } from "@worldseed/contracts"
 
+import { defaultTurnWallTimeMs } from "./profiles.js"
+
 export const deepSeekRuntimeConfigSchema = z.object({
   provider: z.literal("deepseek"),
   baseUrl: z.url().refine((url) => {
@@ -31,7 +33,7 @@ export const defaultDeepSeekRuntimeConfig = Object.freeze({
   model: "deepseek-v4-flash",
   apiKeyRef: "deepseek-api-key",
   contextWindowTokens: 1_000_000,
-  timeoutMs: 300000,
+  timeoutMs: defaultTurnWallTimeMs,
   maxAttempts: 2,
   maxSchemaRepairAttempts: 2,
   jsonModeEnabled: false,

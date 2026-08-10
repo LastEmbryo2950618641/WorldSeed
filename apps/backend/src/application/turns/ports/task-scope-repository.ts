@@ -28,15 +28,27 @@ export type StoredTask = Readonly<{
   scopeId: ScopeId
   kind: TaskKind
   status: TaskStatus
+  configSnapshot: unknown
+  promptSnapshot: unknown
   lastPhase?: AIPhase
   createdAtMs: number
   updatedAtMs: number
+  error?: unknown
+}>
+
+export type RecoverStaleRunningTasksInput = Readonly<{
+  projectId: ProjectId
+  activeTaskIds: readonly string[]
+  updatedAtMs: number
+  interruption: unknown
 }>
 
 export interface TaskScopeRepository {
   create(input: CreateTaskScopeInput): Promise<ArtifactScope>
   findScope(scopeId: ScopeId): Promise<ArtifactScope | undefined>
   findTask(taskId: string): Promise<StoredTask | undefined>
+  listRecoverableTasks(projectId: ProjectId): Promise<readonly StoredTask[]>
+  recoverStaleRunningTasks(input: RecoverStaleRunningTasksInput): Promise<readonly StoredTask[]>
 }
 
 export type ScopeCommitResult = Readonly<{
@@ -46,6 +58,7 @@ export type ScopeCommitResult = Readonly<{
 }>
 
 export interface ScopeCommitRepository {
+  resetPending(scopeId: ScopeId): Promise<void>
   commit(scopeId: ScopeId): Promise<ScopeCommitResult>
   retire(scopeId: ScopeId, retiredAtMs: number): Promise<void>
 }

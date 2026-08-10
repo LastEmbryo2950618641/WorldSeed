@@ -14,6 +14,8 @@ const semanticDependencySchema = z.object({
   requiredFor: z.string().min(1),
   disposition: z.enum(["read", "narrow", "defer", "retain_uncertainty"]),
 })
+const ruleWorkspacePathSchema = z.string().min(1).max(512)
+const ruleControlTextSchema = z.string().min(1).max(500)
 const graphDataSchema = z.object({
   content: z.unknown(),
   metadata: z.record(z.string(), z.unknown()).optional(),
@@ -43,9 +45,29 @@ export const interpretArtifactSchema = z.object({
 })
 
 export const ruleAssemblyArtifactSchema = z.object({
-  selectedWorkspacePaths: z.array(z.string().min(1)),
-  selectionReasons: z.record(z.string(), z.string().min(1)),
-  unresolvedRuleConflicts: z.array(z.string().min(1)),
+  selectedWorkspacePaths: z.array(ruleWorkspacePathSchema).max(32),
+  selectionReasons: z.record(ruleWorkspacePathSchema, ruleControlTextSchema),
+  unresolvedRuleConflicts: z.array(ruleControlTextSchema).max(16),
+}).superRefine((artifact, context) => {
+  const selectedPaths = new Set(artifact.selectedWorkspacePaths)
+  if (selectedPaths.size !== artifact.selectedWorkspacePaths.length) {
+    context.addIssue({
+      code: "custom",
+      path: ["selectedWorkspacePaths"],
+      message: "selectedWorkspacePaths must not contain duplicates",
+    })
+  }
+
+  const reasonPaths = Object.keys(artifact.selectionReasons)
+  const missingReasonPaths = artifact.selectedWorkspacePaths.filter((path) => !(path in artifact.selectionReasons))
+  const unselectedReasonPaths = reasonPaths.filter((path) => !selectedPaths.has(path))
+  if (missingReasonPaths.length > 0 || unselectedReasonPaths.length > 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["selectionReasons"],
+      message: "selectionReasons keys must exactly match selectedWorkspacePaths",
+    })
+  }
 })
 
 export const retrievalArtifactSchema = z.object({

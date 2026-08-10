@@ -66,7 +66,13 @@ export class NodeInternalStoreAdapter implements InternalStorePort {
     idSchema.parse(sourceId)
     const path = join(store.documentsRef, `${sourceId}.md`)
     assertContained(store.documentsRef, path)
-    await writeFile(path, content, { encoding: "utf8", flag: "wx" })
+    try {
+      await writeFile(path, content, { encoding: "utf8", flag: "wx" })
+    } catch (error) {
+      if (!isAlreadyExistsError(error)) throw error
+      const existing = await readFile(path, "utf8")
+      if (existing !== content) throw new Error(`Immutable document already exists with different content: ${sourceId}`)
+    }
     return path
   }
 
@@ -75,6 +81,13 @@ export class NodeInternalStoreAdapter implements InternalStorePort {
     assertContained(this.applicationDataRoot, path)
     return readFile(path, "utf8")
   }
+}
+
+function isAlreadyExistsError(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && error.code === "EEXIST"
 }
 
 function buildStore(applicationDataRoot: string, projectId: ProjectId): InternalProjectStore {

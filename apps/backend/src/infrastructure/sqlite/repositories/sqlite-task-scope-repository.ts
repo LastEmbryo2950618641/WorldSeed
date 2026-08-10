@@ -2,6 +2,7 @@ import type { Kysely } from "kysely"
 
 import {
   aiPhaseSchema,
+  type ProjectId,
   taskKindSchema,
   taskStatusSchema,
   type ScopeId,
@@ -10,11 +11,12 @@ import {
 import type {
   ArtifactScope,
   CreateTaskScopeInput,
+  RecoverStaleRunningTasksInput,
   StoredTask,
   TaskScopeRepository,
 } from "../../../index.js"
 import type { ArtifactScopeRow, ProjectDatabase, TaskRow } from "../database-types.js"
-import { encodeJson } from "../json-codec.js"
+import { decodeJson, encodeJson } from "../json-codec.js"
 
 export class SqliteTaskScopeRepository implements TaskScopeRepository {
   public constructor(private readonly database: Kysely<ProjectDatabase>) {}
@@ -73,6 +75,43 @@ export class SqliteTaskScopeRepository implements TaskScopeRepository {
     const row = await this.database.selectFrom("tasks").selectAll().where("id", "=", taskId).executeTakeFirst()
     return row === undefined ? undefined : mapTask(row)
   }
+
+  public async listRecoverableTasks(projectId: ProjectId): Promise<readonly StoredTask[]> {
+    const rows = await this.database.selectFrom("tasks").selectAll()
+      .where("project_id", "=", projectId)
+      .where("status", "in", ["awaiting_user_decision", "paused"])
+      .orderBy("updated_at", "desc")
+      .orderBy("id", "desc")
+      .execute()
+    return rows.map(mapTask)
+  }
+
+  public async recoverStaleRunningTasks(input: RecoverStaleRunningTasksInput): Promise<readonly StoredTask[]> {
+    const runningQuery = this.database.selectFrom("tasks").selectAll()
+      .where("project_id", "=", input.projectId)
+      .where("status", "=", "running")
+    const rows = input.activeTaskIds.length === 0
+      ? await runningQuery.execute()
+      : await runningQuery.where("id", "not in", [...input.activeTaskIds]).execute()
+    if (rows.length === 0) return []
+
+    const taskIds = rows.map((row) => row.id)
+    await this.database.transaction().execute(async (transaction) => {
+      await transaction.updateTable("tasks").set({
+        status: "awaiting_user_decision",
+        error_json: encodeJson(input.interruption),
+        updated_at: input.updatedAtMs,
+      }).where("id", "in", taskIds).executeTakeFirstOrThrow()
+      await transaction.updateTable("phase_runs").set({
+        status: "failed",
+        result_json: encodeJson({ error: "Backend process restarted before the model response completed" }),
+        finished_at: input.updatedAtMs,
+      }).where("task_id", "in", taskIds).where("status", "=", "running").executeTakeFirst()
+    })
+
+    const recoveredIds = new Set(taskIds)
+    return (await this.listRecoverableTasks(input.projectId)).filter((task) => recoveredIds.has(task.taskId))
+  }
 }
 
 function mapScope(row: ArtifactScopeRow): ArtifactScope {
@@ -96,7 +135,10 @@ function mapTask(row: TaskRow): StoredTask {
     scopeId: row.scope_id,
     kind: taskKindSchema.parse(row.kind),
     status: taskStatusSchema.parse(row.status),
+    configSnapshot: decodeJson(row.config_snapshot_json),
+    promptSnapshot: decodeJson(row.prompt_snapshot_json),
     ...(row.last_phase === null ? {} : { lastPhase: aiPhaseSchema.parse(row.last_phase) }),
+    ...(row.error_json === null ? {} : { error: decodeJson(row.error_json) }),
     createdAtMs: row.created_at,
     updatedAtMs: row.updated_at,
   }

@@ -16,6 +16,7 @@ export const taskStatusValues = [
   "waiting_for_review",
   "committing",
   "needs_revision",
+  "awaiting_user_decision",
   "paused",
   "completed",
   "retired",

@@ -6,6 +6,17 @@ import { idSchema } from "./ids.js"
 
 export const deepSeekReasoningEffortSchema = z.enum(["low", "high", "max"])
 
+export const modelSelectionSchema = z.object({
+  baseUrl: z.url(),
+  model: z.string().trim().min(1).max(200),
+  credentialRef: z.string().trim().min(1).max(300),
+  apiKey: z.string().trim().min(1).max(4096).optional(),
+  thinkingModeEnabled: z.boolean().default(true),
+  reasoningEffort: deepSeekReasoningEffortSchema.default("high"),
+  jsonModeEnabled: z.boolean().default(false),
+})
+export type ModelSelection = z.infer<typeof modelSelectionSchema>
+
 export const projectCreatePayloadSchema = z.object({
   projectId: idSchema,
   displayName: z.string().trim().min(1).max(200),
@@ -26,6 +37,8 @@ export const projectSettingsSavePayloadSchema = projectSettingsReadPayloadSchema
 })
 export type ProjectSettingsReadPayload = z.infer<typeof projectSettingsReadPayloadSchema>
 export type ProjectSettingsSavePayload = z.infer<typeof projectSettingsSavePayloadSchema>
+export const turnRecoverableTasksPayloadSchema = projectSettingsReadPayloadSchema
+export type TurnRecoverableTasksPayload = z.infer<typeof turnRecoverableTasksPayloadSchema>
 
 export const turnStartPayloadSchema = z.object({
   projectId: idSchema,
@@ -41,23 +54,42 @@ export const turnStartPayloadSchema = z.object({
     (value) => value.minimumWordCount <= value.maximumWordCount,
     { message: "Minimum word count must not exceed maximum word count" },
   ).optional(),
-  model: z.object({
-    baseUrl: z.url(),
-    model: z.string().trim().min(1).max(200),
-    credentialRef: z.string().trim().min(1).max(300),
-    apiKey: z.string().trim().min(1).max(4096).optional(),
-    thinkingModeEnabled: z.boolean().default(true),
-    reasoningEffort: deepSeekReasoningEffortSchema.default("high"),
-    jsonModeEnabled: z.boolean().default(false),
-  }).optional(),
+  model: modelSelectionSchema.optional(),
   maxModelCalls: z.number().int().positive().optional(),
 })
 export type TurnStartPayload = z.infer<typeof turnStartPayloadSchema>
+
+const worldTaskPayloadBaseSchema = projectSettingsReadPayloadSchema.extend({
+  model: modelSelectionSchema.optional(),
+  maxModelCalls: z.number().int().positive().optional(),
+  deadlineMs: z.number().int().positive().optional(),
+  maxRetrievalRounds: z.number().int().positive().optional(),
+})
+
+export const worldQueryPayloadSchema = worldTaskPayloadBaseSchema.extend({
+  question: z.string().trim().min(1),
+  allowWorkspaceChapterReads: z.boolean().default(false),
+})
+export type WorldQueryPayload = z.infer<typeof worldQueryPayloadSchema>
+
+export const worldEvolvePayloadSchema = worldTaskPayloadBaseSchema.extend({
+  instruction: z.string().trim().min(1).default("扫描已提交世界前沿，选择能够自然推进的局部自主演化；不发布章节正文。"),
+})
+export type WorldEvolvePayload = z.infer<typeof worldEvolvePayloadSchema>
 
 export const taskPayloadSchema = z.object({
   taskId: idSchema,
 })
 export type TaskPayload = z.infer<typeof taskPayloadSchema>
+
+export const turnResumePayloadSchema = taskPayloadSchema.extend({
+  mode: z.enum(["continue", "retry_phase"]).default("continue"),
+  model: turnStartPayloadSchema.shape.model,
+  maxModelCalls: z.number().int().positive().optional(),
+  deadlineMs: z.number().int().positive().optional(),
+  maxRetrievalRounds: z.number().int().positive().optional(),
+})
+export type TurnResumePayload = z.infer<typeof turnResumePayloadSchema>
 
 export const workspaceReadPayloadSchema = z.object({
   projectId: idSchema,
@@ -165,5 +197,11 @@ export const backendPayloadSchemas = {
   "model.profiles.save": modelProfilesSavePayloadSchema,
   "graph.neighborhood": graphNeighborhoodPayloadSchema,
   "turn.start": turnStartPayloadSchema,
+  "turn.resume": turnResumePayloadSchema,
+  "turn.recoverable.list": turnRecoverableTasksPayloadSchema,
+  "turn.pause": taskPayloadSchema,
+  "turn.cancel": taskPayloadSchema,
   "turn.status": taskPayloadSchema,
+  "world.query": worldQueryPayloadSchema,
+  "world.evolve": worldEvolvePayloadSchema,
 } as const
