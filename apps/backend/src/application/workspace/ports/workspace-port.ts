@@ -42,6 +42,9 @@ export type InternalProjectStore = Readonly<{
   indexesRef: string
   modelCacheRef: string
   recoveryRef: string
+  historyGitRef: string
+  historyCheckoutRef: string
+  historyRecoveryRef: string
 }>
 
 export interface InternalStorePort {

@@ -158,8 +158,8 @@ function ExecutionSettings({ value, onChange }: {
 }): React.JSX.Element {
   return <SettingsPage icon={Gauge} title="推演执行" description="默认按每轮可能失败并保留约 30% 重试冗余计算。">
     <NumberSetting label="最大模型调用次数" description="包含阶段调用和业务 Schema 修复调用" value={value.maxModelCalls} min={1} max={400} onChange={(next) => { onChange("maxModelCalls", next); }} />
-    <NumberSetting label="模型上下文窗口" description="当前模型单次请求可接受的上下文上限" value={value.contextWindowTokens} min={1} max={2_000_000} step={1000} onChange={(next) => { onChange("contextWindowTokens", next); }} />
-    <NumberSetting label="主动压缩阈值" description={`达到 ${Math.floor(value.contextWindowTokens * value.contextCompactionThresholdRatio).toLocaleString()} Token 前由系统接管压缩`} value={Math.round(value.contextCompactionThresholdRatio * 100)} min={50} max={99} suffix="%" onChange={(next) => { onChange("contextCompactionThresholdRatio", next / 100); }} />
+    <NumberSetting label="主动压缩阈值" description="按当前模型 Profile 的最大上下文容量计算，达到该比例时开始机械压缩" value={Math.round(value.contextCompactionThresholdRatio * 100)} min={50} max={99} suffix="%" onChange={(next) => { onChange("contextCompactionThresholdRatio", next / 100); }} />
+    <NumberSetting label="压缩目标" description="触发压缩后，将当前可见上下文降到模型容量的该比例以内" value={Math.round(value.contextCompressionTargetRatio * 100)} min={10} max={90} suffix="%" onChange={(next) => { onChange("contextCompressionTargetRatio", next / 100); }} />
     <div className="settings-field-row">
       <span><strong>输出 Token 策略</strong><small>不限制整轮累计输出；正文按字数计算，控制阶段使用结构化护栏</small></span>
       <div className="settings-readonly-value"><Binary size={14} />由模型决定</div>

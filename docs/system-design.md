@@ -1,5 +1,7 @@
 # Worldseed：AI 自治动态图设计
 
+> 本文描述目标设计，不代表代码已经实现。当前每项能力的设计、代码和验收状态统一以 [设计与实施状态](implementation-status.md) 为准；历史计划、原型图、Schema 或局部测试均不能替代该状态表。
+
 ## 1. 目标
 
 Worldseed 是一个由 AI 自主管理的动态世界模拟内核。
@@ -47,7 +49,7 @@ Worldseed 是一个由 AI 自主管理的动态世界模拟内核。
 18. 基础规则、用户规则、设定集和参考资料分层管理；基础规则作为锁定的常驻系统提示词，用户规则每轮读取全部 Markdown，设定集和参考文件先读取各自不可删除的 `readme.md` 再选择性读取，其余内容均记录来源；
 19. 项目工作目录、固定入口、允许的 Markdown 文件和文件任务进度都由持久化工作区协议提供；任何用户界面都不能绕过基础规则直接修改世界事实，具体工作台布局与交互见 [UI 设计](ui-design.md)；
 20. 每次正式正文推演都由 AI生成连续章节序号和章节名，按 `第一章 xxxx.md` 写入固定的 `章节正文` 目录，标题同时属于正文内容并参与图结算。
-21. 每个 AI 阶段只有一套语义 artifact 契约；AI 不生成技术 UUID，新图对象使用 `local:*`，已有图引用必须来自本轮实际读取证据，代码只负责一次性机械解析和持久化。
+21. 每个 AI 阶段只有一套语义 artifact 契约；已有对象由模型和数据库共同使用项目级永久 ID，新图对象使用 `local:*`，代码通过按前缀独立递增的项目计数器一次性分配永久 ID；已有图引用必须来自当前模型可见的实际读取证据。
 
 以下分类基线展开上述总表，并作为设计与实现的逐项检查入口。
 
@@ -647,13 +649,25 @@ AI 在执行修改前自行审批，至少反思：
 
 ### 4.14 复核原则
 
-修改后，AI 必须重新读取受影响的局部图，并用当前任务或典型问题实际推演。AI 根据结果决定：
+修改后，AI 必须提出能够检查当前查询、历史返回和原文返回效果的通用验证探针。探针只是查询计划，不是 AI 自己声明已经执行或通过。应用层必须通过与普通召回相同的无领域语义检索端口真实执行探针，并把不可由模型改写的执行结果重新交给 AI。AI 只能根据这些结果作出复核建议，再决定：
 
 - 确认当前结构；
 - 继续编辑；
 - 进一步合并或拆分；
 - 回退；
 - 进入归档重构流程。
+
+验证协议固定为：
+
+```text
+AI 提出 ProbePlan
+  -> 应用层执行真实检索
+  -> 持久化 ProbeExecutionResult 与证据
+  -> AI 阅读结果并提交 ProbeAssessment
+  -> 记录审核建议并继续正式提交
+```
+
+AI 自行定义每个探针要验证的局部含义、查询表达、入口和停止条件；探针用途是本次验证的自由文本，不是平台预设的领域枚举。代码不预定义人物、势力、地点、关系或其他领域查询。代码只校验探针引用、执行预算、检索结果来源和阶段顺序。模型输出中的 `pass` 不能代替应用执行记录，没有执行记录的探针一律视为未执行。探针语义判断是审核建议，不拥有拒绝正文或图提交的权限；只有检索执行本身被预算、外部错误或进程中断阻塞时，才按任务检查点协议暂停。
 
 ### 4.15 有界直接连接原则
 
@@ -923,6 +937,8 @@ const defaultGraphCapacityProfile: GraphCapacityProfile = {
 
 原文语义命中只表示找到了连续资料的入口。为避免场景入口、动作和后续对白被切成多个原文单元后只能返回第一段，应用层仅在请求的 `sourceKinds` 只包含 `source` 时，围绕当前请求的首个高相关 source unit，按相同 `sourceId` 与相邻 `sequence` 返回有界连续窗口。混合 `graph`、`revision` 与 `source` 的请求不展开连续窗口，避免图入口检索的早期噪声耗尽累计原文证据预算；窗口大小由候选预算机械推导，并继续受累计 `maxEvidenceTokens` 限制。代码不得根据人物、事件、对白或领域类型决定展开方向，也不得因为窗口展开而绕过可见性、作用域和工作区章节读取禁令。AI仍负责判断这段连续资料是否足够、是否需要提出下一次读取以及如何解释其含义。
 
+所有内部原文投影必须携带同一不可变来源内的机械位置 `sourcePosition`，包含来源引用、当前分块序号、首末序号、单元数量与首尾标记。语义命中不代表来源末端，只有 `isEnd=true` 才能确认已经返回来源最后分块。AI需要延续已识别来源而当前证据不在末端时，应使用该来源引用请求 `sourceBoundary=end` 的有界窗口；需要来源开篇时可请求 `sourceBoundary=start`。代码只按来源身份、可见性和分块顺序执行，不理解章节、人物、地点或剧情语义；来源分块顺序也不能替代图中的故事时间、空间和演化关系。
+
 source 证据可以同时返回由原文结算记录机械得到的 `relatedOwnerRefs` 及受限图投影摘要。它是原文单元到图主体的通用返回路径，供 AI 从精确原文继续恢复对应局部的时间、空间、状态和演化；它不是领域字段，也不替代 AI 对局部图规则的自主判断。AI 应先核对这些已关联摘要，再评估其他相似候选；摘要足够时不再重复展开全部入口，避免因同一人物或术语在后续章节重复出现而串入错误时空。
 
 原文投影进入证据账本时必须保留原文来源身份，不能统一记成图证据。账本使用 `chapter` 表示内部不可变原文证据、`graph` 表示图证据、`revision` 表示修订证据，使最终回答、运行检查和历史审计能够机械区分逐字原文与图摘要。
@@ -1117,18 +1133,18 @@ type AIPhaseResult = {
 6. `draft` 基于实际读取集合、时空锚点、当前场景自治候选和已批准出现计划形成未发布草稿；
 7. `chapter_naming` 只对正式正文执行，读取最后已提交章节、当前草稿、规则快照和作品文本顺序，由 AI生成连续的章节序号与章节名，并把标题作为正文首个原文单元；
 8. `dependency_audit` 独立检查草稿和章节标题中的既有依赖、计划外新内容、主体信息边界、世界约束和时空连续性，不继承 `draft` 阶段的通过结论；
-9. `response_review` 对只读回答或即将展示的文本检查依据闭合、用户控制和信息泄漏，不执行图提交；
+9. `response_review` 对只读回答或即将展示的文本检查依据闭合、用户控制和信息泄漏，不执行图提交；只读查询若返回 `revise`、证据未闭合、泄漏未观察信息或要求升级工作流，编排器必须把完整审核结论显式交回 `draft` 重写并再次复核，不能返回已经被审核否决的旧答案。重写次数达到配置上限时进入可恢复暂停，由用户决定是否继续；该闭环只约束只读查询，正式正文的审查结论仍是提交后的建议，不能据此拒绝正文与图提交；
 10. `graph_governance` 读取候选原文单元和已提交局部图，在 `pending` 作用域形成修订、连续性证明、检索投影和结算映射；
 11. `semantic_review` 使用旧图、提案、修改原因、自治原则和当前任务重新审批，不能只接收“已经通过”的摘要；
 12. `settlement_review` 检查全部原文单元、图锚点、来源返回、当前状态连续性和检索投影；
 13. `frontier_settlement` 按图治理声明的受影响前沿全集，结算各自最后场景、时间、地点、对应结构和推迟记录；
 14. `commit_review` 汇总前述阶段证据，给出连续性审查建议；只要提交门禁完整，代码直接提交正文与图，用户后续可自行修改正文。
 
-上下文达到压缩阈值时，可以在上述业务阶段之间插入内部维护阶段 `context_compaction -> context_compaction_review`。前者由 AI 对允许压缩的历史动态区生成摘要、保留锚点、未解决依赖和来源引用，后者由独立 AI 检查时间、空间、状态、否定条件、认知边界和返回路径。只有复核批准后代码才持久化检查点；代码不能机械生成语义摘要。基础规则、当前回合保护区和用户规则正文不参与有损压缩。
+上下文压缩不是 AI 业务阶段。业务层在发送请求前计算完整输入 Token，达到模型窗口的 97% 时执行确定性的两阶段机械压缩：先移出旧轮次非正文，再按从旧到新的顺序移出完整已提交章节，直到不超过 50%。系统规则、当前有效用户规则和完整当前轮始终保留；压缩不生成摘要、复核或压缩检查点。详细规则以 [模型上下文链、KV 缓存与机械压缩设计](context-and-kv-cache.md) 为准。
 
 不同任务复用同一阶段原语，但只执行该任务必需的固定工作流：
 
-- 只读查询：`interpret -> rule_assembly -> source_retrieval -> draft -> dependency_audit -> response_review`；
+- 只读查询：`interpret -> rule_assembly -> source_retrieval -> draft -> response_review`；审核失败时在同一追加式上下文链内执行 `draft -> response_review` 修订循环；
 - 正式正文：`interpret -> rule_assembly -> source_retrieval -> emergence_planning -> emergence_review -> draft -> chapter_naming -> dependency_audit -> graph_governance -> semantic_review -> settlement_review -> frontier_settlement -> commit_review`；
 - 无正文后台演化：`interpret -> rule_assembly -> source_retrieval -> emergence_planning -> emergence_review -> draft -> dependency_audit -> graph_governance -> semantic_review -> frontier_settlement -> commit_review`；
 - 独立图治理：`graph_governance -> semantic_review -> frontier_settlement -> commit_review`，并继承触发治理任务的实际读取集合。
@@ -1280,7 +1296,7 @@ const defaultTurnExecutionProfile: TurnExecutionProfile = {
 
 接近预算时，AI依次减少可选的自治迹象、缩小非必要展开、降低本轮正文范围，并保留未决前沿。历史依赖闭包、正式场景时空锚点、正文单元结算、当前状态连续性证明和已写内容的图治理不能作为降级项。任何总预算或循环上限耗尽后这些条件仍未完成，本轮不得发布为正式正文；未完成正文和图修订只能在同一 `pending` 作用域作为内部待续材料保留，下一次从已保存依据继续处理，不能进入默认图或伪装成已经完成的世界事实。
 
-输入和输出 Token 继续累计计量，但不作为整轮硬截止线。单次模型上下文窗口由项目设置声明，默认 `1000000` Token；达到 `95%` 即 `950000` Token 时必须先进入系统自己的上下文压缩与复核流程，不能继续扩张后把截断交给模型供应商。应用默认不向模型请求传入 `max_tokens`，由模型服务决定单次输出上限；应用只持续监控实际 Token、时间和调用次数，并在指标触发时暂停交由用户选择。正文长度通过用户字数提示词约束，不转换成 API 输出上限。后台推进继续使用独立的 `WorldEvolutionProfile` 总预算，防止后台工作挤占用户当前正文的主预算。
+输入和输出 Token 继续累计计量，但不作为整轮硬截止线。单次模型上下文窗口由模型配置声明，默认 `1000000` Token；本次完整请求输入达到 `97%` 即 `970000` Token 时，由业务层先执行两阶段机械压缩，不能继续扩张后把截断交给模型供应商。应用默认不向模型请求传入 `max_tokens`，由模型服务决定单次输出上限；应用只持续监控实际 Token、时间和调用次数，并在指标触发时暂停交由用户选择。正文长度通过用户字数提示词约束，不转换成 API 输出上限。后台推进继续使用独立的 `WorldEvolutionProfile` 总预算，防止后台工作挤占用户当前正文的主预算。
 
 ---
 
@@ -1546,11 +1562,11 @@ const defaultWorldEvolutionProfile: WorldEvolutionProfile = {
   maxConsecutiveFrontierDeferrals: 6,
   minOverdueFrontierShare: 0.25,
   maxBackgroundStepsPerFrontier: 3,
-  backgroundContextTokenBudget: 8000,
-  maxBackgroundModelCalls: 8,
-  maxBackgroundWallTimeMs: 15000,
-  maxBackgroundTotalTokens: 24000,
-  lazyCatchUpTokenBudget: 12000,
+  backgroundContextTokenBudget: 32000,
+  maxBackgroundModelCalls: 80,
+  maxBackgroundWallTimeMs: 3600000,
+  maxBackgroundTotalTokens: 400000,
+  lazyCatchUpTokenBudget: 48000,
   maxJointFrontiersPerTurn: 2,
   maxJointParticipants: 8,
   maxCrossImpactRounds: 2,

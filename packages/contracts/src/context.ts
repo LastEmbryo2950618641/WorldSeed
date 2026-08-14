@@ -1,6 +1,10 @@
 import { z } from "zod"
 
 import { idSchema } from "./ids.js"
+import {
+  evidenceObjectIdSchema,
+  storedObjectReferenceIdSchema,
+} from "./persistent-id.js"
 import { protocolVersionSchema } from "./version.js"
 
 export const contextSegmentKindValues = [
@@ -12,13 +16,12 @@ export const contextSegmentKindValues = [
   "committed_read",
   "pending_artifact",
   "phase_result",
-  "checkpoint",
 ] as const
 
 export const contextSegmentRefSchema = z.object({
   segmentId: idSchema,
   kind: z.enum(contextSegmentKindValues),
-  ownerIds: z.array(idSchema),
+  ownerIds: z.array(storedObjectReferenceIdSchema),
   visibility: z.enum(["committed", "pending"]),
   canonicalDigest: z.string().min(1),
   tokenEstimate: z.number().int().nonnegative(),
@@ -27,20 +30,14 @@ export const contextSegmentRefSchema = z.object({
 export type ContextSegmentRef = z.infer<typeof contextSegmentRefSchema>
 
 export const contextReadLedgerSchema = z.object({
-  committedReadIds: z.array(idSchema),
-  visiblePendingIds: z.array(idSchema),
+  committedReadIds: z.array(evidenceObjectIdSchema),
+  visiblePendingIds: z.array(evidenceObjectIdSchema),
   requestedReadIds: z.array(idSchema),
-  returnedReadIds: z.array(idSchema),
-  rejectedReadIds: z.array(idSchema),
-  readReasons: z.record(idSchema, z.string().min(1)),
+  returnedReadIds: z.array(evidenceObjectIdSchema),
+  rejectedReadIds: z.array(evidenceObjectIdSchema),
+  readReasons: z.record(evidenceObjectIdSchema, z.string().min(1)),
 })
 export type ContextReadLedger = z.infer<typeof contextReadLedgerSchema>
-
-export const contextCheckpointRefSchema = z.object({
-  checkpointId: idSchema,
-  summaryDigest: z.string().min(1),
-})
-export type ContextCheckpointRef = z.infer<typeof contextCheckpointRefSchema>
 
 export const contextBudgetSnapshotSchema = z.object({
   maxTokens: z.number().int().positive(),
@@ -59,7 +56,6 @@ export const turnContextSchema = z.object({
   baseCommittedSequence: z.number().int().nonnegative(),
   segments: z.array(contextSegmentRefSchema),
   readLedger: contextReadLedgerSchema,
-  checkpoint: contextCheckpointRefSchema.optional(),
   budget: contextBudgetSnapshotSchema,
 })
 export type TurnContext = z.infer<typeof turnContextSchema>

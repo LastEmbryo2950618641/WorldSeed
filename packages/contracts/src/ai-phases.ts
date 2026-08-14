@@ -3,6 +3,7 @@ import { z } from "zod"
 import { modelCallBudgetSchema } from "./budgets.js"
 import { aiPhaseSchema } from "./common.js"
 import { idSchema } from "./ids.js"
+import { evidenceObjectIdSchema } from "./persistent-id.js"
 import { readRequestSchema, unresolvedDependencySchema } from "./reads.js"
 import { schemaVersionSchema } from "./version.js"
 
@@ -23,8 +24,8 @@ export const phaseRequestEnvelopeSchema = z.object({
   promptRef: z.string().min(1),
   promptDigest: z.string().min(1),
   contextViewRef: z.string().min(1),
-  committedReadIds: z.array(idSchema),
-  visiblePendingIds: z.array(idSchema),
+  committedReadIds: z.array(evidenceObjectIdSchema),
+  visiblePendingIds: z.array(evidenceObjectIdSchema),
   remainingBudget: modelCallBudgetSchema,
   input: z.unknown(),
 })
@@ -38,7 +39,7 @@ export const phaseResultEnvelopeSchema = z.object({
   outcome: phaseOutcomeSchema,
   artifact: z.unknown().optional(),
   requestedReads: z.array(readRequestSchema),
-  citedReadIds: z.array(idSchema),
+  citedReadIds: z.array(evidenceObjectIdSchema),
   producedArtifactIds: z.array(idSchema),
   decisionRecordIds: z.array(idSchema),
   unresolvedDependencies: z.array(unresolvedDependencySchema),

@@ -45,14 +45,24 @@ export class SqliteScopeCommitRepository implements ScopeCommitRepository {
     return this.database.transaction().execute(async (transaction) => {
       const scope = await transaction.selectFrom("artifact_scopes").selectAll().where("id", "=", scopeId).executeTakeFirstOrThrow()
       if (scope.visibility !== "pending") {
+        if (scope.visibility === "committed" && scope.committed_sequence !== null) {
+          return {
+            projectId: scope.project_id,
+            scopeId,
+            committedSequence: scope.committed_sequence,
+          }
+        }
         throw new Error(`Only pending scopes can be committed: ${scopeId}`)
       }
       const project = await transaction.selectFrom("projects")
-        .select("committed_sequence")
+        .select(["committed_sequence", "active_generation"])
         .where("id", "=", scope.project_id)
         .executeTakeFirstOrThrow()
       if (project.committed_sequence !== scope.base_committed_sequence) {
         throw new Error(`Scope was created from stale committed sequence: ${scopeId}`)
+      }
+      if (project.active_generation !== scope.base_generation) {
+        throw new Error(`Scope was created from stale active generation: ${scopeId}`)
       }
 
       await promoteNodeHeads(transaction, scope.project_id, scopeId)
@@ -71,16 +81,41 @@ export class SqliteScopeCommitRepository implements ScopeCommitRepository {
         .where("scope_id", "=", scopeId).where("visibility", "=", "pending").execute()
       await sql`UPDATE retrieval_fts SET visibility = 'committed' WHERE scope_id = ${scopeId} AND visibility = 'pending'`
         .execute(transaction)
-      await transaction.updateTable("artifact_scopes").set({ visibility: "committed" }).where("id", "=", scopeId).execute()
+      const committedSequence = project.committed_sequence + 1
+      await transaction.updateTable("artifact_scopes").set({
+        visibility: "committed",
+        committed_sequence: committedSequence,
+      }).where("id", "=", scopeId).execute()
       await transaction.updateTable("projects")
-        .set({ committed_sequence: project.committed_sequence + 1 })
+        .set({ committed_sequence: committedSequence })
         .where("id", "=", scope.project_id)
         .executeTakeFirstOrThrow()
+      await transaction.insertInto("active_scope_refs").values({
+        project_id: scope.project_id,
+        scope_id: scopeId,
+      }).onConflict((conflict) => conflict.columns(["project_id", "scope_id"]).doNothing()).execute()
+      const documentVersions = await transaction.selectFrom("document_versions")
+        .select(["id", "chapter_id", "scope_id"])
+        .where("project_id", "=", scope.project_id)
+        .where("scope_id", "=", scopeId)
+        .where("visibility", "=", "committed")
+        .execute()
+      for (const document of documentVersions) {
+        await transaction.insertInto("active_document_heads").values({
+          project_id: scope.project_id,
+          chapter_id: document.chapter_id,
+          document_version_id: document.id,
+          scope_id: document.scope_id,
+        }).onConflict((conflict) => conflict.columns(["project_id", "chapter_id"]).doUpdateSet({
+          document_version_id: document.id,
+          scope_id: document.scope_id,
+        })).execute()
+      }
 
       return {
         projectId: scope.project_id,
         scopeId,
-        committedSequence: project.committed_sequence + 1,
+        committedSequence,
       }
     })
   }

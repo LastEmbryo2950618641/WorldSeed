@@ -20,6 +20,7 @@
     "@worldseed/contracts": "workspace:*",
     "@worldseed/prompt-contracts": "workspace:*",
     "better-sqlite3": "^13.0.2",
+    "isomorphic-git": "^1.41.2",
     "kysely": "^0.29.4",
     "openai": "^7.3.0",
     "undici": "^8.9.0"

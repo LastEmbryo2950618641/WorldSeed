@@ -31,6 +31,7 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
     }
     const committedSource = await this.database.selectFrom("source_units")
       .innerJoin("document_versions", "document_versions.source_id", "source_units.source_id")
+      .innerJoin("active_document_heads", "active_document_heads.document_version_id", "document_versions.id")
       .select("document_versions.scope_id")
       .where("source_units.project_id", "=", projection.projectId)
       .where("source_units.id", "=", projection.ownerId)
@@ -45,7 +46,7 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
       .where("owner_kind", "=", "source")
       .where("owner_id", "=", projection.ownerId)
       .where("owner_revision_id", "=", projection.ownerRevisionId)
-      .where("visibility", "=", "committed")
+      .where(visibleRetrievalProjection({ projectId: projection.projectId }))
       .executeTakeFirst()
     if (existing !== undefined) return
     await this.insertProjection(projection, "committed")
@@ -61,10 +62,14 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
   }>[]> {
     const rows = await this.database.selectFrom("source_units")
       .innerJoin("document_versions", "document_versions.source_id", "source_units.source_id")
+      .innerJoin("active_document_heads", "active_document_heads.document_version_id", "document_versions.id")
       .leftJoin("retrieval_projections", (join) => join
         .onRef("retrieval_projections.owner_id", "=", "source_units.id")
         .on("retrieval_projections.owner_kind", "=", "source")
         .on("retrieval_projections.visibility", "=", "committed"))
+      .leftJoin("active_scope_refs", (join) => join
+        .onRef("active_scope_refs.scope_id", "=", "retrieval_projections.scope_id")
+        .onRef("active_scope_refs.project_id", "=", "retrieval_projections.project_id"))
       .select([
         "source_units.id as source_unit_id",
         "source_units.source_id",
@@ -75,7 +80,7 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
       ])
       .where("source_units.project_id", "=", projectId)
       .where("document_versions.visibility", "=", "committed")
-      .where("retrieval_projections.id", "is", null)
+      .where("active_scope_refs.scope_id", "is", null)
       .orderBy("document_versions.created_at")
       .orderBy("source_units.sequence_no")
       .execute()
@@ -143,11 +148,13 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
     if (row === undefined) return undefined
     const projection = mapProjection(row)
     const current = await this.findCurrentGraphProjections({ projectId }, [ownerId])
+    const currentProjection = current.find((candidate) => candidate.ownerRevisionId === ownerRevisionId)
     return {
       ...projection,
-      stateRole: current.some((candidate) => candidate.ownerRevisionId === ownerRevisionId)
-        ? "current"
-        : "historical",
+      stateRole: currentProjection === undefined ? "historical" : "current",
+      ...(currentProjection?.committedSequence === undefined
+        ? {}
+        : { committedSequence: currentProjection.committedSequence }),
     }
   }
 
@@ -174,24 +181,16 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
       .where("retrieval_exact_keys.project_id", "=", scope.projectId)
       .where("retrieval_exact_keys.exact_key", "in", [...keys])
 
-    query = scope.pendingScopeId === undefined
-      ? query.where("retrieval_projections.visibility", "=", "committed")
-      : query.where((expressions) => expressions.or([
-          expressions("retrieval_projections.visibility", "=", "committed"),
-          expressions.and([
-            expressions("retrieval_projections.visibility", "=", "pending"),
-            expressions("retrieval_projections.scope_id", "=", scope.pendingScopeId as string),
-          ]),
-        ]))
+    query = query.where(visibleRetrievalProjection(scope))
 
     const rows = await query.limit(limit).execute()
     const currentProjections = await this.findCurrentGraphProjections(scope)
     const currentMatches = currentProjections
       .filter((projection) => projection.exactKeys.some((key) => keys.includes(key)))
-    return closeGraphProjectionCandidates([
+    return this.attachSourcePositions(closeGraphProjectionCandidates([
       ...currentMatches,
       ...rows.map(mapProjection),
-    ], currentProjections, limit)
+    ], currentProjections, limit))
   }
 
   public async searchText(
@@ -235,7 +234,7 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
       ])])
       .execute()
     const byId = new Map(rows.map((row) => [row.id, mapProjection(row)]))
-    return closeGraphProjectionCandidates([
+    return this.attachSourcePositions(closeGraphProjectionCandidates([
       ...currentMatches,
       ...currentShortMatches,
       ...projectionIds.flatMap((projectionId) => {
@@ -246,7 +245,7 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
         const projection = byId.get(match.projection_id)
         return projection === undefined ? [] : [projection]
       }),
-    ], currentProjections, limit)
+    ], currentProjections, limit))
   }
 
   public async searchSourceText(
@@ -259,6 +258,7 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
     if (normalizedExpression.length === 0 || limit <= 0 || sourceIds?.length === 0) {
       return []
     }
+    const substringMatches = await this.searchSourceSubstring(scope, normalizedExpression, limit, sourceIds)
     const matches = codePointLength(normalizedExpression) <= 2
       ? await this.searchShortSourceText(scope, normalizedExpression, limit, sourceIds)
       : await this.searchFts(scope, normalizedExpression, limit, sourceIds)
@@ -266,18 +266,35 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
     const shortTextMatches = shortTerms.length === 0
       ? []
       : (await Promise.all(shortTerms.map((term) => this.searchShortSourceText(scope, term, limit, sourceIds)))).flat()
-    if (matches.length === 0 && shortTextMatches.length === 0) return []
+    if (substringMatches.length === 0 && matches.length === 0 && shortTextMatches.length === 0) return []
     const rows = await this.database.selectFrom("retrieval_projections").selectAll()
       .where("id", "in", [...new Set([
+        ...substringMatches.map((match) => match.projection_id),
         ...matches.map((match) => match.projection_id),
         ...shortTextMatches.map((match) => match.projection_id),
       ])])
       .execute()
     const byId = new Map(rows.map((row) => [row.id, mapProjection(row)]))
-    return uniqueProjections([...matches, ...shortTextMatches].flatMap((match) => {
+    return this.attachSourcePositions(uniqueProjections([...substringMatches, ...matches, ...shortTextMatches].flatMap((match) => {
       const projection = byId.get(match.projection_id)
       return projection === undefined ? [] : [projection]
-    }), limit)
+    }), limit))
+  }
+
+  private async searchSourceSubstring(
+    scope: RetrievalSearchScope,
+    expression: string,
+    limit: number,
+    sourceIds?: readonly string[],
+  ): Promise<readonly { projection_id: string }[]> {
+    let query = this.database.selectFrom("retrieval_projections")
+      .innerJoin("source_units", "source_units.id", "retrieval_projections.owner_id")
+      .select("retrieval_projections.id as projection_id")
+      .where("retrieval_projections.project_id", "=", scope.projectId)
+      .where("retrieval_projections.owner_kind", "=", "source")
+      .where(sql<boolean>`instr(retrieval_projections.semantic_text, ${expression}) > 0`)
+    if (sourceIds !== undefined) query = query.where("source_units.source_id", "in", [...sourceIds])
+    return query.where(visibleRetrievalProjection(scope)).limit(limit).execute()
   }
 
   public async expandSourceNeighborhood(
@@ -303,15 +320,7 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
         .where("source_units.source_id", "=", anchor.sourceId)
         .where("source_units.sequence_no", ">=", Math.max(0, anchor.sequence - normalizedDistance))
         .where("source_units.sequence_no", "<=", anchor.sequence + normalizedDistance)
-      query = scope.pendingScopeId === undefined
-        ? query.where("retrieval_projections.visibility", "=", "committed")
-        : query.where((expressions) => expressions.or([
-            expressions("retrieval_projections.visibility", "=", "committed"),
-            expressions.and([
-              expressions("retrieval_projections.visibility", "=", "pending"),
-              expressions("retrieval_projections.scope_id", "=", scope.pendingScopeId as string),
-            ]),
-          ]))
+      query = query.where(visibleRetrievalProjection(scope))
       const rows = await query.orderBy("source_units.sequence_no").execute()
       return rows.map((row) => ({
         projection: mapProjection(row),
@@ -335,9 +344,92 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
         || left.anchorIndex - right.anchorIndex
         || left.sequence - right.sequence)
       .slice(0, limit)
-    return selected
+    return this.attachSourcePositions(selected
       .sort((left, right) => left.anchorIndex - right.anchorIndex || left.sequence - right.sequence)
-      .map((candidate) => candidate.projection)
+      .map((candidate) => candidate.projection))
+  }
+
+  public async readSourceBoundary(
+    scope: RetrievalSearchScope,
+    sourceRefs: readonly string[],
+    boundary: "start" | "end",
+    limit: number,
+  ): Promise<readonly RetrievalProjection[]> {
+    const normalizedSourceRefs = [...new Set(sourceRefs.filter((sourceRef) => sourceRef.length > 0))]
+    if (normalizedSourceRefs.length === 0 || limit <= 0) return []
+    let query = this.database.selectFrom("retrieval_projections")
+      .innerJoin("source_units", "source_units.id", "retrieval_projections.owner_id")
+      .selectAll("retrieval_projections")
+      .select(["source_units.source_id as source_id", "source_units.sequence_no as source_sequence"])
+      .where("retrieval_projections.project_id", "=", scope.projectId)
+      .where("retrieval_projections.owner_kind", "=", "source")
+      .where("source_units.project_id", "=", scope.projectId)
+      .where("source_units.source_id", "in", normalizedSourceRefs)
+    query = query.where(visibleRetrievalProjection(scope))
+    const rows = await query.execute()
+    const ordered = rows.sort((left, right) => {
+      const sourceOrder = normalizedSourceRefs.indexOf(left.source_id) - normalizedSourceRefs.indexOf(right.source_id)
+      if (sourceOrder !== 0) return sourceOrder
+      return boundary === "start"
+        ? left.source_sequence - right.source_sequence
+        : right.source_sequence - left.source_sequence
+    }).slice(0, limit)
+    const projections = await this.attachSourcePositions(ordered.map(mapProjection))
+    return [...projections].sort((left, right) => {
+      const leftPosition = left.sourcePosition
+      const rightPosition = right.sourcePosition
+      if (leftPosition === undefined || rightPosition === undefined) return 0
+      const sourceOrder = normalizedSourceRefs.indexOf(leftPosition.sourceRef)
+        - normalizedSourceRefs.indexOf(rightPosition.sourceRef)
+      return sourceOrder !== 0 ? sourceOrder : leftPosition.sequence - rightPosition.sequence
+    })
+  }
+
+  private async attachSourcePositions(
+    projections: readonly RetrievalProjection[],
+  ): Promise<readonly RetrievalProjection[]> {
+    const sourceUnitIds = [...new Set(projections
+      .filter((projection) => projection.ownerKind === "source")
+      .map((projection) => projection.ownerId))]
+    if (sourceUnitIds.length === 0) return projections
+    const sourceRows = await this.database.selectFrom("source_units")
+      .select(["id", "source_id", "sequence_no"])
+      .where("id", "in", sourceUnitIds)
+      .execute()
+    const sourceRefs = [...new Set(sourceRows.map((row) => row.source_id))]
+    const boundaryRows = await this.database.selectFrom("source_units")
+      .select(["source_id"])
+      .select((expression) => [
+        expression.fn.min("sequence_no").as("first_sequence"),
+        expression.fn.max("sequence_no").as("last_sequence"),
+        expression.fn.count<number>("id").as("unit_count"),
+      ])
+      .where("project_id", "=", projections[0]!.projectId)
+      .where("source_id", "in", sourceRefs)
+      .groupBy("source_id")
+      .execute()
+    const sourceUnits = new Map(sourceRows.map((row) => [row.id, row]))
+    const boundaries = new Map(boundaryRows.map((row) => [row.source_id, row]))
+    return projections.map((projection) => {
+      if (projection.ownerKind !== "source") return projection
+      const sourceUnit = sourceUnits.get(projection.ownerId)
+      const sourceBoundary = sourceUnit === undefined ? undefined : boundaries.get(sourceUnit.source_id)
+      if (sourceUnit === undefined || sourceBoundary === undefined) return projection
+      const firstSequence = Number(sourceBoundary.first_sequence)
+      const lastSequence = Number(sourceBoundary.last_sequence)
+      return {
+        ...projection,
+        sourcePosition: {
+          sourceRef: sourceUnit.source_id,
+          sequence: sourceUnit.sequence_no,
+          firstSequence,
+          lastSequence,
+          unitCount: Number(sourceBoundary.unit_count),
+          isStart: sourceUnit.sequence_no === firstSequence,
+          isEnd: sourceUnit.sequence_no === lastSequence,
+        },
+      }
+    })
   }
 
   private async searchFts(
@@ -355,6 +447,7 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
           WHERE retrieval_fts MATCH ${semanticQuery}
             AND project_id = ${scope.projectId}
             AND visibility = 'committed'
+            AND scope_id IN (SELECT scope_id FROM active_scope_refs WHERE project_id = ${scope.projectId})
             ${sourceFilter}
           ORDER BY bm25(retrieval_fts)
           LIMIT ${limit}
@@ -363,7 +456,9 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
           SELECT projection_id FROM retrieval_fts
           WHERE retrieval_fts MATCH ${semanticQuery}
             AND project_id = ${scope.projectId}
-            AND (visibility = 'committed' OR (visibility = 'pending' AND scope_id = ${scope.pendingScopeId}))
+            AND ((visibility = 'committed' AND scope_id IN (
+              SELECT scope_id FROM active_scope_refs WHERE project_id = ${scope.projectId}
+            )) OR (visibility = 'pending' AND scope_id = ${scope.pendingScopeId}))
             ${sourceFilter}
           ORDER BY bm25(retrieval_fts)
           LIMIT ${limit}
@@ -386,15 +481,7 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
     if (sourceIds !== undefined) {
       query = query.where("source_units.source_id", "in", [...sourceIds])
     }
-    query = scope.pendingScopeId === undefined
-      ? query.where("retrieval_projections.visibility", "=", "committed")
-      : query.where((expressions) => expressions.or([
-          expressions("retrieval_projections.visibility", "=", "committed"),
-          expressions.and([
-            expressions("retrieval_projections.visibility", "=", "pending"),
-            expressions("retrieval_projections.scope_id", "=", scope.pendingScopeId as string),
-          ]),
-        ]))
+    query = query.where(visibleRetrievalProjection(scope))
     return query.limit(limit).execute()
   }
 
@@ -417,6 +504,7 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
           WHERE retrieval_fts MATCH ${semanticQuery}
             AND project_id = ${scope.projectId}
             AND visibility = 'committed'
+            AND scope_id IN (SELECT scope_id FROM active_scope_refs WHERE project_id = ${scope.projectId})
             ${projectionFilter}
           ORDER BY bm25(retrieval_fts)
           LIMIT ${limit}
@@ -425,7 +513,9 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
           SELECT projection_id FROM retrieval_fts
           WHERE retrieval_fts MATCH ${semanticQuery}
             AND project_id = ${scope.projectId}
-            AND (visibility = 'committed' OR (visibility = 'pending' AND scope_id = ${scope.pendingScopeId}))
+            AND ((visibility = 'committed' AND scope_id IN (
+              SELECT scope_id FROM active_scope_refs WHERE project_id = ${scope.projectId}
+            )) OR (visibility = 'pending' AND scope_id = ${scope.pendingScopeId}))
             ${projectionFilter}
           ORDER BY bm25(retrieval_fts)
           LIMIT ${limit}
@@ -449,15 +539,7 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
       .select("id as projection_id")
       .where("project_id", "=", scope.projectId)
       .where(sql<boolean>`instr(semantic_text, ${expression}) > 0`)
-    const visibleQuery = scope.pendingScopeId === undefined
-      ? query.where("visibility", "=", "committed")
-      : query.where((expressions) => expressions.or([
-          expressions("visibility", "=", "committed"),
-          expressions.and([
-            expressions("visibility", "=", "pending"),
-            expressions("scope_id", "=", scope.pendingScopeId as string),
-          ]),
-        ]))
+    const visibleQuery = query.where(visibleRetrievalProjection(scope))
     return visibleQuery.limit(limit).execute()
   }
 
@@ -467,26 +549,36 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
   ): Promise<readonly RetrievalProjection[]> {
     const normalizedOwnerIds = ownerIds === undefined ? undefined : [...new Set(ownerIds)]
     if (normalizedOwnerIds?.length === 0) return []
-    let committedNodeQuery = this.database.selectFrom("node_heads").select(["node_id", "revision_id", "visibility"])
-      .where("project_id", "=", scope.projectId)
-      .where("scope_key", "=", "committed")
-    let committedLinkQuery = this.database.selectFrom("link_heads").select(["link_id", "revision_id", "visibility"])
-      .where("project_id", "=", scope.projectId)
-      .where("scope_key", "=", "committed")
+    let committedNodeQuery = this.database.selectFrom("node_heads")
+      .innerJoin("artifact_scopes", "artifact_scopes.id", "node_heads.source_scope_id")
+      .select(["node_heads.node_id", "node_heads.revision_id", "node_heads.visibility", "artifact_scopes.committed_sequence"])
+      .where("node_heads.project_id", "=", scope.projectId)
+      .where("node_heads.scope_key", "=", "committed")
+    let committedLinkQuery = this.database.selectFrom("link_heads")
+      .innerJoin("artifact_scopes", "artifact_scopes.id", "link_heads.source_scope_id")
+      .select(["link_heads.link_id", "link_heads.revision_id", "link_heads.visibility", "artifact_scopes.committed_sequence"])
+      .where("link_heads.project_id", "=", scope.projectId)
+      .where("link_heads.scope_key", "=", "committed")
     if (normalizedOwnerIds !== undefined) {
-      committedNodeQuery = committedNodeQuery.where("node_id", "in", normalizedOwnerIds)
-      committedLinkQuery = committedLinkQuery.where("link_id", "in", normalizedOwnerIds)
+      committedNodeQuery = committedNodeQuery.where("node_heads.node_id", "in", normalizedOwnerIds)
+      committedLinkQuery = committedLinkQuery.where("link_heads.link_id", "in", normalizedOwnerIds)
     }
     const [committedNodeHeads, committedLinkHeads] = await Promise.all([
       committedNodeQuery.execute(),
       committedLinkQuery.execute(),
     ])
-    const currentRevisions = new Map<string, string>()
+    const currentRevisions = new Map<string, Readonly<{ revisionId: string; committedSequence?: number }>>()
     for (const head of committedNodeHeads) {
-      if (head.visibility !== "retired") currentRevisions.set(`node:${head.node_id}`, head.revision_id)
+      if (head.visibility !== "retired") currentRevisions.set(`node:${head.node_id}`, {
+        revisionId: head.revision_id,
+        ...(head.committed_sequence === null ? {} : { committedSequence: head.committed_sequence }),
+      })
     }
     for (const head of committedLinkHeads) {
-      if (head.visibility !== "retired") currentRevisions.set(`link:${head.link_id}`, head.revision_id)
+      if (head.visibility !== "retired") currentRevisions.set(`link:${head.link_id}`, {
+        revisionId: head.revision_id,
+        ...(head.committed_sequence === null ? {} : { committedSequence: head.committed_sequence }),
+      })
     }
 
     if (scope.pendingScopeId !== undefined && await pendingScopeIsVisible(this.database, scope.pendingScopeId)) {
@@ -507,34 +599,52 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
       for (const head of pendingNodeHeads) {
         const key = `node:${head.node_id}`
         if (head.visibility === "retired") currentRevisions.delete(key)
-        else currentRevisions.set(key, head.revision_id)
+        else currentRevisions.set(key, { revisionId: head.revision_id })
       }
       for (const head of pendingLinkHeads) {
         const key = `link:${head.link_id}`
         if (head.visibility === "retired") currentRevisions.delete(key)
-        else currentRevisions.set(key, head.revision_id)
+        else currentRevisions.set(key, { revisionId: head.revision_id })
       }
     }
-    const revisionIds = [...currentRevisions.values()]
+    const revisionIds = [...currentRevisions.values()].map((current) => current.revisionId)
     if (revisionIds.length === 0) return []
     let query = this.database.selectFrom("retrieval_projections").selectAll()
       .where("project_id", "=", scope.projectId)
       .where("owner_revision_id", "in", revisionIds)
-    query = scope.pendingScopeId === undefined
-      ? query.where("visibility", "=", "committed")
-      : query.where((expressions) => expressions.or([
-          expressions("visibility", "=", "committed"),
-          expressions.and([
-            expressions("visibility", "=", "pending"),
-            expressions("scope_id", "=", scope.pendingScopeId as string),
-          ]),
-        ]))
+    query = query.where(visibleRetrievalProjection(scope))
     const rows = await query.execute()
     return rows
       .map(mapProjection)
-      .filter((projection) => currentRevisions.get(`${projection.ownerKind}:${projection.ownerId}`) === projection.ownerRevisionId)
-      .map((projection) => ({ ...projection, stateRole: "current" as const }))
+      .filter((projection) => currentRevisions.get(`${projection.ownerKind}:${projection.ownerId}`)?.revisionId === projection.ownerRevisionId)
+      .map((projection) => {
+        const current = currentRevisions.get(`${projection.ownerKind}:${projection.ownerId}`)
+        return {
+          ...projection,
+          stateRole: "current" as const,
+          ...(current?.committedSequence === undefined ? {} : { committedSequence: current.committedSequence }),
+        }
+      })
+      .sort((left, right) => (right.committedSequence ?? Number.MAX_SAFE_INTEGER)
+        - (left.committedSequence ?? Number.MAX_SAFE_INTEGER))
   }
+}
+
+function visibleRetrievalProjection(scope: RetrievalSearchScope) {
+  const committed = sql<boolean>`(
+    retrieval_projections.visibility = 'committed'
+    AND EXISTS (
+      SELECT 1 FROM active_scope_refs
+      WHERE active_scope_refs.project_id = ${scope.projectId}
+        AND active_scope_refs.scope_id = retrieval_projections.scope_id
+    )
+  )`
+  return scope.pendingScopeId === undefined
+    ? committed
+    : sql<boolean>`(${committed} OR (
+        retrieval_projections.visibility = 'pending'
+        AND retrieval_projections.scope_id = ${scope.pendingScopeId}
+      ))`
 }
 
 function codePointLength(value: string): number {
@@ -664,6 +774,7 @@ function closeGraphProjectionCandidates(
       append({
         ...candidate,
         stateRole: current === undefined ? "historical" : "current",
+        ...(current?.committedSequence === undefined ? {} : { committedSequence: current.committedSequence }),
       })
       continue
     }

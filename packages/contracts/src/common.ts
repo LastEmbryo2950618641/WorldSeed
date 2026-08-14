@@ -37,12 +37,15 @@ export const aiPhaseValues = [
   "dependency_audit",
   "response_review",
   "graph_governance",
+  "graph_structure_plan",
+  "graph_capacity_rewrite",
+  "graph_spacetime_settlement",
+  "graph_retrieval_design",
+  "graph_governance_review",
   "semantic_review",
   "settlement_review",
   "frontier_settlement",
   "commit_review",
-  "context_compaction",
-  "context_compaction_review",
 ] as const
 export const aiPhaseSchema = z.enum(aiPhaseValues)
 export type AIPhase = z.infer<typeof aiPhaseSchema>

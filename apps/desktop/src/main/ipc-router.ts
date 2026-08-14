@@ -94,6 +94,7 @@ async function saveModelProfiles(backend: BackendProcess, vault: FileCredentialV
       baseUrl: profile.baseUrl,
       model: profile.model,
       credentialRef: profile.credentialRef,
+      contextWindowTokens: profile.contextWindowTokens,
       thinkingModeEnabled: profile.thinkingModeEnabled,
       reasoningEffort: profile.reasoningEffort,
       jsonModeEnabled: profile.jsonModeEnabled,

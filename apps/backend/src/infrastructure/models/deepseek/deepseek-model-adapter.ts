@@ -1,8 +1,10 @@
 import OpenAI from "openai"
+import { createHash } from "node:crypto"
 import { ProxyAgent } from "undici"
 
 import {
   PROTOCOL_VERSION,
+  type ModelContextMessageDraft,
   type PhaseRequestEnvelope,
 } from "@worldseed/contracts"
 import type { DeepSeekRuntimeConfig } from "@worldseed/config"
@@ -13,6 +15,7 @@ import type {
   PhaseModelExecution,
   PromptResourcePort,
 } from "../../../application/index.js"
+import { ModelContextAppender } from "../../../application/index.js"
 import {
   assembleModelPhaseResult,
   phaseModelResultJsonSchema,
@@ -44,6 +47,12 @@ export type DeepSeekMessage = Readonly<{
   content: string
 }>
 
+type PromptSnapshot = Readonly<{
+  phase: string
+  serialized: string
+  messageDigests: readonly string[]
+}>
+
 export type DeepSeekCompletionResponse = Readonly<{
   content: string | null
   reasoningContent?: string | null
@@ -65,6 +74,8 @@ export class DeepSeekModelError extends Error {
 
 export class DeepSeekAiModelAdapter implements AIModelPort {
   private readonly clientPromise: Promise<DeepSeekCompletionClient>
+  private readonly previousPromptByChain = new Map<string, PromptSnapshot>()
+  private readonly contextAppender = new ModelContextAppender()
   public readonly info
 
   public constructor(
@@ -94,31 +105,84 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
       deadlineRemainingMs: request.remainingBudget.deadlineAtMs - Date.now(),
     })
     const [baseRules, phasePrompt, client] = await Promise.all([
-      this.prompts.loadBaseRules(),
-      this.prompts.loadPhase(request.phase),
+      options?.contextMessages === undefined ? this.prompts.loadBaseRules() : Promise.resolve(undefined),
+      options?.phasePrompt === undefined
+        ? this.prompts.loadPhase(request.phase)
+        : Promise.resolve(options.phasePrompt),
       this.clientPromise,
     ])
-    const messages: DeepSeekMessage[] = [
-      { role: "system", content: baseRules.text },
-      { role: "system", content: phasePrompt.text },
+    const protocolMessage = [
+      `Worldseed protocol ${PROTOCOL_VERSION}.`,
+      `Current phase: ${request.phase}.`,
+      "Return exactly one JSON object and no Markdown fences or commentary.",
+      "The final user message contains the complete mandatory output contract.",
+    ].join("\n")
+    const modelRequest = this.contextAppender.createDelta(
+      request,
+      referenceView.request,
+      options?.contextMessages ?? [],
+    )
+    const modelRequestText = this.contextAppender.formatDelta(modelRequest)
+    const outputReminder = buildOutputReminder(request, referenceView)
+    const requestMessages: ModelContextMessageDraft[] = [
       {
-        role: "system",
-        content: [
-          `Worldseed protocol ${PROTOCOL_VERSION}.`,
-          `Current phase: ${request.phase}.`,
-          "Return exactly one JSON object and no Markdown fences or commentary.",
-          "The final user message contains the complete mandatory output contract.",
-        ].join("\n"),
+        role: "user",
+        kind: "phase_request",
+        taskId: request.taskId,
+        turnId: request.turnId,
+        phase: request.phase,
+        content: modelRequestText,
       },
       {
         role: "user",
-        content: [
-           "Current model-facing turn request JSON (reference values are aliases; do not invent aliases):",
-           JSON.stringify(referenceView.request),
-           buildOutputReminder(request, referenceView),
-        ].join("\n\n"),
+        kind: "phase_instruction",
+        taskId: request.taskId,
+        turnId: request.turnId,
+        phase: request.phase,
+        content: phasePrompt.text,
+      },
+      {
+        role: "user",
+        kind: "phase_protocol",
+        taskId: request.taskId,
+        turnId: request.turnId,
+        phase: request.phase,
+        content: protocolMessage,
+      },
+      {
+        role: "user",
+        kind: "phase_request",
+        taskId: request.taskId,
+        turnId: request.turnId,
+        phase: request.phase,
+        content: outputReminder,
       },
     ]
+    const inheritedMessages = options?.contextMessages === undefined
+      ? [{ role: "system" as const, content: baseRules?.text ?? "" }]
+      : normalizeContextMessages(options.contextMessages)
+    const messages: DeepSeekMessage[] = [
+      ...inheritedMessages,
+      ...requestMessages.map((message) => ({
+        role: message.role,
+        content: message.content ?? "",
+      })),
+    ]
+    const promptSnapshot = createPromptSnapshot(request.phase, messages)
+    const continuityKey = options?.contextChainId ?? request.taskId
+    const previousPrompt = this.previousPromptByChain.get(continuityKey)
+    const promptContinuity = comparePromptSnapshots(previousPrompt, promptSnapshot)
+    this.previousPromptByChain.set(continuityKey, promptSnapshot)
+    runtimeLog("debug", "deepseek-model", "completion.prompt_profiled", {
+      taskId: request.taskId,
+      phase: request.phase,
+      envelopeId: request.envelopeId,
+      totalCharacters: promptSnapshot.serialized.length,
+      messages: profileMessages(messages),
+      modelRequestSections: profileModelRequestSections(modelRequest),
+      outputReminderCharacters: outputReminder.length,
+      ...promptContinuity,
+    })
     let lastError: unknown
     let totalInputTokens = 0
     let totalOutputTokens = 0
@@ -183,6 +247,11 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
         completionTokenDetailKeys: usage.completionTokenDetailKeys,
         cacheHitInputTokens: usage.cacheHitInputTokens,
         cacheMissInputTokens: usage.cacheMissInputTokens,
+        cacheHitRate: ratio(usage.cacheHitInputTokens, usage.inputTokens),
+        reasoningTokenRate: ratio(usage.reasoningTokens, usage.outputTokens),
+        inputCharacterRatio: usage.inputTokens === 0
+          ? undefined
+          : promptSnapshot.serialized.length / usage.inputTokens,
       })
       if (response.finishReason === "length") {
         runtimeLog("warn", "deepseek-model", "completion.output_truncated", {
@@ -237,6 +306,17 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
         })
         return {
           result,
+          contextExchange: {
+            requestMessages,
+            responseMessage: {
+              role: "assistant",
+              kind: "phase_response",
+              taskId: request.taskId,
+              turnId: request.turnId,
+              phase: request.phase,
+              content: selectedOutput.raw,
+            },
+          },
           usage: {
             modelCalls: repairAttempt + 1,
             inputTokens: totalInputTokens,
@@ -360,25 +440,44 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
   }
 }
 
+function normalizeContextMessages(
+  contextMessages: readonly { role: "system" | "user" | "assistant"; content: string }[],
+): DeepSeekMessage[] {
+  return contextMessages.map((message, index) => {
+    const role = index === 0 && message.role === "system"
+      ? "system" as const
+      : message.role === "system" ? "user" as const : message.role
+    return { role, content: message.content }
+  })
+}
+
 function mergeExecutionSignals(executionSignal: AbortSignal | undefined, timeoutSignal: AbortSignal): AbortSignal {
   return executionSignal === undefined ? timeoutSignal : AbortSignal.any([executionSignal, timeoutSignal])
 }
 
 function buildModelResultRules(request: PhaseRequestEnvelope, referenceView: ModelReferenceView): string {
   const declaredLocalReferences = collectDeclaredLocalReferences(request)
-  const localReferenceRule = request.phase === "graph_governance"
+  const mayDeclareLocalReferences = request.phase === "graph_governance"
+    || request.phase === "graph_structure_plan"
+    || request.phase === "graph_capacity_rewrite"
+  const localReferenceRule = mayDeclareLocalReferences
     ? "- For a new graph identity, use a local:* reference and reuse that same reference throughout this artifact; the backend resolves it once."
     : declaredLocalReferences.length > 0
-      ? `- This phase may reuse only local:* handles already declared by graph_governance (${declaredLocalReferences.join(", ")}); it must not declare or invent another local:* handle.`
-      : "- Do not use local:* references in this phase. If this phase plans a new graph identity, leave graph identity reference arrays empty and describe the intended new content in reason; only graph_governance declares local:* handles."
+      ? `- This phase may reuse only local:* handles already declared by the staged graph structure (${declaredLocalReferences.join(", ")}); it must not declare or invent another local:* handle.`
+      : "- Do not use local:* references in this phase. New graph identities may be declared only by graph_structure_plan or graph_capacity_rewrite."
   const graphGovernanceReferenceRule = request.phase === "graph_governance"
+    || request.phase === "graph_structure_plan"
+    || request.phase === "graph_capacity_rewrite"
+    || request.phase === "graph_spacetime_settlement"
+    || request.phase === "graph_retrieval_design"
+    || request.phase === "graph_governance_review"
     ? [
         "- The complete graph_governance JSON must finish below the provider's configured output limit. Keep every reason, explanation, selfReview, semanticText, content, and metadata value concise; do not repeat source prose across fields.",
-        "- In graph_governance, graph reference fields accept only node-*, link-*, or a local:* handle declared by a create mutation. Never put read-* in a graph reference field.",
-        "- predecessorRevisionReadRefs is the exception: it accepts only revision-bearing read-* evidence aliases, never node-* or link-*.",
+        "- In graph_governance, graph reference fields accept only node_*/link_* permanent IDs, legacy node-*/link-* aliases, or a local:* handle declared by a create mutation. Never put evidence_*/read-* in a graph reference field.",
+        "- predecessorRevisionReadRefs is the exception: it accepts only revision-bearing evidence_*/read-* references, never node or link identities.",
         `- Revision-bearing evidence aliases available here: ${referenceView.revisionReadTokens.join(", ") || "none"}.`,
       ].join("\n")
-    : "- read-* aliases identify evidence; node-* and link-* aliases identify existing graph objects. Do not substitute one role for the other."
+    : "- evidence_*/read-* references identify evidence; node_*/link_* or legacy node-*/link-* references identify existing graph objects. Do not substitute one role for the other."
   const crossPhaseChecklist = buildCrossPhaseChecklist(request)
   return [
     "Model result rules:",
@@ -399,8 +498,11 @@ function buildModelResultRules(request: PhaseRequestEnvelope, referenceView: Mod
     "- sourceKinds source means the internal committed immutable source-unit projection. It is not a request to read Markdown from the workspace chapter directory, so a workspace chapter-read prohibition does not exclude source projections.",
     "- For an exact quotation, title, or other exact persisted wording, provide exactKeys. When the same request searches graph or revision evidence, include source as well; summaries and semanticTexts must not impersonate exact source wording.",
     "- Source evidence may expose relatedOwnerRefs with bounded graph projection summaries: these are the graph owners mechanically linked to that exact immutable source unit by settlement. Use those summaries first when reconstructing the source unit's time, place, state, or causal context; do not replace them with an unrelated graph candidate that merely has similar wording, and do not request every related owner again unless the summary is insufficient.",
+    "- Source evidence exposes sourcePosition from immutable source order. isEnd=true identifies the last persisted unit of that source; isEnd=false means the unit must not be described as that source's ending. sequence and source boundaries are storage order, not story time.",
+    "- When continuation requires the end of an identified source and visible evidence is not isEnd=true, request sourceKinds=[source], copy its sourcePosition.sourceRef into sourceIds, and set sourceBoundary=end. Use sourceBoundary=start only when the beginning is required. Do not guess a source boundary from semantic similarity.",
+    "- For conflicting current graph evidence owned by different nodes or links, a larger committedSequence means a later committed world state and should be preferred over an older plan or local state. committedSequence is not story time; explicit story-time anchors and evolution relations still determine in-world chronology.",
     `- citedReadIds may contain only model aliases in committedReadIds (${referenceView.committedReadTokens.join(", ") || "none"}) or visiblePendingIds (${referenceView.visiblePendingTokens.join(", ") || "none"}).`,
-    "- citedReadIds must include every visible evidence item that materially supports the returned artifact, reason, or selfReview. Evidence omitted from citedReadIds is not carried forward as a factual dependency.",
+    "- citedReadIds must include every visible evidence item that materially supports the returned artifact, reason, or selfReview. citedReadIds is an audit record only: omitting an already visible Evidence does not erase it from this turn or require it to be read again.",
     "- input.retrievalGaps are notices that a bounded retrieval attempt found no readable evidence; they are not sources and must never be copied into citedReadIds.",
     "- Unresolved dependencies contain description, requiredFor, and disposition only.",
   ].join("\n")
@@ -410,13 +512,18 @@ function collectDeclaredLocalReferences(request: PhaseRequestEnvelope): string[]
   const input = asRecord(request.input)
   const artifacts = asRecord(input.artifacts)
   const governance = asRecord(artifacts.graph_governance)
-  const mutations = Array.isArray(governance.mutations) ? governance.mutations : []
+  const structure = asRecord(artifacts.graph_structure_plan)
+  const structureProposals = Array.isArray(structure.proposals) ? structure.proposals : []
+  const structureMutations = structureProposals.map((proposal) => asRecord(asRecord(proposal).mutation))
+  const mutations = [
+    ...(Array.isArray(governance.mutations) ? governance.mutations.map(asRecord) : []),
+    ...structureMutations,
+  ]
   return mutations.flatMap((mutation) => {
-    const record = asRecord(mutation)
-    return (record.operation === "create_node" || record.operation === "create_link")
-      && typeof record.ref === "string"
-      && record.ref.startsWith("local:")
-      ? [record.ref]
+    return (mutation.operation === "create_node" || mutation.operation === "create_link")
+      && typeof mutation.ref === "string"
+      && mutation.ref.startsWith("local:")
+      ? [mutation.ref]
       : []
   })
 }
@@ -424,6 +531,19 @@ function collectDeclaredLocalReferences(request: PhaseRequestEnvelope): string[]
 function buildCrossPhaseChecklist(request: PhaseRequestEnvelope): string {
   const input = asRecord(request.input)
   const artifacts = asRecord(input.artifacts)
+  if (request.phase === "dependency_audit") {
+    const workflow = input.workflow === "evolution" ? "evolution" : input.workflow === "query" ? "query" : "turn"
+    const sourceUnitIds = Array.isArray(input.sourceUnitIds) ? input.sourceUnitIds : []
+    return [
+      `- This dependency audit belongs to workflow=${workflow} and currently has ${String(sourceUnitIds.length)} persisted narrative source unit(s). Do not infer another workflow from the prose or prior artifacts.`,
+      sourceUnitIds.length > 0
+        ? `- The complete draft has narrative source unit indexes exactly: ${indexList(sourceUnitIds.length)}. sceneContinuity must not be empty and must describe every actual spacetime-distinct scene needed to cover that complete draft; graph_governance will bind all listed source units to these scenes.`
+        : workflow === "evolution"
+          ? "- This background evolution has no narrative source units. sceneContinuity may be empty only when the evolution artifact itself contains no spacetime-distinct scene that requires continuity auditing."
+          : "- No narrative source units are present. Do not invent draft scenes; include sceneContinuity entries only for actual phase content that requires spacetime continuity auditing.",
+      "- A newly inferred person, place, event, object, or other thing does not make a scene unsupported. Audit whether its time, place, prior evolution, and current state are continuous; do not omit the scene merely because some contents are newly created this turn.",
+    ].join("\n")
+  }
   if (request.phase === "rule_assembly") {
     const readableWorkspacePathCount = Array.isArray(input.readEvidence)
       ? input.readEvidence.filter((evidence) => {
@@ -444,12 +564,37 @@ function buildCrossPhaseChecklist(request: PhaseRequestEnvelope): string {
     const frontiers = Array.isArray(governance.affectedFrontierRefs)
       ? governance.affectedFrontierRefs.filter((value): value is string => typeof value === "string")
       : []
+    const verificationProbeIndexes = Array.isArray(input.verificationProbeExecutions)
+      ? input.verificationProbeExecutions.flatMap((execution) => {
+          const probeIndex = asRecord(execution).probeIndex
+          return typeof probeIndex === "number" ? [probeIndex] : []
+        })
+      : []
     return [
       "- semantic_review is advisory. Report only indexes and references for which you have an actual review conclusion; do not enumerate no-opinion items.",
       `- affected frontiers available for review: ${frontiers.join(", ") || "none"}.`,
+      verificationProbeIndexes.length === 0
+        ? "- No application verification probes are available in this request."
+        : `- The application executed verification probes with indexes: ${verificationProbeIndexes.join(", ")}. Return exactly one verificationProbeAssessment for each of these indexes, preserve each executed descriptor unchanged, and do not add any other index.`,
     ].join("\n")
   }
-  if (request.phase === "graph_governance") {
+  if (request.phase === "graph_governance_review") {
+    const verificationProbeExecutions = Array.isArray(input.verificationProbeExecutions)
+      ? input.verificationProbeExecutions.map(asRecord)
+      : []
+    const verificationProbeIndexes = verificationProbeExecutions.flatMap((execution) => (
+      typeof execution.probeIndex === "number" ? [execution.probeIndex] : []
+    ))
+    return verificationProbeIndexes.length === 0
+      ? "- No application verification probe has been executed yet. You must return outcome=request_read with at least one AI-defined requestedReads[].verificationProbe; do not finish the review and do not fabricate an assessment."
+      : [
+          `- input.verificationProbeExecutions contains application-executed results for probe indexes: ${verificationProbeIndexes.join(", ")}. These are real execution records, not plans or model-generated claims.`,
+          ...verificationProbeExecutions.map(formatVerificationProbeExecution),
+          "- Assess each execution from verificationProbeExecutions together with the same request's readEvidence, returnedReadRefs, returnedGraphRefs, returnedProposalRefs, and resultDigest. Return exactly one verificationProbeAssessment for each listed probe index and no other index.",
+          "- Do not claim that probe execution results were not provided when these fields are present. A probe may still receive verdict=uncertain or verdict=fail when its actual returned evidence is insufficient.",
+        ].join("\n")
+  }
+  if (request.phase === "graph_governance" || request.phase === "graph_structure_plan") {
     const dependency = asRecord(artifacts.dependency_audit)
     const scenes = Array.isArray(dependency.sceneContinuity) ? dependency.sceneContinuity : []
     const sourceUnitIds = Array.isArray(input.sourceUnitIds) ? input.sourceUnitIds : []
@@ -464,8 +609,9 @@ function buildCrossPhaseChecklist(request: PhaseRequestEnvelope): string {
         : "- Every dependency-audit scene in this turn is a narrative scene and must bind at least one source unit index, even when that scene has no new graph mutation. Never return an empty sourceUnitIndexes array for one of these scenes.",
       "- For each sceneSpacetimeBinding, copy predecessorSceneIndexes exactly from dependency_audit. The first scene may therefore have an empty predecessorSceneIndexes array; never invent scene 0 or another current-turn index just to satisfy predecessorRequired.",
       "- When predecessorRequired is true but predecessorSceneIndexes is empty, the predecessor is outside this turn. Bind it through predecessorSceneAnchorRefs using the exact existing graph-owner aliases mapped from the dependency evidence, and provide the actual transitionPathRefs that connect the prior state to this scene.",
-      "- dependency_audit predecessorSceneRefs are evidence aliases, not graph-owner fields. Convert them through the supplied read-evidence-to-graph-owner alias map before placing them in predecessorSceneAnchorRefs or transitionPathRefs; do not copy raw evidence IDs or invent graph IDs.",
-      "- historicalReturnRefs are graph paths only: use node-*, link-*, or local:*; never use read-*. Raw chapter/source return is already preserved by settlementRecords.",
+      "- dependency_audit predecessorSceneRefs are evidence references, not graph-owner fields. Convert them through the supplied evidence-to-graph-owner map before placing them in predecessorSceneAnchorRefs or transitionPathRefs; do not copy evidence IDs or invent graph IDs.",
+      "- historicalReturnRefs are graph paths only: use node_*/link_* permanent IDs, legacy node-*/link-* aliases, or local:*; never use evidence_*/read-*. Raw chapter/source return is already preserved by settlementRecords.",
+      "- edit_node.next must contain the complete latest current projection after applying this turn: preserve stable identity, descriptions, and retrieval information that remain true. Do not return only the changed fragment; revision history already preserves the previous projection.",
     ].join("\n")
   }
   if (request.phase === "frontier_settlement") {
@@ -478,9 +624,25 @@ function buildCrossPhaseChecklist(request: PhaseRequestEnvelope): string {
       "- A frontier is an independently resumable and discoverable local continuation boundary. It is not a mutation index and not a list of every node or link touched by graph governance; multiple mutations may belong to one frontier.",
       "- Do not manufacture one frontier per mutation or copy the same spacetime anchors into many frontier records. If the approved list is empty, return an empty frontiers array.",
       "- For every non-archived approved frontier, return that frontier's own last scene, time, and location anchors plus a non-empty revisitCondition. Use graph or local references already established in this request; do not invent technical IDs.",
+      "- Choose scene, time, and location anchors only from the corresponding anchors already approved in graph_governance sceneSpacetimeBindings. Do not promote another readable object to an anchor in this final settlement phase.",
     ].join("\n")
   }
   return "- Preserve every exact cross-phase checklist item supplied in the model-facing request."
+}
+
+function formatVerificationProbeExecution(execution: Record<string, unknown>): string {
+  return [
+    `- Executed probe record: probeIndex=${String(execution.probeIndex)}`,
+    `status=${String(execution.status)}`,
+    `returnedReadRefs=${formatReferenceList(execution.returnedReadRefs)}`,
+    `returnedGraphRefs=${formatReferenceList(execution.returnedGraphRefs)}`,
+    `returnedProposalRefs=${formatReferenceList(execution.returnedProposalRefs)}`,
+    `resultDigest=${String(execution.resultDigest)}`,
+  ].join("; ")
+}
+
+function formatReferenceList(value: unknown): string {
+  return `[${Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").join(",") : ""}]`
 }
 
 function indexList(length: number): string {
@@ -628,6 +790,103 @@ function readUsage(value: unknown): {
     ...(cacheHit === undefined ? {} : { cacheHitInputTokens: cacheHit }),
     ...(cacheMiss === undefined ? {} : { cacheMissInputTokens: cacheMiss }),
   }
+}
+
+function createPromptSnapshot(phase: string, messages: readonly DeepSeekMessage[]): PromptSnapshot {
+  return {
+    phase,
+    serialized: messages.map((message) => `${message.role}\n${message.content}`).join("\n\u0000\n"),
+    messageDigests: messages.map((message) => digestText(`${message.role}\n${message.content}`)),
+  }
+}
+
+function profileMessages(messages: readonly DeepSeekMessage[]): readonly Record<string, unknown>[] {
+  const sections = ["base_rules", "phase_prompt", "protocol", "turn_request"]
+  return messages.map((message, index) => ({
+    index,
+    section: sections[index] ?? `message_${String(index)}`,
+    role: message.role,
+    characters: message.content.length,
+    digest: digestText(`${message.role}\n${message.content}`),
+  }))
+}
+
+function profileModelRequestSections(value: unknown): Record<string, unknown> {
+  const request = asRecord(value)
+  const input = asRecord(request.input)
+  const {
+    readEvidence,
+    retrievalGaps,
+    workspaceCatalog,
+    artifacts,
+    projectSettings,
+    ...coreInput
+  } = input
+  const { input: ignoredInput, ...envelope } = request
+  void ignoredInput
+  return {
+    envelopeCharacters: serializedLength(envelope),
+    coreInputCharacters: serializedLength(coreInput),
+    projectSettingsCharacters: serializedLength(projectSettings),
+    workspaceCatalogCharacters: serializedLength(workspaceCatalog),
+    readEvidenceCharacters: serializedLength(readEvidence),
+    readEvidenceCount: Array.isArray(readEvidence) ? readEvidence.length : 0,
+    retrievalGapCharacters: serializedLength(retrievalGaps),
+    retrievalGapCount: Array.isArray(retrievalGaps) ? retrievalGaps.length : 0,
+    artifactCharacters: serializedLength(artifacts),
+    artifactCount: typeof artifacts === "object" && artifacts !== null && !Array.isArray(artifacts)
+      ? Object.keys(artifacts).length
+      : 0,
+  }
+}
+
+function comparePromptSnapshots(
+  previous: PromptSnapshot | undefined,
+  current: PromptSnapshot,
+): Record<string, unknown> {
+  if (previous === undefined) {
+    return {
+      previousPhase: undefined,
+      commonPrefixCharacters: 0,
+      commonPrefixRatio: 0,
+      exactMessagePrefixCount: 0,
+    }
+  }
+  const commonPrefixCharacters = countCommonPrefixCharacters(previous.serialized, current.serialized)
+  let exactMessagePrefixCount = 0
+  while (exactMessagePrefixCount < previous.messageDigests.length
+    && exactMessagePrefixCount < current.messageDigests.length
+    && previous.messageDigests[exactMessagePrefixCount] === current.messageDigests[exactMessagePrefixCount]) {
+    exactMessagePrefixCount += 1
+  }
+  return {
+    previousPhase: previous.phase,
+    previousPromptCharacters: previous.serialized.length,
+    commonPrefixCharacters,
+    commonPrefixRatio: current.serialized.length === 0 ? 0 : commonPrefixCharacters / current.serialized.length,
+    exactMessagePrefixCount,
+  }
+}
+
+function countCommonPrefixCharacters(left: string, right: string): number {
+  const limit = Math.min(left.length, right.length)
+  let index = 0
+  while (index < limit && left.charCodeAt(index) === right.charCodeAt(index)) index += 1
+  return index
+}
+
+function serializedLength(value: unknown): number {
+  if (value === undefined) return 0
+  return JSON.stringify(value).length
+}
+
+function digestText(value: string): string {
+  return createHash("sha256").update(value).digest("hex")
+}
+
+function ratio(numerator: number | undefined, denominator: number): number | undefined {
+  if (numerator === undefined || denominator === 0) return undefined
+  return numerator / denominator
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

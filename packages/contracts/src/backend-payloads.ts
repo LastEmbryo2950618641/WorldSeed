@@ -3,6 +3,8 @@ import { z } from "zod"
 import { projectSettingsSchema } from "./project-settings.js"
 
 import { idSchema } from "./ids.js"
+import { graphObjectIdSchema } from "./persistent-id.js"
+import { resettableRuntimeMetricIdSchema } from "./runtime-metrics.js"
 
 export const deepSeekReasoningEffortSchema = z.enum(["low", "high", "max"])
 
@@ -10,6 +12,7 @@ export const modelSelectionSchema = z.object({
   baseUrl: z.url(),
   model: z.string().trim().min(1).max(200),
   credentialRef: z.string().trim().min(1).max(300),
+  contextWindowTokens: z.number().int().positive().max(2_000_000).default(1_000_000),
   apiKey: z.string().trim().min(1).max(4096).optional(),
   thinkingModeEnabled: z.boolean().default(true),
   reasoningEffort: deepSeekReasoningEffortSchema.default("high"),
@@ -56,6 +59,7 @@ export const turnStartPayloadSchema = z.object({
   ).optional(),
   model: modelSelectionSchema.optional(),
   maxModelCalls: z.number().int().positive().optional(),
+  allowWorkspaceChapterReads: z.boolean().default(true),
 })
 export type TurnStartPayload = z.infer<typeof turnStartPayloadSchema>
 
@@ -82,14 +86,48 @@ export const taskPayloadSchema = z.object({
 })
 export type TaskPayload = z.infer<typeof taskPayloadSchema>
 
+export const resettableMetricSchema = resettableRuntimeMetricIdSchema
+export type ResettableMetric = z.infer<typeof resettableRuntimeMetricIdSchema>
+
+export const turnMetricsResetPayloadSchema = taskPayloadSchema.extend({
+  metricIds: z.array(resettableRuntimeMetricIdSchema).min(1).max(4).refine(
+    (metricIds) => new Set(metricIds).size === metricIds.length,
+    { message: "Runtime metric IDs must be unique" },
+  ),
+})
+export type TurnMetricsResetPayload = z.infer<typeof turnMetricsResetPayloadSchema>
+
 export const turnResumePayloadSchema = taskPayloadSchema.extend({
   mode: z.enum(["continue", "retry_phase"]).default("continue"),
+  resetMetricIds: z.array(resettableMetricSchema).default([]),
   model: turnStartPayloadSchema.shape.model,
   maxModelCalls: z.number().int().positive().optional(),
   deadlineMs: z.number().int().positive().optional(),
   maxRetrievalRounds: z.number().int().positive().optional(),
 })
 export type TurnResumePayload = z.infer<typeof turnResumePayloadSchema>
+
+const historyOperationSchema = projectSettingsReadPayloadSchema.extend({
+  operationId: idSchema,
+})
+
+export const historyListPayloadSchema = projectSettingsReadPayloadSchema
+export const historyBranchesPayloadSchema = projectSettingsReadPayloadSchema
+export const historySaveManualPayloadSchema = historyOperationSchema.extend({
+  name: z.string().trim().min(1).max(200),
+  note: z.string().max(4_000).optional(),
+})
+export const historyEntryOperationPayloadSchema = historyOperationSchema.extend({
+  entryId: idSchema,
+})
+export const historyReturnPreviousRoundPayloadSchema = historyOperationSchema
+export const historyRetentionPreviewPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  retentionLimit: z.number().int().positive().max(100_000).nullable(),
+})
+export type HistorySaveManualPayload = z.infer<typeof historySaveManualPayloadSchema>
+export type HistoryEntryOperationPayload = z.infer<typeof historyEntryOperationPayloadSchema>
+export type HistoryReturnPreviousRoundPayload = z.infer<typeof historyReturnPreviousRoundPayloadSchema>
+export type HistoryRetentionPreviewPayload = z.infer<typeof historyRetentionPreviewPayloadSchema>
 
 export const workspaceReadPayloadSchema = z.object({
   projectId: idSchema,
@@ -132,6 +170,7 @@ export const modelProfileSchema = z.object({
   baseUrl: z.url(),
   model: z.string().trim().min(1).max(200),
   credentialRef: z.string().trim().min(1).max(300),
+  contextWindowTokens: z.number().int().positive().max(2_000_000).default(1_000_000),
   thinkingModeEnabled: z.boolean().default(true),
   reasoningEffort: deepSeekReasoningEffortSchema.default("high"),
   jsonModeEnabled: z.boolean().default(false),
@@ -174,7 +213,7 @@ export const GRAPH_NEIGHBORHOOD_MAX_REQUEST_ANCHORS = 4_000
 export const graphNeighborhoodPayloadSchema = z.object({
   projectId: idSchema,
   workspaceRootRef: z.string().min(1),
-  anchorIds: z.array(idSchema).min(1).max(GRAPH_NEIGHBORHOOD_MAX_REQUEST_ANCHORS),
+  anchorIds: z.array(graphObjectIdSchema).min(1).max(GRAPH_NEIGHBORHOOD_MAX_REQUEST_ANCHORS),
   anchorOffset: z.number().int().nonnegative().default(0),
   direction: z.enum(["out", "in", "both"]).default("both"),
   maxDepth: z.number().int().min(1).max(8).default(2),
@@ -202,6 +241,14 @@ export const backendPayloadSchemas = {
   "turn.pause": taskPayloadSchema,
   "turn.cancel": taskPayloadSchema,
   "turn.status": taskPayloadSchema,
+  "turn.metrics.reset": turnMetricsResetPayloadSchema,
   "world.query": worldQueryPayloadSchema,
   "world.evolve": worldEvolvePayloadSchema,
+  "history.list": historyListPayloadSchema,
+  "history.branches": historyBranchesPayloadSchema,
+  "history.saveManual": historySaveManualPayloadSchema,
+  "history.returnPreviousRound": historyReturnPreviousRoundPayloadSchema,
+  "history.continueFrom": historyEntryOperationPayloadSchema,
+  "history.restore": historyEntryOperationPayloadSchema,
+  "history.retention.preview": historyRetentionPreviewPayloadSchema,
 } as const

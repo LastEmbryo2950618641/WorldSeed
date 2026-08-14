@@ -1,8 +1,8 @@
 # Worldseed
 
-Worldseed 是一个由 AI 完全自治治理的动态世界图实验项目。
+Worldseed 是一个以 AI 自治动态图为目标的实验项目。目标设计、当前代码和已经验收的能力必须分开判断；权威状态见 [设计与实施状态](docs/implementation-status.md)。
 
-核心思想：
+核心目标：
 
 - 万事万物都是节点；
 - 代码不预设人物、地点、势力、时间、状态或边类型；
@@ -30,7 +30,7 @@ Worldseed 是一个由 AI 完全自治治理的动态世界图实验项目。
 - 每次正式推演由 AI生成连续章节序号和章节名，以 `第一章 xxxx.md` 保存到固定的 `章节正文` 目录，标题同时属于正文并参与图结算。
 - 第一阶段使用 DeepSeek API 作为统一模型基线，采用 JSON Mode，不把运行时绑定到 Claude Code 或某一种 Tool Calling 格式。
 
-完整底层设计见 [docs/system-design.md](docs/system-design.md)，项目技术栈、Monorepo 和 Electron 进程边界见 [docs/project-code-architecture.md](docs/project-code-architecture.md)，后端模块、端口、存储和执行管线见 [docs/backend-architecture.md](docs/backend-architecture.md)，后端复用、隔离和依赖约束见 [docs/backend-coding-principles.md](docs/backend-coding-principles.md)，单轮上下文、选择性读取和 KV 缓存复用见 [docs/context-and-kv-cache.md](docs/context-and-kv-cache.md)，AI 阶段输入输出与回流契约见 [docs/ai-phase-contracts.md](docs/ai-phase-contracts.md)，世界内容何时复用、扩展、揭示、创建、延后或拒绝见 [docs/world-emergence-rules.md](docs/world-emergence-rules.md)，规则与资料层级见 [docs/rule-and-source-layers.md](docs/rule-and-source-layers.md)，IDE 工作台见 [docs/ui-design.md](docs/ui-design.md)。
+当前设计、实现、原型和验收状态首先查看 [docs/implementation-status.md](docs/implementation-status.md)。完整底层设计见 [docs/system-design.md](docs/system-design.md)，项目技术栈、Monorepo 和 Electron 进程边界见 [docs/project-code-architecture.md](docs/project-code-architecture.md)，后端模块、端口、存储和执行管线见 [docs/backend-architecture.md](docs/backend-architecture.md)，后端复用、隔离和依赖约束见 [docs/backend-coding-principles.md](docs/backend-coding-principles.md)，单轮上下文、选择性读取和 KV 缓存复用见 [docs/context-and-kv-cache.md](docs/context-and-kv-cache.md)，AI 阶段输入输出与回流契约见 [docs/ai-phase-contracts.md](docs/ai-phase-contracts.md)，世界内容何时复用、扩展、揭示、创建、延后或拒绝见 [docs/world-emergence-rules.md](docs/world-emergence-rules.md)，规则与资料层级见 [docs/rule-and-source-layers.md](docs/rule-and-source-layers.md)，IDE 工作台见 [docs/ui-design.md](docs/ui-design.md)。
 
 编码前冻结基线见 [docs/v1-freeze.md](docs/v1-freeze.md)，其中集中定义 V1 最小闭环、接口契约、SQLite 迁移、DeepSeek 代理与缓存配置、默认参数以及基础 Prompt 资源。
 

@@ -5,6 +5,9 @@ import {
   emergencePlanningArtifactSchema,
   frontierSettlementArtifactSchema,
   graphGovernanceArtifactSchema,
+  graphRetrievalDesignArtifactSchema,
+  graphSpacetimeSettlementArtifactSchema,
+  graphStructurePlanArtifactSchema,
   ruleAssemblyArtifactSchema,
   semanticReviewArtifactSchema,
   type GraphGovernanceArtifact,
@@ -48,19 +51,72 @@ export function assertPhaseReferenceContract(
     return
   }
 
-  if (phase === "semantic_review") {
-    const review = semanticReviewArtifactSchema.parse(artifact)
-    assertReadableGraphReferences(
-      review.verificationProbes.flatMap((probe) => probe.observedGraphRefs),
-      new Set([
-        ...visibility.readableGraphIds,
-        ...(visibility.declaredLocalGraphRefs ?? []),
+  if (phase === "graph_structure_plan") {
+    const structure = graphStructurePlanArtifactSchema.parse(artifact)
+    assertGraphGovernanceReferenceContract({
+      mutations: structure.proposals.map((proposal) => proposal.mutation),
+      retrievalProjections: [],
+      settlementRecords: [],
+      mutationSpacetimeSettlements: [],
+      sceneSpacetimeBindings: [],
+      affectedFrontierRefs: structure.affectedFrontierRefs,
+      archiveOutletRefs: structure.archiveOutletRefs,
+      decisionRecords: [],
+    }, visibility.readableGraphIds, visibility.readableEvidenceIds)
+    return
+  }
+
+  if (phase === "graph_spacetime_settlement") {
+    const settlement = graphSpacetimeSettlementArtifactSchema.parse(artifact)
+    const readableGraphIds = new Set([
+      ...visibility.readableGraphIds,
+      ...(visibility.declaredLocalGraphRefs ?? []),
+    ])
+    assertReadableGraphReferences([
+      ...settlement.sceneSpacetimeBindings.flatMap((binding) => [
+        binding.sceneAnchorRef,
+        ...binding.temporalReferenceRefs,
+        ...binding.timeAnchorRefs,
+        ...binding.spatialReferenceRefs,
+        ...binding.locationAnchorRefs,
+        ...binding.predecessorSceneAnchorRefs,
+        ...binding.transitionPathRefs,
+        ...binding.correspondenceRefs,
       ]),
-    )
+      ...settlement.proposalSettlements.flatMap((entry) => [
+        ...entry.effectiveExistingSceneAnchorRefs,
+        ...entry.currentEntryRefs,
+        ...entry.historicalReturnRefs,
+      ]),
+    ], readableGraphIds)
     assertReadableEvidenceReferences(
-      review.verificationProbes.flatMap((probe) => probe.observedReadRefs),
+      settlement.proposalSettlements.flatMap((entry) => entry.predecessorRevisionReadRefs),
       visibility.readableEvidenceIds,
     )
+    return
+  }
+
+  if (phase === "graph_retrieval_design") {
+    const retrieval = graphRetrievalDesignArtifactSchema.parse(artifact)
+    const readableGraphIds = new Set([
+      ...visibility.readableGraphIds,
+      ...(visibility.declaredLocalGraphRefs ?? []),
+    ])
+    const references = [
+      ...retrieval.projections.flatMap((projection) => projection.ownerRef === undefined ? [] : [projection.ownerRef]),
+      ...retrieval.sourceSettlements.flatMap((settlement) => (
+        settlement.graphRefs.map((reference) => reference.targetRef)
+      )),
+    ]
+    const invalidReferences = references.filter((reference) => !readableGraphIds.has(reference))
+    if (invalidReferences.length > 0) {
+      throw new Error(`Graph retrieval references must be readable graph owners or declared local handles: ${[...new Set(invalidReferences)].join(", ")}`)
+    }
+    return
+  }
+
+  if (phase === "semantic_review") {
+    semanticReviewArtifactSchema.parse(artifact)
     return
   }
 
@@ -115,18 +171,74 @@ export function assertSpacetimeGovernanceCoverage(
 ): void {
   const dependency = dependencyAuditArtifactSchema.parse(dependencyInput)
   const governance = graphGovernanceArtifactSchema.parse(governanceInput)
+  assertSceneSpacetimeCoverage(dependency, governance.sceneSpacetimeBindings, sourceUnitCount)
+
+  if (sourceUnitCount > 0) {
+    assertExactIndexSet(
+      governance.settlementRecords.map((record) => record.sourceUnitIndex),
+      sourceUnitCount,
+      "Source unit settlement records",
+    )
+    const emptySettlements = governance.settlementRecords
+      .filter((record) => record.graphRefs.length === 0)
+      .map((record) => record.sourceUnitIndex)
+    if (emptySettlements.length > 0) {
+      throw new Error(`Source unit settlement records require a graph return path: ${emptySettlements.join(", ")}`)
+    }
+  }
+
+  const coveredMutationIndexes = governance.mutationSpacetimeSettlements.flatMap((settlement) => settlement.mutationIndexes)
+  assertExactIndexSet(coveredMutationIndexes, governance.mutations.length, "Mutation spacetime settlements")
+  for (const settlement of governance.mutationSpacetimeSettlements) {
+    assertIndexesInRange(settlement.effectiveSceneBindingIndexes, governance.sceneSpacetimeBindings.length, "Effective scene binding")
+  }
+  for (const decision of governance.decisionRecords) {
+    assertIndexesInRange(decision.mutationIndexes, governance.mutations.length, "Decision mutation")
+    assertIndexesInRange(
+      decision.mutationSpacetimeSettlementIndexes,
+      governance.mutationSpacetimeSettlements.length,
+      "Decision mutation spacetime settlement",
+    )
+  }
+}
+
+export function assertGraphSpacetimeSettlementCoverage(
+  dependencyInput: unknown,
+  structureInput: unknown,
+  settlementInput: unknown,
+  sourceUnitCount: number,
+): void {
+  const dependency = dependencyAuditArtifactSchema.parse(dependencyInput)
+  const structure = graphStructurePlanArtifactSchema.parse(structureInput)
+  const settlement = graphSpacetimeSettlementArtifactSchema.parse(settlementInput)
+  assertSceneSpacetimeCoverage(dependency, settlement.sceneSpacetimeBindings, sourceUnitCount)
+  assertExactReferenceSet(
+    settlement.proposalSettlements.flatMap((entry) => entry.proposalRefs),
+    structure.proposals.map((proposal) => proposal.proposalRef),
+    "Proposal spacetime settlements",
+  )
+  for (const entry of settlement.proposalSettlements) {
+    assertIndexesInRange(entry.effectiveSceneBindingIndexes, settlement.sceneSpacetimeBindings.length, "Effective scene binding")
+  }
+}
+
+function assertSceneSpacetimeCoverage(
+  dependency: ReturnType<typeof dependencyAuditArtifactSchema.parse>,
+  bindings: ReturnType<typeof graphSpacetimeSettlementArtifactSchema.parse>["sceneSpacetimeBindings"],
+  sourceUnitCount: number,
+): void {
   assertExactIndexSet(
     dependency.sceneContinuity.map((scene) => scene.sceneIndex),
     dependency.sceneContinuity.length,
     "Dependency audit scene inventory",
   )
   assertExactIndexSet(
-    governance.sceneSpacetimeBindings.map((binding) => binding.sceneIndex),
+    bindings.map((binding) => binding.sceneIndex),
     dependency.sceneContinuity.length,
     "Scene spacetime bindings",
   )
 
-  for (const binding of governance.sceneSpacetimeBindings) {
+  for (const binding of bindings) {
     const scene = dependency.sceneContinuity[binding.sceneIndex]
     if (scene === undefined) throw new Error(`Scene binding index is outside the dependency inventory: ${String(binding.sceneIndex)}`)
     assertSameSet(binding.predecessorSceneIndexes, scene.predecessorSceneIndexes, `Scene ${String(binding.sceneIndex)} predecessor indexes`)
@@ -151,28 +263,9 @@ export function assertSpacetimeGovernanceCoverage(
 
   if (sourceUnitCount > 0) {
     assertExactIndexSet(
-      governance.settlementRecords.map((record) => record.sourceUnitIndex),
-      sourceUnitCount,
-      "Source unit settlement records",
-    )
-    assertExactIndexSet(
-      governance.sceneSpacetimeBindings.flatMap((binding) => binding.sourceUnitIndexes),
+      bindings.flatMap((binding) => binding.sourceUnitIndexes),
       sourceUnitCount,
       "Scene source coverage",
-    )
-  }
-
-  const coveredMutationIndexes = governance.mutationSpacetimeSettlements.flatMap((settlement) => settlement.mutationIndexes)
-  assertExactIndexSet(coveredMutationIndexes, governance.mutations.length, "Mutation spacetime settlements")
-  for (const settlement of governance.mutationSpacetimeSettlements) {
-    assertIndexesInRange(settlement.effectiveSceneBindingIndexes, governance.sceneSpacetimeBindings.length, "Effective scene binding")
-  }
-  for (const decision of governance.decisionRecords) {
-    assertIndexesInRange(decision.mutationIndexes, governance.mutations.length, "Decision mutation")
-    assertIndexesInRange(
-      decision.mutationSpacetimeSettlementIndexes,
-      governance.mutationSpacetimeSettlements.length,
-      "Decision mutation spacetime settlement",
     )
   }
 }
@@ -212,6 +305,7 @@ export function assertSemanticReviewCoversGovernance(
 export function assertFrontierSettlementCoversReview(
   reviewInput: unknown,
   settlementInput: unknown,
+  governanceInput?: unknown,
 ): void {
   const review = semanticReviewArtifactSchema.parse(reviewInput)
   const settlement = frontierSettlementArtifactSchema.parse(settlementInput)
@@ -220,6 +314,26 @@ export function assertFrontierSettlementCoversReview(
     review.approvedAffectedFrontierRefs,
     "frontier settlement",
   )
+  if (governanceInput === undefined) return
+  const governance = graphGovernanceArtifactSchema.parse(governanceInput)
+  const approvedSceneBindings = review.approvedSpacetimeBindingIndexes.map((index) => governance.sceneSpacetimeBindings[index])
+  const allowedSceneAnchors = new Set(approvedSceneBindings.map((binding) => binding?.sceneAnchorRef).filter(isString))
+  const allowedTimeAnchors = new Set(approvedSceneBindings.flatMap((binding) => binding?.timeAnchorRefs ?? []))
+  const allowedLocationAnchors = new Set(approvedSceneBindings.flatMap((binding) => binding?.locationAnchorRefs ?? []))
+  for (const frontier of settlement.frontiers) {
+    assertReferencesBelongTo(frontier.lastSceneAnchorRefs, allowedSceneAnchors, "Frontier scene anchors must come from approved spacetime bindings")
+    assertReferencesBelongTo(frontier.lastTimeAnchorRefs, allowedTimeAnchors, "Frontier time anchors must come from approved spacetime bindings")
+    assertReferencesBelongTo(frontier.lastLocationAnchorRefs, allowedLocationAnchors, "Frontier location anchors must come from approved spacetime bindings")
+  }
+}
+
+function assertReferencesBelongTo(references: readonly string[], allowed: ReadonlySet<string>, message: string): void {
+  const invalid = references.filter((reference) => !allowed.has(reference))
+  if (invalid.length > 0) throw new Error(`${message}: ${[...new Set(invalid)].join(", ")}`)
+}
+
+function isString(value: string | undefined): value is string {
+  return value !== undefined
 }
 
 function assertExactReferenceSet(actual: readonly string[], expected: readonly string[], label: string): void {

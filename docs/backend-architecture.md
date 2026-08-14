@@ -176,6 +176,26 @@ type ArtifactScope = {
 
 普通查询只能读取 `committed`。恢复任务时必须显式提供 `taskId + scopeId`，后端才返回该作用域的 pending 内容。
 
+### 6.1 项目级永久 ID
+
+项目内已有持久化对象在应用层、数据库和模型协议中使用同一个紧凑永久 ID。永久 ID 由代码维护的按前缀独立计数器生成，例如：
+
+```text
+node     -> 102
+source   -> 121
+link     -> 23
+evidence -> 86
+revision -> 147
+```
+
+调用 `next("node")` 得到 `node_103`，调用 `next("source")` 得到 `source_122`；所有前缀分别递增，不共享统一数值序列。`ProjectIdAllocatorPort` 位于应用端口，SQLite 实现使用 `id_counters(prefix, current_value)` 在事务中原子递增。
+
+前缀只能来自代码维护的基础设施允许列表，AI 不得创建前缀或决定编号。计数器属于项目基础设施而不是世界状态：所有任务和世界线共享，历史恢复、返回上一轮、分叉、删除、归档和失败回滚都不能降低计数。已分配编号永不复用，允许出现空洞。
+
+导入或重建项目时，如果缺少计数器记录，基础设施必须扫描仍可达的永久 ID，并把各前缀计数初始化到不小于对应最大后缀；不能从 `1` 重新开始。编号仅表示技术身份，不表示世界时间、剧情顺序、重要程度或修订新旧。
+
+AI 在单个 `graph_governance` 结果中创建新对象时仍可使用 `local:*` 表达新对象间的相互引用。该结果通过结构校验后，应用层为每个局部引用调用对应前缀计数器并一次性物化；`local:*` 映射不跨治理事务持久化为第二套身份。
+
 ## 7. 通用图模块
 
 ### 7.1 存储模型
@@ -350,11 +370,15 @@ interface RetrievalIndex {
 
 对图节点和连接，候选排序还必须结合 `node_heads`/`link_heads` 的当前头：同一所有者的当前修订投影先于历史修订进入候选集合，再按上限截断；历史修订仍然保留在结果集合中，以支持回溯过去状态、原始话语和旧事实。pending 作用域存在时，pending 头覆盖 committed 头；pending 头归档后不得继续作为当前候选。
 
+每条 committed 当前图投影还必须携带其来源作用域的 `committedSequence`，并把该机械提交序号贯通到模型可见 Evidence。它用于比较不同所有者的当前头来自哪个更晚的已提交世界状态，不能替代故事内时间锚点，也不能由代码据此推断领域语义。候选均为当前头时，较新的提交序号优先展示；最终是否构成覆盖仍由 AI 根据语义、时空锚点和演化关系判断。pending 投影尚未获得提交序号，仍由 pending 可见性优先级处理。
+
 `anchorIds` 使用独立的 owner 解析端口，直接从当前 node/link head 取得对应投影，不得复用 `searchExact()`。精确键和语义搜索返回候选后，应用按 owner 执行当前状态闭包：历史图投影只有在同一可见作用域的当前头投影可以同时返回时才进入最终候选。运行时 Evidence 明确携带 `current` 或 `historical` 角色；该角色由 head 表机械导出，不写回世界语义载荷。
 
 候选裁剪以 owner 证据组为单位。当前头优先，历史投影随后；若剩余候选或 token 容量不足以容纳当前头和历史投影，则不返回该历史投影。source、规则和参考文件不参与图 head 闭包，避免把原文单元或工作区文件错误解释为可变图状态。
 
 对内部 `source` 原文投影，语义命中的是进入连续原文的入口，不等于完整段落已经召回。仅当请求的 `sourceKinds` 只包含 `source` 时，应用层才以当前请求的首个高相关 source unit 为中心，按同一 `sourceId` 的相邻 `sequence` 机械展开有界窗口；混合 `graph`、`revision` 与 `source` 的请求只返回各自的直接候选，避免图入口检索的早期噪声耗尽累计原文证据预算。窗口半径由 `maxCandidates` 推导，最终内容仍同时服从候选上限和累计 `maxEvidenceTokens`。该机制只利用不可变来源身份和顺序，不识别人物、对白、地点、章节类型或其他世界语义，也不读取用户工作区中的章节文件。
+
+每个模型可见的内部 `source` 投影同时携带机械生成的 `sourcePosition`：来源引用、当前序号、首末序号、单元总数以及 `isStart`/`isEnd`。模型需要来源首端或末端时，可用已读 `sourcePosition.sourceRef` 通过 `sourceIds` 与 `sourceBoundary=start|end` 请求有界边界窗口。仓储按同一来源的分块序号计算并返回，代码不解释该段剧情的时间、地点、状态或因果；AI仍须结合图中当前状态和故事时空判断如何继续。该能力解决“语义命中开篇却误当作章节结尾”的问题，但不把来源顺序误作世界时间。
 
 证据账本必须保留检索投影的真实来源身份：内部原文 `source` 投影记为 `chapter`，图投影记为 `graph`，修订投影记为 `revision`。模型侧仍通过 `ownerKind` 判断具体投影所有者；账本来源不得把逐字原文伪装成图摘要。
 
@@ -454,7 +478,7 @@ interface PromptRegistry {
 
 ### 11.3 结构验证
 
-所有阶段共用 `packages/prompt-contracts` 中唯一的语义 artifact schema。应用层内部使用完整的阶段 envelope，但模型适配器发送的是去除项目、任务、作用域、阶段运行、内部来源和检索请求等技术字段后的模型引用视图：真实 UUID只能被临时 `read-*`、`node-*`、`link-*`别名替代。返回结果先通过模型别名 Schema，再恢复真实引用并进入统一内部 Schema 和阶段校验。模型不接触持久化技术 ID，也不维护第二套 artifact。共享契约校验器只要求已有图引用来自本轮已读 owner、工作区选择来自本轮已读文件、`graph_governance` 中的所有 `local:*` 都在当前治理 artifact 明确声明；规划、草稿和审查阶段不得提前发明局部句柄。该校验器不比较规划与治理的数量，也不根据语义动作强制 AI采用某种图操作。应用层负责一次性将 `graph_governance` 的 `local:*` 映射为 UUID，将数组索引解析到本轮 source unit 或 mutation，并为章节、修订、投影、结算、时空绑定和决定记录生成技术 ID；content、metadata 与时空绑定中精确匹配局部句柄的引用值也使用同一映射递归物化。详见 [模型协议边界设计](model-protocol-boundary.md)。
+所有阶段共用 `packages/prompt-contracts` 中唯一的语义 artifact schema。已有持久化对象在模型协议与数据库中统一使用项目级永久 ID，例如 `node_103`、`link_24`、`evidence_87`；不再为每次请求建立临时 `read-*`、`node-*`、`link-*`别名，也不维护永久 ID 到 UUID 的长期映射。共享契约校验器只要求永久 ID 已出现在当前模型可见输入、工作区选择来自实际读取文件、`graph_governance` 中的所有 `local:*` 都在当前治理 artifact 明确声明；规划、草稿和审查阶段不得提前发明局部句柄。应用层只把本次治理新对象的 `local:*` 按技术类别一次性物化为永久 ID，并生成章节、修订、投影、结算、时空绑定和决定记录。项目为每个前缀维护独立原子计数器；计数器跨任务和世界线共享，历史恢复不能回退。详见 [模型协议边界设计](model-protocol-boundary.md)。
 
 后端只验证：
 
@@ -468,7 +492,7 @@ interface PromptRegistry {
 - 图治理声明的每个受影响前沿是否恰好结算一次，活跃或推迟前沿是否分别具有最后场景、时间、地点锚点和重访条件；
 - 系统处理时间是否与世界时空引用严格分离。
 
-已有图引用必须出现在本轮实际读取的 node/link 证据中；模型发明的 UUID 或未读取引用直接拒绝。`predecessorRevisionRefs` 中的已读别名解析到该次证据冻结的具体修订，而不是提交时再追随最新 head。该校验只证明引用可见，不判断其世界语义是否合理。
+已有图引用必须使用当前模型可见输入中出现过的 `node_*` 或 `link_*` 永久 ID；模型发明的永久 ID 或未读取引用直接拒绝。`predecessorRevisionRefs` 通过已读 Evidence 冻结的 owner、version 和 digest 解析具体修订，而不是提交时再追随最新 head。该校验只证明引用可见，不判断其世界语义是否合理。
 
 后端不验证 AI 的语义理由是否正确。
 
@@ -634,7 +658,36 @@ operation_events
 
 `scene_spacetime_bindings` 只保存 `scene_index`、`scene_anchor_id`、直接覆盖的原文单元索引、时间与空间参照引用、时间与地点锚点引用、本轮前置场景索引、已读旧场景引用、过渡路径引用、跨参照对应引用、来源、原因、自审、作用域和可见性。它不保存第二份时间、地图或场景事实；`(scope_id, scene_index)` 用于和审计场景清单执行机械全集比对。正式正文记录 `source_id` 和非空原文单元集合，无正文后台演化允许两者为空，但必须保留任务与作用域来源。
 
-`graph_revision_spacetime` 是批准后的 `MutationSpacetimeSettlement` 投影。应用层把临时 `mutationIndexes` 物化为图修订 ID，再保存其生效场景绑定、已读既有场景、当前入口、前置修订声明与具体 revision ID、历史返回引用。模型使用的 `predecessorRevisionReadRefs` 必须解析到读取证据冻结的具体修订，不能在提交时追随最新 head。该表不保存世界语义载荷，也不能脱离普通图独立回答世界问题。结构化验证探针保存在 `phase_runs.result_json`，由提交门禁按场景和修改结算全集检查，不复制成世界事实表。
+`graph_revision_spacetime` 是批准后的 `MutationSpacetimeSettlement` 投影。应用层把临时 `mutationIndexes` 物化为图修订 ID，再保存其生效场景绑定、已读既有场景、当前入口、前置修订声明与具体 revision ID、历史返回引用。模型使用的 `predecessorRevisionReadRefs` 必须解析到读取证据冻结的具体修订，不能在提交时追随最新 head。该表不保存世界语义载荷，也不能脱离普通图独立回答世界问题。
+
+验证探针不是世界事实，也不能只保存 AI 自报的结果。探针计划、应用执行结果和 AI 审查分别作为阶段运行记录持久化；任务检查点保存当前治理代次、未完成探针和执行游标。提交门禁按治理代次、探针数组索引、场景和修改结算全集检查三者是否闭合，不把探针复制成图节点或世界事实表。
+
+### 16.1.1 VerificationProbeExecutor
+
+`VerificationProbeExecutor` 是独立应用服务，位于 `semantic_review` 的计划调用与审查调用之间：
+
+```text
+SemanticReviewPlanner
+  -> VerificationProbeExecutor
+       -> RetrievalPort
+       -> GraphReadPort
+       -> SourceReadPort
+       -> ProbeRunStorePort
+  -> SemanticReviewAssessor
+```
+
+职责边界：
+
+- 接收 AI 提出的通用 `VerificationProbePlan`，不解释其中的世界语义；
+- 使用普通召回已经存在的 exact、semantic、neighborhood 和 source 能力执行查询；
+- 在治理尚未提交时，以当前治理 artifact 构造只读提案 overlay，支持本轮 `local:*`、修改和检索投影的有限查询；overlay 不写入 SQLite、不分配永久 ID；
+- 冻结真实返回的 read 引用、graph owner 引用、结果摘要、预算和错误类型；
+- 将提案 overlay 命中与持久化 Evidence、已提交图命中分开记录，不能把 `local:*` 当成旧图 Evidence；
+- 使用稳定 `operationId` 幂等恢复，只重跑未完成探针；
+- 不替 AI 生成 `verdict`，不根据关键词判断人物、势力、地点或任何领域类型；
+- 不允许模型提交的观察引用覆盖真实执行结果。
+
+探针完成后，编排器把 `ProbeExecutionResult[]` 作为不可变系统消息追加到当前阶段尾部，再调用 AI 作语义审查。AI 的 `pass`、`uncertain` 和 `fail` 都是审核建议，不改变正式提交门禁；只有探针执行本身因预算、外部错误或进程中断未完成时，任务才进入可恢复暂停。后续治理使用新的代次和探针记录，旧记录只保留审计。
 
 `frontier_refs` 为每个前沿分别保存 `last_scene_anchor_refs`、`last_time_anchor_refs`、`last_location_anchor_refs` 和 `correspondence_refs`。原 `last_effective_time` 不得继续表示世界时间，应拆为世界图引用和纯系统调度字段 `last_processed_at`。不同前沿没有已读对应结构时，调度器不能仅凭系统时间比较其世界进度。
 
@@ -796,6 +849,16 @@ type BackendEvent =
 日志不保存未脱敏的供应商密钥。正文和图载荷默认不写入普通运行日志，只记录 ID、摘要和明确开启的诊断片段。
 
 KV 缓存命中率使用 `cacheHitInputTokens / totalInputTokens` 计算；当供应商没有返回缓存 token 明细时显示“不可用”，不能推测为 `0%`。该指标只用于观察上下文前缀复用效果、成本和延迟，不参与 AI语义判断、读取依据或提交门禁。
+
+Debug 级性能剖析必须保持世界语义无关，并覆盖以下边界：
+
+- 模型请求按基础规则、阶段规则、协议和本轮请求四条消息记录字符数与摘要；本轮请求继续拆分为 envelope、核心输入、项目配置、目录、Evidence、检索缺口和 artifact；
+- 同一任务相邻模型请求记录严格公共前缀字符数、占当前请求比例及连续完全相同的消息数量，用于解释供应商 KV 缓存命中，而不把字符比例冒充 Token 缓存比例；
+- 供应商响应记录实际输入、输出、推理、缓存命中和缓存未命中 Token，以及模型等待耗时；
+- 检索请求记录锚点、精确键和语义表达数量，各来源候选数，过滤前后唯一候选数，最终候选顺序、来源、类型、状态角色和估算 Evidence Token；
+- 阶段读取记录本地检索耗时、新增 Evidence 分布和可见窗口分布，使模型等待、检索和编排开销可以分开计算。
+
+性能日志不得写入提示词正文、Evidence 内容或模型原始回答，只能保存计数、长度、摘要、技术 ID 和分类结果。
 
 ## 23. 测试架构
 

@@ -11,13 +11,25 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "verify:baseline": "pnpm test && pnpm typecheck && pnpm build",
+    "verify:electron": "node scripts/acceptance/electron-smoke.mjs",
+    "verify:audit": "node apps/backend/acceptance/audit-project.mjs",
+    "verify:recovery": "node apps/backend/acceptance/audit-recovery.mjs",
+    "verify:history": "node scripts/acceptance/history-roundtrip.mjs",
+    "verify:model-switch": "node scripts/acceptance/model-switch-run.mjs",
+    "verify:compression": "node scripts/acceptance/compression-roundtrip.mjs",
+    "verify:forgotten-continuation": "node scripts/acceptance/forgotten-context-continuation.mjs",
+    "verify:real-turn": "node scripts/acceptance/real-run.mjs --turns 1",
+    "verify:longrun": "node scripts/acceptance/full-chain-run.mjs --target-chapters 20",
+    "verify:all": "node scripts/acceptance/verify-all.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.1.2",
     "eslint": "^9.39.5",
+    "playwright-core": "^1.54.2",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.65.0",
     "vitest": "^4.1.10"

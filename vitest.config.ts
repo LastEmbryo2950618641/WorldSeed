@@ -5,7 +5,11 @@ export default defineConfig({
     coverage: {
       enabled: false,
     },
-    include: ["apps/**/test/**/*.test.ts", "packages/**/test/**/*.test.ts"],
+    include: [
+      "apps/**/test/**/*.test.ts",
+      "packages/**/test/**/*.test.ts",
+      "scripts/**/test/**/*.test.mjs",
+    ],
     passWithNoTests: false,
   },
 })

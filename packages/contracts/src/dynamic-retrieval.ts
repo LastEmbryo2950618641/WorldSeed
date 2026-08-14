@@ -1,6 +1,7 @@
 import { z } from "zod"
 
 import { idSchema } from "./ids.js"
+import { evidenceObjectIdSchema } from "./persistent-id.js"
 
 export const workspaceCatalogRoleValues = [
   "world_rules",
@@ -32,7 +33,7 @@ export type WorkspaceCatalogSnapshot = z.infer<typeof workspaceCatalogSnapshotSc
 export const evidenceSourceKindValues = ["workspace", "graph", "revision", "chapter"] as const
 
 export const evidenceSchema = z.object({
-  evidenceId: idSchema,
+  evidenceId: evidenceObjectIdSchema,
   projectId: idSchema,
   contextId: idSchema.optional(),
   sourceKind: z.enum(evidenceSourceKindValues),

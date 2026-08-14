@@ -13,6 +13,18 @@ export type RetrievalProjection = Readonly<{
   sourceRefs: readonly unknown[]
   digest: string
   stateRole?: "current" | "historical"
+  committedSequence?: number
+  sourcePosition?: SourcePosition
+}>
+
+export type SourcePosition = Readonly<{
+  sourceRef: string
+  sequence: number
+  firstSequence: number
+  lastSequence: number
+  unitCount: number
+  isStart: boolean
+  isEnd: boolean
 }>
 
 export type RetrievalSearchScope = Readonly<{
@@ -50,6 +62,12 @@ export interface RetrievalRepository {
     scope: RetrievalSearchScope,
     anchors: readonly SourceSequenceAnchor[],
     maxDistance: number,
+    limit: number,
+  ): Promise<readonly RetrievalProjection[]>
+  readSourceBoundary(
+    scope: RetrievalSearchScope,
+    sourceRefs: readonly string[],
+    boundary: "start" | "end",
     limit: number,
   ): Promise<readonly RetrievalProjection[]>
 }

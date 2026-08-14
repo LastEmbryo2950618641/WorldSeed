@@ -6,6 +6,7 @@ import {
   type AIPhase,
   type GraphMutation,
   type ModelCallBudget,
+  type PersistentIdPrefix,
   type PhaseRequestEnvelope,
   type PhaseResultEnvelope,
   type ProjectId,
@@ -17,6 +18,8 @@ import {
 import { defaultProjectSettings, defaultTurnExecutionProfile } from "@worldseed/config"
 import {
   assertGraphGovernanceReferenceContract,
+  assertGraphSpacetimeSettlementCoverage,
+  assertPhaseReferenceContract,
   assertSpacetimeGovernanceCoverage,
   assertSemanticReviewCoversGovernance,
   chapterNamingArtifactSchema,
@@ -24,7 +27,12 @@ import {
   emergencePlanningArtifactSchema,
   emergenceReviewArtifactSchema,
   frontierSettlementArtifactSchema,
+  graphCapacityRewriteArtifactSchema,
   graphGovernanceArtifactSchema,
+  graphGovernanceReviewArtifactSchema,
+  graphRetrievalDesignArtifactSchema,
+  graphSpacetimeSettlementArtifactSchema,
+  graphStructurePlanArtifactSchema,
   internalDraftArtifactSchema,
   parsePhaseArtifact,
   ruleAssemblyArtifactSchema,
@@ -38,6 +46,7 @@ import {
   assertCitationsWereRead,
   createTurnContext,
   digest,
+  inheritContextReads,
   recordContextRead,
   type GraphRevision,
 } from "../../core/index.js"
@@ -46,8 +55,11 @@ import type {
   DecisionRecord,
   DocumentRepository,
   GraphRepository,
+  GraphDegreeProfile,
+  CurrentGraphOwnerRevision,
   PhaseModelExecution,
   PromptResourcePort,
+  RetrievalProjection,
   RetrievalRepository,
   ScopeCommitRepository,
   GraphRevisionSpacetimeRecord,
@@ -56,11 +68,15 @@ import type {
   TaskScopeRepository,
   TurnPersistencePort,
   TurnPhaseInput,
+  TurnFinalizationRecord,
   TurnRetrievalGap,
   TurnReadEvidence,
+  VerificationProbeExecution,
+  VerificationProbeCheckpoint,
   RelatedOwnerRef,
 } from "./ports/index.js"
 import type { InternalProjectStore, InternalStorePort, WorkspacePort } from "../workspace/index.js"
+import type { ProjectIdAllocatorPort } from "../ids/index.js"
 import type {
   EvidenceStore,
   WorkspaceCatalogPort,
@@ -68,6 +84,14 @@ import type {
 } from "../retrieval/index.js"
 import { buildSourceUnitExactKeys } from "../retrieval/index.js"
 import { createRetrievalGaps } from "./retrieval-gap.js"
+import { VerificationProbeCoordinator, type ReadExecutionRecord } from "./verification-probe-coordinator.js"
+import { ContextWindowManager, estimateModelMessageTokens } from "../context/index.js"
+import {
+  assessGraphStructureCapacity,
+  findGraphCapacityViolations,
+  type GraphCapacityAssessment,
+} from "./graph-capacity-policy.js"
+import { applyGraphCapacityRewrite, assembleGraphGovernanceArtifact, replayGraphCapacityRewrites } from "./graph-governance-assembler.js"
 
 const turnModelPhases: readonly AIPhase[] = [
   "interpret",
@@ -77,8 +101,11 @@ const turnModelPhases: readonly AIPhase[] = [
   "draft",
   "chapter_naming",
   "dependency_audit",
-  "graph_governance",
-  "semantic_review",
+  "graph_structure_plan",
+  "graph_capacity_rewrite",
+  "graph_spacetime_settlement",
+  "graph_retrieval_design",
+  "graph_governance_review",
   "settlement_review",
   "frontier_settlement",
   "commit_review",
@@ -105,8 +132,11 @@ const evolutionExecutionPhases: readonly AIPhase[] = [
   "emergence_planning",
   "emergence_review",
   "dependency_audit",
-  "graph_governance",
-  "semantic_review",
+  "graph_structure_plan",
+  "graph_capacity_rewrite",
+  "graph_spacetime_settlement",
+  "graph_retrieval_design",
+  "graph_governance_review",
   "settlement_review",
   "frontier_settlement",
   "commit_review",
@@ -123,27 +153,15 @@ const phaseArtifactDependencies = {
   dependency_audit: ["source_retrieval", "emergence_planning", "emergence_review", "draft"],
   response_review: ["source_retrieval", "draft", "dependency_audit"],
   graph_governance: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "dependency_audit"],
+  graph_structure_plan: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "dependency_audit"],
+  graph_capacity_rewrite: ["graph_structure_plan"],
+  graph_spacetime_settlement: ["dependency_audit", "graph_structure_plan"],
+  graph_retrieval_design: ["graph_structure_plan", "graph_spacetime_settlement"],
+  graph_governance_review: ["dependency_audit", "graph_structure_plan", "graph_spacetime_settlement", "graph_retrieval_design", "graph_governance"],
   semantic_review: ["draft", "dependency_audit", "graph_governance"],
   settlement_review: ["dependency_audit", "graph_governance", "semantic_review"],
   frontier_settlement: ["graph_governance", "semantic_review", "settlement_review"],
   commit_review: ["draft", "dependency_audit", "graph_governance", "semantic_review", "settlement_review", "frontier_settlement"],
-  context_compaction: [
-    "interpret",
-    "rule_assembly",
-    "source_retrieval",
-    "emergence_planning",
-    "emergence_review",
-    "draft",
-    "chapter_naming",
-    "dependency_audit",
-    "response_review",
-    "graph_governance",
-    "semantic_review",
-    "settlement_review",
-    "frontier_settlement",
-    "commit_review",
-  ],
-  context_compaction_review: ["context_compaction"],
 } as const satisfies Record<AIPhase, readonly AIPhase[]>
 
 const workspaceCatalogPhases = new Set<AIPhase>(["interpret", "rule_assembly", "source_retrieval"])
@@ -178,14 +196,18 @@ export type TurnOrchestratorInput = Readonly<{
   sourceId?: string
   allowWorkspaceChapterReads?: boolean
   maxModelCalls?: number
-  maxContextTokens?: number
   maxInputTokens?: number
   maxOutputTokens?: number
   deadlineMs?: number
   retrievalExecutionDeadlineMs?: number
   retrievalPhaseDeadlineMs?: number
   maxRetrievalRounds?: number
+  resetMetricIds?: readonly ("model_calls" | "input_tokens" | "output_tokens" | "wall_time")[]
   projectSettings?: ProjectSettings
+  executionOrigin?: Readonly<{
+    kind: "user" | "automatic_evolution"
+    triggerTaskId?: string
+  }>
   nowMs?: number
 }>
 
@@ -266,6 +288,7 @@ export type TurnOrchestratorDependencies = Readonly<{
   internalStore: InternalStorePort
   workspace: WorkspacePort
   createId: () => string
+  idAllocator?: ProjectIdAllocatorPort
   now: () => number
   diagnostics?: Readonly<{
     log(level: "debug" | "info" | "warn" | "error", event: string, fields?: Readonly<Record<string, unknown>>): void
@@ -274,14 +297,40 @@ export type TurnOrchestratorDependencies = Readonly<{
 
 type TurnBudgetMetric = "model_calls" | "input_tokens" | "output_tokens" | "wall_time"
 
-class TurnBudgetExceededError extends Error {
+export class TurnBudgetExceededError extends Error {
   public constructor(public readonly metric: TurnBudgetMetric, message: string) {
     super(message)
     this.name = "TurnBudgetExceededError"
   }
 }
 
+export class TurnPauseRequestedError extends Error {
+  public readonly kind = "pause_requested" as const
+
+  public constructor(message = "Turn paused by user") {
+    super(message)
+    this.name = "TurnPauseRequestedError"
+  }
+}
+
+export class GraphCapacityExceededError extends Error {
+  public constructor(public readonly violations: GraphCapacityAssessment["violations"]) {
+    super(`Graph governance exceeded configured degree limits at ${String(violations.length)} node(s)`)
+    this.name = "GraphCapacityExceededError"
+  }
+}
+
+export class QueryDraftAuditExceededError extends Error {
+  public constructor(public readonly rounds: number) {
+    super(`Query draft still fails response review after ${String(rounds)} revision round(s)`)
+    this.name = "QueryDraftAuditExceededError"
+  }
+}
+
 export class TurnOrchestrator {
+  private readonly verificationProbes = new VerificationProbeCoordinator()
+  private readonly contextWindow = new ContextWindowManager()
+
   public constructor(private readonly dependencies: TurnOrchestratorDependencies) {}
 
   public async execute(input: TurnOrchestratorInput, hooks?: TurnExecutionHooks): Promise<WorkflowExecutionResult> {
@@ -291,9 +340,17 @@ export class TurnOrchestrator {
     const turnId = input.turnId ?? this.dependencies.createId()
     const scopeId = input.scopeId ?? this.dependencies.createId()
     const contextId = input.contextId ?? this.dependencies.createId()
-    const sourceId = input.sourceId ?? this.dependencies.createId()
+    const sourceId = input.sourceId ?? await this.nextPersistentId(input.projectId, "source")
     const createdAtMs = input.nowMs ?? this.dependencies.now()
     const baseRules = await this.dependencies.prompts.loadBaseRules()
+    const modelContextChain = await this.dependencies.persistence.ensureModelContextChain({
+      projectId: input.projectId,
+      protocolVersion: PROTOCOL_VERSION,
+      systemRulesContent: baseRules.text,
+      systemRulesDigest: baseRules.digest,
+      createdAtMs,
+    })
+    await this.compactInheritedModelContext(input, modelContextChain.chainId, taskId)
     const budget = createBudget(input, createdAtMs)
     this.log("debug", "turn.started", {
       taskId,
@@ -326,6 +383,10 @@ export class TurnOrchestrator {
       reason: `AI ${workflow} starts from user input and creates a pending isolated scope`,
       configSnapshot: {
         budget,
+        runtime: {
+          modelContextWindowTokens: requireModelContextWindowTokens(this.dependencies.model),
+        },
+        executionOrigin: input.executionOrigin ?? { kind: "user" },
         ...(input.projectSettings === undefined ? {} : { projectSettings: input.projectSettings }),
       },
       promptSnapshot: {
@@ -333,6 +394,17 @@ export class TurnOrchestrator {
         baseRulesDigest: baseRules.digest,
         workspaceCatalogSnapshotId: catalogSnapshot.snapshotId,
         workspaceCatalogDigest: catalogSnapshot.digest,
+      },
+      createdAtMs,
+    })
+    await this.dependencies.persistence.initializeRuntimeBudgetWindows({
+      projectId: input.projectId,
+      taskId,
+      limits: {
+        model_calls: budget.maxCalls,
+        input_tokens: finiteApplicationLimit(budget.maxInputTokens),
+        output_tokens: finiteApplicationLimit(budget.maxOutputTokens),
+        wall_time: Math.max(1, budget.deadlineAtMs - createdAtMs),
       },
       createdAtMs,
     })
@@ -345,8 +417,7 @@ export class TurnOrchestrator {
       taskKind: workflow,
       baseCommittedSequence: scope.baseCommittedSequence,
       maxTokens: resolveContextTokenLimit(
-        input.maxContextTokens,
-        input.projectSettings?.execution.contextWindowTokens ?? this.dependencies.model.info?.contextWindowTokens,
+        requireModelContextWindowTokens(this.dependencies.model),
         input.projectSettings?.execution.contextCompactionThresholdRatio
           ?? defaultProjectSettings.execution.contextCompactionThresholdRatio,
       ),
@@ -360,6 +431,18 @@ export class TurnOrchestrator {
       tokenEstimate: estimateTokens(input.userInput),
       sequence: 0,
     }])
+    const visibleModelContextEvidence = await this.dependencies.persistence.listVisibleModelContextEvidence(
+      modelContextChain.chainId,
+    )
+    const inheritedModelEvidence = filterInheritedModelEvidence(
+      visibleModelContextEvidence,
+      input.allowWorkspaceChapterReads ?? true,
+    )
+    context = inheritContextReads(context, inheritedModelEvidence.map((evidence) => ({
+      readId: evidence.readId,
+      visibility: "committed",
+      reason: "Inherited from the currently visible model context chain",
+    })))
     await this.dependencies.persistence.createContext({ context, createdAtMs, updatedAtMs: createdAtMs })
     const mandatoryWorkspaceReads = await this.readMandatoryWorkspaceEvidence(
       context,
@@ -378,12 +461,13 @@ export class TurnOrchestrator {
     const artifacts: Partial<Record<AIPhase, unknown>> = {}
     const phaseRunIds: string[] = []
     const phaseRuns = new Map<AIPhase, string>()
-    let sourceUnitIds: string[] = []
-    let readEvidence: TurnReadEvidence[] = [
+    const sourceUnitIds: string[] = []
+    const readEvidence: TurnReadEvidence[] = [
+      ...inheritedModelEvidence.map((evidence) => ({ ...evidence, visibility: "committed" as const })),
       ...mandatoryWorkspaceReads.evidence,
       ...evolutionFrontierReads.evidence,
     ]
-    let retrievalGaps: TurnRetrievalGap[] = []
+    const retrievalGaps: TurnRetrievalGap[] = []
     return this.continueExecution(input, {
       taskId,
       turnId,
@@ -392,6 +476,7 @@ export class TurnOrchestrator {
       sourceId,
       createdAtMs,
       baseRuleVersion: baseRules.version,
+      modelContextChainId: modelContextChain.chainId,
       catalogSnapshot,
       context,
       artifacts,
@@ -402,10 +487,63 @@ export class TurnOrchestrator {
       readEvidence,
       visibleEvidence: [...readEvidence],
       retrievalGaps,
+      verificationProbeCheckpoints: [],
       totalUsage: emptyPhaseUsage(),
+      budgetWindowUsage: emptyPhaseUsage(),
       budget,
       startPhaseIndex: 0,
+      queryDraftAuditRounds: 0,
       ...(hooks?.signal === undefined ? {} : { signal: hooks.signal }),
+    })
+  }
+
+  private async compactInheritedModelContext(
+    input: TurnOrchestratorInput,
+    chainId: string,
+    taskId: string,
+  ): Promise<void> {
+    const messages = await this.dependencies.persistence.listModelContextMessages(chainId)
+    const hydrated = await Promise.all(messages.map(async (message) => {
+      const content = message.content ?? await this.dependencies.internalStore.readDocument(message.contentRef as string)
+      return { ...message, tokenEstimate: estimateModelMessageTokens(content) }
+    }))
+    const compaction = this.contextWindow.plan({
+      messages: hydrated,
+      contextWindowTokens: requireModelContextWindowTokens(this.dependencies.model),
+      triggerRatio: input.projectSettings?.execution.contextCompactionThresholdRatio
+        ?? defaultProjectSettings.execution.contextCompactionThresholdRatio,
+      targetRatio: input.projectSettings?.execution.contextCompressionTargetRatio
+        ?? defaultProjectSettings.execution.contextCompressionTargetRatio,
+      incomingTokenEstimate: estimateModelMessageTokens(input.userInput),
+    })
+    this.log("debug", "context.preinherit_compaction.evaluated", {
+      taskId,
+      chainId,
+      messageCount: messages.length,
+      compactionPhase: compaction.phase,
+      estimatedTokens: compaction.estimatedTokens,
+      thresholdTokens: compaction.thresholdTokens,
+      targetTokens: compaction.targetTokens,
+      hiddenMessageCount: compaction.hiddenMessageIds.length,
+      protectedTokens: compaction.protectedTokens,
+      blocked: compaction.blocked,
+    })
+    if (compaction.blocked) {
+      throw new Error(compaction.reason ?? "Protected model context exceeds the configured model window")
+    }
+    if (compaction.hiddenMessageIds.length === 0) return
+    await this.dependencies.persistence.hideModelContextMessages(
+      chainId,
+      compaction.hiddenMessageIds,
+      this.dependencies.now(),
+    )
+    this.log("info", "context.preinherit_compaction.applied", {
+      taskId,
+      chainId,
+      compactionPhase: compaction.phase,
+      hiddenMessageIds: compaction.hiddenMessageIds,
+      visibleMessageCount: compaction.visibleMessages.length,
+      estimatedTokens: compaction.estimatedTokens,
     })
   }
 
@@ -419,74 +557,547 @@ export class TurnOrchestrator {
     if (task.status !== "awaiting_user_decision" && task.status !== "paused") {
       throw new Error(`Task cannot resume from status: ${task.status}`)
     }
+    await this.dependencies.taskScopes.assertCurrentGeneration(task.scopeId)
+    const resumeRequestedAtMs = input.nowMs ?? this.dependencies.now()
+    if ((input.resetMetricIds?.length ?? 0) > 0) {
+      await this.dependencies.persistence.resetRuntimeBudgetWindows({
+        taskId: input.taskId,
+        metricIds: input.resetMetricIds ?? [],
+        limits: {
+          model_calls: input.maxModelCalls ?? defaultTurnExecutionProfile.maxTurnModelCalls,
+          input_tokens: finiteApplicationLimit(input.maxInputTokens ?? Number.MAX_SAFE_INTEGER),
+          output_tokens: finiteApplicationLimit(input.maxOutputTokens ?? Number.MAX_SAFE_INTEGER),
+          wall_time: input.deadlineMs ?? defaultTurnExecutionProfile.maxTurnWallTimeMs,
+        },
+        resetAtMs: resumeRequestedAtMs,
+      })
+    }
+    const blockedMetrics = readBlockedMetrics(task.error)
+    const interruptedAtMs = readInterruptionTimestamp(task.error)
+    if (!await this.dependencies.persistence.wereRuntimeMetricsResetAfter(input.taskId, blockedMetrics, interruptedAtMs)) {
+      throw new Error(`Explicit budget reset required before resume: ${blockedMetrics.join(", ")}`)
+    }
+    const baseRules = await this.dependencies.prompts.loadBaseRules()
+    const modelContextChain = await this.dependencies.persistence.ensureModelContextChain({
+      projectId: input.projectId,
+      protocolVersion: PROTOCOL_VERSION,
+      systemRulesContent: baseRules.text,
+      systemRulesDigest: baseRules.digest,
+      createdAtMs: input.nowMs ?? this.dependencies.now(),
+    })
+    const pendingFinalization = await this.dependencies.persistence.findFinalizationByTask(input.taskId)
+    if (pendingFinalization !== undefined && pendingFinalization.status !== "completed") {
+      return this.resumeTurnFinalization(input, pendingFinalization)
+    }
     const scope = await this.dependencies.taskScopes.findScope(task.scopeId)
     const context = await this.dependencies.persistence.findContextByTask(input.taskId)
-    const storedRuns = await this.dependencies.persistence.listPhaseRuns(input.taskId)
+    let storedRuns = await this.dependencies.persistence.listPhaseRuns(input.taskId)
+    const orphanedRunningPhaseRunIds = storedRuns
+      .filter((run) => run.status === "running")
+      .map((run) => run.phaseRunId)
+    if (orphanedRunningPhaseRunIds.length > 0) {
+      await this.dependencies.persistence.supersedePhaseRuns(
+        input.taskId,
+        orphanedRunningPhaseRunIds,
+        resumeRequestedAtMs,
+      )
+      storedRuns = await this.dependencies.persistence.listPhaseRuns(input.taskId)
+      this.log("warn", "turn.resume.orphaned_phase_runs_superseded", {
+        taskId: input.taskId,
+        phaseRunIds: orphanedRunningPhaseRunIds,
+      })
+    }
     if (scope === undefined || context === undefined || storedRuns.length === 0) {
       throw new Error("The task has no recoverable phase checkpoint")
     }
-    const latestRun = storedRuns.at(-1)
+    const activeStoredRuns = storedRuns.filter((run) => run.status !== "superseded")
+    const latestRun = activeStoredRuns.at(-1)
     if (latestRun === undefined) throw new Error("The task has no recoverable phase checkpoint")
-    const storedInputs = storedRuns.map((run) => {
+    const storedRunInputs = activeStoredRuns.map((run) => {
       const storedRequest = phaseRequestEnvelopeSchema.parse(run.request)
-      return readStoredTurnPhaseInput(storedRequest.input)
+      return { run, input: readStoredTurnPhaseInput(storedRequest.input) }
     })
-    const latestInput = storedInputs.at(-1)
+    let latestInput = storedRunInputs.at(-1)?.input
     if (latestInput === undefined) throw new Error("The task has no recoverable phase checkpoint")
-    const sourceId = [...storedInputs].reverse().find((storedInput) => storedInput.sourceId !== undefined)?.sourceId
-    const catalogSnapshot = [...storedInputs].reverse().find((storedInput) => storedInput.workspaceCatalog !== undefined)?.workspaceCatalog
+    const sourceId = [...storedRunInputs].reverse().find(({ input: storedInput }) => storedInput.sourceId !== undefined)?.input.sourceId
+    const catalogSnapshot = [...storedRunInputs].reverse().find(({ input: storedInput }) => storedInput.workspaceCatalog !== undefined)?.input.workspaceCatalog
     if (sourceId === undefined || catalogSnapshot === undefined) {
       throw new Error("The task checkpoint is missing source or workspace catalog state")
+    }
+    const latestPhaseIndex = executionPhases.indexOf(latestRun.phase)
+    if (latestPhaseIndex < 0) throw new Error(`Cannot resume unknown phase: ${latestRun.phase}`)
+    let effectiveRuns = activeStoredRuns
+    let restoredPhaseEntryContext = context
+    let startPhaseIndex: number
+    let graphCapacityFeedback = readGraphCapacityFeedback(task.error)
+    let queryRevisionFeedback = latestInput.revisionFeedback
+    const restoredQueryDraftAuditRounds = countFailedQueryReviews(activeStoredRuns)
+    const invalidatedPhaseRunIds = new Set<string>()
+    if (mode === "retry_phase") {
+      const currentPhaseRuns = activeStoredRuns.filter((run) => run.phase === latestRun.phase)
+      const phaseEntryInput = storedRunInputs.find(({ run }) => run.phase === latestRun.phase)?.input
+      if (phaseEntryInput === undefined) throw new Error("The current phase has no entry checkpoint")
+      latestInput = phaseEntryInput
+      effectiveRuns = activeStoredRuns.filter((run) => run.phase !== latestRun.phase)
+      restoredPhaseEntryContext = restoreContextToPhaseEntry(
+        context,
+        currentPhaseRuns.map((run) => run.phaseRunId),
+        uniqueTurnReadEvidence([
+          ...storedRunInputs
+            .filter(({ run }) => run.phase !== latestRun.phase)
+            .flatMap(({ input: storedInput }) => storedInput.readEvidence),
+          ...phaseEntryInput.readEvidence,
+        ]),
+        latestRun.phase,
+      )
+      await this.dependencies.persistence.supersedePhaseRuns(
+        input.taskId,
+        currentPhaseRuns.map((run) => run.phaseRunId),
+        input.nowMs ?? this.dependencies.now(),
+      )
+      if (latestRun.phase === "chapter_naming") await this.dependencies.commit.resetPending(task.scopeId)
+      startPhaseIndex = latestPhaseIndex
+    } else {
+      const latestResult = latestRun.status === "completed" && latestRun.result !== undefined
+        ? phaseResultEnvelopeSchema.parse(latestRun.result)
+        : undefined
+      const phaseHasUnresolvedReads = latestResult?.outcome === "request_read"
+        && latestResult.requestedReads.length > 0
+      const failedQueryReview = workflow === "query"
+        && latestRun.phase === "response_review"
+        && latestResult !== undefined
+        ? queryReviewDecision(latestResult)
+        : undefined
+      if (failedQueryReview?.requiresRevision === true) {
+        startPhaseIndex = executionPhases.indexOf("draft")
+        queryRevisionFeedback = failedQueryReview.feedback
+      } else {
+        startPhaseIndex = latestRun.status === "completed" && !phaseHasUnresolvedReads
+          ? latestPhaseIndex + 1
+          : latestPhaseIndex
+      }
     }
     const artifacts: Partial<Record<AIPhase, unknown>> = {}
     const phaseRuns = new Map<AIPhase, string>()
     const phaseAttempts = new Map<AIPhase, number>()
     for (const run of storedRuns) {
-      phaseRuns.set(run.phase, run.phaseRunId)
       phaseAttempts.set(run.phase, Math.max(phaseAttempts.get(run.phase) ?? 0, run.attempt))
-      if (run.status !== "completed" || run.result === undefined) continue
+    }
+
+    const latestCompletedRunByPhase = new Map<AIPhase, (typeof effectiveRuns)[number]>()
+    for (const run of effectiveRuns) {
+      if (run.status === "completed" && run.result !== undefined) latestCompletedRunByPhase.set(run.phase, run)
+    }
+    let invalidStoredArtifact: {
+      run: (typeof effectiveRuns)[number]
+      phaseIndex: number
+      error: unknown
+    } | undefined
+    for (const phase of executionPhases) {
+      const run = latestCompletedRunByPhase.get(phase)
+      if (run?.result === undefined) continue
+      try {
+        const result = phaseResultEnvelopeSchema.parse(run.result)
+        parsePhaseArtifact(run.phase, result.artifact)
+      } catch (error) {
+        invalidStoredArtifact = { run, phaseIndex: executionPhases.indexOf(run.phase), error }
+        break
+      }
+    }
+    if (invalidStoredArtifact !== undefined) {
+      const invalidEntry = storedRunInputs.find(({ run }) => run === invalidStoredArtifact.run)
+      if (invalidEntry === undefined) throw new Error("The invalid stored phase artifact has no recoverable entry input")
+      const invalidatedRuns = effectiveRuns.filter((run) => (
+        executionPhases.indexOf(run.phase) >= invalidStoredArtifact.phaseIndex
+      ))
+      invalidatedRuns.forEach((run) => { invalidatedPhaseRunIds.add(run.phaseRunId) })
+      await this.dependencies.persistence.supersedePhaseRuns(
+        input.taskId,
+        [...invalidatedPhaseRunIds],
+        input.nowMs ?? this.dependencies.now(),
+      )
+      effectiveRuns = effectiveRuns.filter((run) => !invalidatedPhaseRunIds.has(run.phaseRunId))
+      latestInput = invalidEntry.input
+      restoredPhaseEntryContext = restoreContextToPhaseEntry(
+        context,
+        [...invalidatedPhaseRunIds],
+        uniqueTurnReadEvidence([
+          ...storedRunInputs
+            .filter(({ run }) => effectiveRuns.includes(run))
+            .flatMap(({ input: storedInput }) => storedInput.readEvidence),
+          ...invalidEntry.input.readEvidence,
+        ]),
+        invalidStoredArtifact.run.phase,
+      )
+      startPhaseIndex = invalidStoredArtifact.phaseIndex
+      queryRevisionFeedback = invalidEntry.input.revisionFeedback
+      this.log("warn", "turn.resume.invalid_artifact_rewound", {
+        taskId: input.taskId,
+        invalidatedPhaseRunIds: [...invalidatedPhaseRunIds],
+        error: invalidStoredArtifact.error instanceof Error
+          ? invalidStoredArtifact.error.message
+          : String(invalidStoredArtifact.error),
+        resumePhase: invalidStoredArtifact.run.phase,
+      })
+    }
+
+    const restorableCompletedRunByPhase = new Map<AIPhase, (typeof effectiveRuns)[number]>()
+    for (const run of effectiveRuns) {
+      phaseRuns.set(run.phase, run.phaseRunId)
+      if (run.status === "completed" && run.result !== undefined) restorableCompletedRunByPhase.set(run.phase, run)
+    }
+    for (const run of restorableCompletedRunByPhase.values()) {
+      if (run.result === undefined) continue
       const result = phaseResultEnvelopeSchema.parse(run.result)
       artifacts[run.phase] = parsePhaseArtifact(run.phase, result.artifact)
     }
-    const latestPhaseIndex = executionPhases.indexOf(latestRun.phase)
-    if (latestPhaseIndex < 0) throw new Error(`Cannot resume unknown phase: ${latestRun.phase}`)
-    const startPhaseIndex = latestRun.status === "completed" ? latestPhaseIndex + 1 : latestPhaseIndex
+    const structureRun = effectiveRuns.find((run) => run.phase === "graph_structure_plan" && run.status === "completed" && run.result !== undefined)
+    if (structureRun?.result !== undefined) {
+      const structureResult = phaseResultEnvelopeSchema.parse(structureRun.result)
+      const rewrites = effectiveRuns
+        .filter((run) => run.phase === "graph_capacity_rewrite" && run.status === "completed" && run.result !== undefined)
+        .map((run) => graphCapacityRewriteArtifactSchema.parse(phaseResultEnvelopeSchema.parse(run.result).artifact))
+      artifacts.graph_structure_plan = replayGraphCapacityRewrites(
+        graphStructurePlanArtifactSchema.parse(structureResult.artifact),
+        rewrites,
+      )
+    }
+    this.materializeStagedGraphGovernanceArtifacts(artifacts, latestInput.sourceUnitIds.length)
+    const dependencyAuditIndex = executionPhases.indexOf("dependency_audit")
+    const dependencyAudit = artifacts.dependency_audit === undefined
+      ? undefined
+      : dependencyAuditArtifactSchema.parse(artifacts.dependency_audit)
+    if (workflow === "turn"
+      && dependencyAuditIndex >= 0
+      && startPhaseIndex > dependencyAuditIndex
+      && latestInput.sourceUnitIds.length > 0
+      && dependencyAudit?.sceneContinuity.length === 0) {
+      const dependencyEntry = storedRunInputs.find(({ run }) => (
+        run.phase === "dependency_audit" && effectiveRuns.includes(run)
+      ))
+      if (dependencyEntry === undefined) throw new Error("The invalid dependency audit has no recoverable entry input")
+      const invalidatedRuns = effectiveRuns.filter((run) => (
+        executionPhases.indexOf(run.phase) >= dependencyAuditIndex
+      ))
+      invalidatedRuns.forEach((run) => { invalidatedPhaseRunIds.add(run.phaseRunId) })
+      await this.dependencies.persistence.supersedePhaseRuns(
+        input.taskId,
+        [...invalidatedPhaseRunIds],
+        input.nowMs ?? this.dependencies.now(),
+      )
+      effectiveRuns = effectiveRuns.filter((run) => !invalidatedPhaseRunIds.has(run.phaseRunId))
+      for (const invalidatedPhase of executionPhases.slice(dependencyAuditIndex)) {
+        Reflect.deleteProperty(artifacts, invalidatedPhase)
+        phaseRuns.delete(invalidatedPhase)
+      }
+      latestInput = dependencyEntry.input
+      restoredPhaseEntryContext = restoreContextToPhaseEntry(
+        context,
+        [...invalidatedPhaseRunIds],
+        uniqueTurnReadEvidence([
+          ...storedRunInputs
+            .filter(({ run }) => effectiveRuns.includes(run))
+            .flatMap(({ input: storedInput }) => storedInput.readEvidence),
+          ...dependencyEntry.input.readEvidence,
+        ]),
+        "dependency_audit",
+      )
+      startPhaseIndex = dependencyAuditIndex
+      this.log("warn", "dependency_audit.resume_rewound", {
+        taskId: input.taskId,
+        invalidatedPhaseRunIds: [...invalidatedPhaseRunIds],
+        sourceUnitCount: dependencyEntry.input.sourceUnitIds.length,
+        resumePhase: "dependency_audit",
+      })
+    }
+    const graphStructureIndex = executionPhases.indexOf("graph_structure_plan")
+    const graphCapacityIndex = executionPhases.indexOf("graph_capacity_rewrite")
+    if (graphStructureIndex >= 0
+      && graphCapacityIndex >= 0
+      && startPhaseIndex > graphCapacityIndex
+      && artifacts.graph_structure_plan !== undefined) {
+      const capacityAssessment = await this.assessGraphStructureCapacity(
+        input,
+        graphStructurePlanArtifactSchema.parse(artifacts.graph_structure_plan),
+      )
+      if (capacityAssessment.violations.length > 0) {
+        const structureEntry = storedRunInputs.find(({ run }) => (
+          run.phase === "graph_structure_plan" && effectiveRuns.includes(run)
+        ))
+        if (structureEntry === undefined) throw new Error("The stored graph structure has no recoverable entry input")
+        const invalidatedRuns = effectiveRuns.filter((run) => (
+          executionPhases.indexOf(run.phase) >= graphCapacityIndex
+        ))
+        invalidatedRuns.forEach((run) => { invalidatedPhaseRunIds.add(run.phaseRunId) })
+        await this.dependencies.persistence.supersedePhaseRuns(
+          input.taskId,
+          [...invalidatedPhaseRunIds],
+          input.nowMs ?? this.dependencies.now(),
+        )
+        effectiveRuns = effectiveRuns.filter((run) => !invalidatedPhaseRunIds.has(run.phaseRunId))
+        for (const invalidatedPhase of executionPhases.slice(graphCapacityIndex)) {
+          Reflect.deleteProperty(artifacts, invalidatedPhase)
+          phaseRuns.delete(invalidatedPhase)
+        }
+        delete artifacts.graph_governance
+        delete artifacts.semantic_review
+        latestInput = structureEntry.input
+        restoredPhaseEntryContext = restoreContextToPhaseEntry(
+          context,
+          [...invalidatedPhaseRunIds],
+          uniqueTurnReadEvidence([
+            ...storedRunInputs
+              .filter(({ run }) => effectiveRuns.includes(run))
+              .flatMap(({ input: storedInput }) => storedInput.readEvidence),
+            ...structureEntry.input.readEvidence,
+          ]),
+          "graph_capacity_rewrite",
+        )
+        startPhaseIndex = graphCapacityIndex
+        graphCapacityFeedback = {
+          round: 1,
+          nodeCount: capacityAssessment.nodeCount,
+          linkCount: capacityAssessment.linkCount,
+          violations: capacityAssessment.violations,
+        }
+        this.log("warn", "graph.capacity.resume_rewound", {
+          taskId: input.taskId,
+          invalidatedPhaseRunIds: [...invalidatedPhaseRunIds],
+          violations: capacityAssessment.violations,
+          resumePhase: "graph_capacity_rewrite",
+        })
+      }
+    }
+    const graphSpacetimeIndex = executionPhases.indexOf("graph_spacetime_settlement")
+    if (graphSpacetimeIndex >= 0
+      && startPhaseIndex > graphSpacetimeIndex
+      && artifacts.dependency_audit !== undefined
+      && artifacts.graph_structure_plan !== undefined
+      && artifacts.graph_spacetime_settlement !== undefined) {
+      const spacetimeEntry = storedRunInputs.find(({ run }) => (
+        run.phase === "graph_spacetime_settlement" && effectiveRuns.includes(run)
+      ))
+      if (spacetimeEntry === undefined) throw new Error("The stored spacetime settlement has no recoverable entry input")
+      let invalidSpacetimeError: unknown
+      try {
+        assertGraphSpacetimeSettlementCoverage(
+          artifacts.dependency_audit,
+          artifacts.graph_structure_plan,
+          artifacts.graph_spacetime_settlement,
+          spacetimeEntry.input.sourceUnitIds.length,
+        )
+        const structure = graphStructurePlanArtifactSchema.parse(artifacts.graph_structure_plan)
+        assertPhaseReferenceContract(
+          "graph_spacetime_settlement",
+          artifacts.graph_spacetime_settlement,
+          {
+            readableGraphIds: new Set(spacetimeEntry.input.readEvidence
+              .filter((evidence) => evidence.ownerKind === "node" || evidence.ownerKind === "link")
+              .map((evidence) => evidence.ownerId)),
+            readableEvidenceIds: new Set(spacetimeEntry.input.readEvidence.map((evidence) => evidence.readId)),
+            readableWorkspacePaths: new Set(),
+            declaredLocalGraphRefs: new Set(structure.proposals.flatMap((proposal) => (
+              proposal.mutation.operation === "create_node" || proposal.mutation.operation === "create_link"
+                ? [proposal.mutation.ref]
+                : []
+            ))),
+          },
+        )
+      } catch (error) {
+        invalidSpacetimeError = error
+      }
+      if (invalidSpacetimeError !== undefined) {
+        const invalidatedRuns = effectiveRuns.filter((run) => (
+          executionPhases.indexOf(run.phase) >= graphSpacetimeIndex
+        ))
+        invalidatedRuns.forEach((run) => { invalidatedPhaseRunIds.add(run.phaseRunId) })
+        await this.dependencies.persistence.supersedePhaseRuns(
+          input.taskId,
+          [...invalidatedPhaseRunIds],
+          input.nowMs ?? this.dependencies.now(),
+        )
+        effectiveRuns = effectiveRuns.filter((run) => !invalidatedPhaseRunIds.has(run.phaseRunId))
+        for (const invalidatedPhase of executionPhases.slice(graphSpacetimeIndex)) {
+          Reflect.deleteProperty(artifacts, invalidatedPhase)
+          phaseRuns.delete(invalidatedPhase)
+        }
+        delete artifacts.graph_governance
+        delete artifacts.semantic_review
+        latestInput = spacetimeEntry.input
+        restoredPhaseEntryContext = restoreContextToPhaseEntry(
+          context,
+          [...invalidatedPhaseRunIds],
+          uniqueTurnReadEvidence([
+            ...storedRunInputs
+              .filter(({ run }) => effectiveRuns.includes(run))
+              .flatMap(({ input: storedInput }) => storedInput.readEvidence),
+            ...spacetimeEntry.input.readEvidence,
+          ]),
+          "graph_spacetime_settlement",
+        )
+        startPhaseIndex = graphSpacetimeIndex
+        this.log("warn", "graph.spacetime.resume_rewound", {
+          taskId: input.taskId,
+          invalidatedPhaseRunIds: [...invalidatedPhaseRunIds],
+          error: invalidSpacetimeError instanceof Error ? invalidSpacetimeError.message : String(invalidSpacetimeError),
+          resumePhase: "graph_spacetime_settlement",
+        })
+      }
+    }
+    const graphRetrievalIndex = executionPhases.indexOf("graph_retrieval_design")
+    if (graphRetrievalIndex >= 0
+      && startPhaseIndex > graphRetrievalIndex
+      && artifacts.graph_structure_plan !== undefined
+      && artifacts.graph_retrieval_design !== undefined) {
+      const retrievalEntry = storedRunInputs.find(({ run }) => (
+        run.phase === "graph_retrieval_design" && effectiveRuns.includes(run)
+      ))
+      if (retrievalEntry === undefined) throw new Error("The stored graph retrieval design has no recoverable entry input")
+      let invalidRetrievalError: unknown
+      try {
+        const structure = graphStructurePlanArtifactSchema.parse(artifacts.graph_structure_plan)
+        assertPhaseReferenceContract(
+          "graph_retrieval_design",
+          artifacts.graph_retrieval_design,
+          {
+            readableGraphIds: new Set(retrievalEntry.input.readEvidence
+              .filter((evidence) => evidence.ownerKind === "node" || evidence.ownerKind === "link")
+              .map((evidence) => evidence.ownerId)),
+            readableEvidenceIds: new Set(retrievalEntry.input.readEvidence.map((evidence) => evidence.readId)),
+            readableWorkspacePaths: new Set(),
+            declaredLocalGraphRefs: new Set(structure.proposals.flatMap((proposal) => (
+              proposal.mutation.operation === "create_node" || proposal.mutation.operation === "create_link"
+                ? [proposal.mutation.ref]
+                : []
+            ))),
+          },
+        )
+      } catch (error) {
+        invalidRetrievalError = error
+      }
+      if (invalidRetrievalError !== undefined) {
+        const invalidatedRuns = effectiveRuns.filter((run) => (
+          executionPhases.indexOf(run.phase) >= graphRetrievalIndex
+        ))
+        invalidatedRuns.forEach((run) => { invalidatedPhaseRunIds.add(run.phaseRunId) })
+        await this.dependencies.persistence.supersedePhaseRuns(
+          input.taskId,
+          [...invalidatedPhaseRunIds],
+          input.nowMs ?? this.dependencies.now(),
+        )
+        effectiveRuns = effectiveRuns.filter((run) => !invalidatedPhaseRunIds.has(run.phaseRunId))
+        for (const invalidatedPhase of executionPhases.slice(graphRetrievalIndex)) {
+          Reflect.deleteProperty(artifacts, invalidatedPhase)
+          phaseRuns.delete(invalidatedPhase)
+        }
+        delete artifacts.graph_governance
+        delete artifacts.semantic_review
+        latestInput = retrievalEntry.input
+        restoredPhaseEntryContext = restoreContextToPhaseEntry(
+          context,
+          [...invalidatedPhaseRunIds],
+          uniqueTurnReadEvidence([
+            ...storedRunInputs
+              .filter(({ run }) => effectiveRuns.includes(run))
+              .flatMap(({ input: storedInput }) => storedInput.readEvidence),
+            ...retrievalEntry.input.readEvidence,
+          ]),
+          "graph_retrieval_design",
+        )
+        startPhaseIndex = graphRetrievalIndex
+        this.log("warn", "graph.retrieval.resume_rewound", {
+          taskId: input.taskId,
+          invalidatedPhaseRunIds: [...invalidatedPhaseRunIds],
+          error: invalidRetrievalError instanceof Error ? invalidRetrievalError.message : String(invalidRetrievalError),
+          resumePhase: "graph_retrieval_design",
+        })
+      }
+    }
     const commitReviewIndex = executionPhases.indexOf("commit_review")
     if (commitReviewIndex >= 0 && startPhaseIndex >= commitReviewIndex) {
       await this.dependencies.commit.resetPending(task.scopeId)
     }
-    const nowMs = input.nowMs ?? this.dependencies.now()
+    let restoredSourceUnitIds = [...latestInput.sourceUnitIds]
+    if (restoredSourceUnitIds.length === 0 && artifacts.chapter_naming !== undefined) {
+      const persistedSourceUnits = await this.dependencies.documents.listSourceUnits(input.projectId, sourceId)
+      restoredSourceUnitIds = persistedSourceUnits.length > 0
+        ? persistedSourceUnits.map((unit) => unit.id)
+        : await this.persistDraftUnits(input, task.scopeId, sourceId, artifacts)
+    }
+    const nowMs = resumeRequestedAtMs
+    const runtimeMetrics = await this.dependencies.persistence.listRuntimeMetrics(input.taskId, nowMs)
+    const runtimeBudgetUsage = await this.dependencies.persistence.readRuntimeBudgetUsage(input.taskId, nowMs)
+    const resumedMaxModelCalls = readRuntimeMetricLimit(runtimeMetrics, "model_calls") ?? input.maxModelCalls
+    const resumedMaxInputTokens = readRuntimeMetricLimit(runtimeMetrics, "input_tokens") ?? input.maxInputTokens
+    const resumedMaxOutputTokens = readRuntimeMetricLimit(runtimeMetrics, "output_tokens") ?? input.maxOutputTokens
+    const resumedDeadlineMs = readRuntimeMetricLimit(runtimeMetrics, "wall_time") ?? input.deadlineMs
+    const resumedInput: TurnOrchestratorInput = {
+      ...input,
+      ...(resumedMaxModelCalls === undefined ? {} : { maxModelCalls: resumedMaxModelCalls }),
+      ...(resumedMaxInputTokens === undefined ? {} : { maxInputTokens: resumedMaxInputTokens }),
+      ...(resumedMaxOutputTokens === undefined ? {} : { maxOutputTokens: resumedMaxOutputTokens }),
+      ...(resumedDeadlineMs === undefined ? {} : { deadlineMs: resumedDeadlineMs }),
+    }
     const totalUsage = storedRuns.reduce((total, run) => addPhaseUsage(total, phaseUsageFromStored(run.usage)), emptyPhaseUsage())
-    const restoredReadEvidence = uniqueTurnReadEvidence(storedInputs.flatMap((storedInput) => storedInput.readEvidence))
+    const verificationProbeCheckpoints = (await this.dependencies.persistence.listVerificationProbeCheckpoints(input.taskId))
+      .filter((checkpoint) => !invalidatedPhaseRunIds.has(checkpoint.phaseRunId))
+    const restoredContext = restoreVerificationProbeContext(restoredPhaseEntryContext, verificationProbeCheckpoints)
+    const restoredProbeEvidence = verificationProbeCheckpoints.flatMap((checkpoint) => checkpoint.evidence)
+    const restoredReadEvidence = uniqueTurnReadEvidence([
+      ...storedRunInputs
+        .filter(({ run }) => effectiveRuns.includes(run))
+        .flatMap(({ input: storedInput }) => storedInput.readEvidence),
+      ...latestInput.readEvidence,
+      ...restoredProbeEvidence,
+    ])
+    const restoredVisibleEvidence = uniqueTurnReadEvidence([
+      ...latestInput.readEvidence,
+      ...restoredProbeEvidence,
+    ])
+    if (restoredContext !== context) {
+      await this.dependencies.persistence.saveContext(restoredContext, nowMs)
+    }
     this.log("info", "turn.resumed", {
       taskId: task.taskId,
       resumePhase: executionPhases[startPhaseIndex],
-      completedPhaseRuns: storedRuns.filter((run) => run.status === "completed").length,
+      completedPhaseRuns: effectiveRuns.filter((run) => run.status === "completed").length,
       previousModelCalls: totalUsage.modelCalls,
       mode,
     })
     await this.dependencies.persistence.updateTask(task.taskId, "running", executionPhases[startPhaseIndex], nowMs)
-    return this.continueExecution(input, {
+    return this.continueExecution(resumedInput, {
       taskId: task.taskId,
       turnId: scope.turnId,
       scopeId: task.scopeId,
       contextId: context.contextId,
       sourceId,
       createdAtMs: task.createdAtMs,
-      baseRuleVersion: (await this.dependencies.prompts.loadBaseRules()).version,
+      baseRuleVersion: baseRules.version,
+      modelContextChainId: modelContextChain.chainId,
       catalogSnapshot,
-      context,
+      context: restoredContext,
       artifacts,
       phaseRunIds: storedRuns.map((run) => run.phaseRunId),
       phaseRuns,
       phaseAttempts,
-      sourceUnitIds: [...latestInput.sourceUnitIds],
+      sourceUnitIds: restoredSourceUnitIds,
       readEvidence: restoredReadEvidence,
-      visibleEvidence: [...latestInput.readEvidence],
+      visibleEvidence: restoredVisibleEvidence,
       retrievalGaps: [...latestInput.retrievalGaps],
+      verificationProbeCheckpoints: [...verificationProbeCheckpoints],
       totalUsage,
-      budget: createBudget(input, nowMs),
+      budget: createBudget(resumedInput, nowMs, runtimeBudgetUsage.wallTimeMs),
+      budgetWindowUsage: {
+        modelCalls: runtimeBudgetUsage.modelCalls,
+        inputTokens: runtimeBudgetUsage.inputTokens,
+        outputTokens: runtimeBudgetUsage.outputTokens,
+        cacheHits: 0,
+        cacheMisses: 0,
+      },
       startPhaseIndex,
+      queryDraftAuditRounds: restoredQueryDraftAuditRounds,
+      ...(queryRevisionFeedback === undefined ? {} : { queryRevisionFeedback }),
+      ...(graphCapacityFeedback === undefined ? {} : { graphCapacityFeedback }),
       ...(hooks?.signal === undefined ? {} : { signal: hooks.signal }),
     })
   }
@@ -505,11 +1116,67 @@ export class TurnOrchestrator {
     const artifacts = state.artifacts
     const phaseRunIds = state.phaseRunIds
     const phaseRuns = state.phaseRuns
-    let windowUsage = emptyPhaseUsage()
+    let windowUsage = state.budgetWindowUsage
+    let phaseIndex = state.startPhaseIndex
+    let graphGovernanceRounds = 0
+    let graphCapacityFeedback = state.graphCapacityFeedback
+    let queryDraftAuditRounds = state.queryDraftAuditRounds
+    let queryRevisionFeedback = state.queryRevisionFeedback
 
     try {
-      for (const phase of executionPhases.slice(state.startPhaseIndex)) {
+      while (phaseIndex < executionPhases.length) {
+        const phase = executionPhases[phaseIndex]
+        if (phase === undefined) break
         throwIfExecutionCancelled(state.signal)
+        if (phase === "graph_capacity_rewrite") {
+          const structure = graphStructurePlanArtifactSchema.parse(artifacts.graph_structure_plan)
+          const capacityAssessment = await this.assessGraphStructureCapacity(input, structure)
+          graphGovernanceRounds += 1
+          this.log(capacityAssessment.violations.length === 0 ? "debug" : "warn", "graph.capacity.staged_assessed", {
+            taskId: state.taskId,
+            round: graphGovernanceRounds,
+            maxRounds: defaultTurnExecutionProfile.maxGraphGovernanceRounds,
+            nodeCount: capacityAssessment.nodeCount,
+            linkCount: capacityAssessment.linkCount,
+            violations: capacityAssessment.violations,
+            hotspots: capacityAssessment.entries.slice(0, 12),
+          })
+          if (capacityAssessment.violations.length === 0) {
+            graphCapacityFeedback = undefined
+            phaseIndex += 1
+            continue
+          }
+          if (graphGovernanceRounds > defaultTurnExecutionProfile.maxGraphGovernanceRounds) {
+            throw new GraphCapacityExceededError(capacityAssessment.violations)
+          }
+          graphCapacityFeedback = {
+            round: graphGovernanceRounds,
+            nodeCount: capacityAssessment.nodeCount,
+            linkCount: capacityAssessment.linkCount,
+            violations: capacityAssessment.violations,
+          }
+          const capacityEvidence = await this.readGraphCapacityEvidence({
+            context,
+            input,
+            scopeId: state.scopeId,
+            catalogSnapshot: state.catalogSnapshot,
+            existingEvidence: readEvidence,
+            visibleEvidence,
+            violations: capacityAssessment.violations,
+          })
+          context = capacityEvidence.context
+          readEvidence = uniqueTurnReadEvidence([...readEvidence, ...capacityEvidence.evidence])
+          visibleEvidence = uniqueTurnReadEvidence([...visibleEvidence, ...capacityEvidence.evidence])
+          await this.dependencies.persistence.saveContext(context, this.dependencies.now())
+        }
+        if (phase === "graph_governance_review" && artifacts.graph_governance === undefined) {
+          artifacts.graph_governance = assembleGraphGovernanceArtifact({
+            structure: graphStructurePlanArtifactSchema.parse(artifacts.graph_structure_plan),
+            spacetime: graphSpacetimeSettlementArtifactSchema.parse(artifacts.graph_spacetime_settlement),
+            retrieval: graphRetrievalDesignArtifactSchema.parse(artifacts.graph_retrieval_design),
+            sourceUnitCount: sourceUnitIds.length,
+          })
+        }
         const phaseStartedAtMs = this.dependencies.now()
         const phaseRunId = this.dependencies.createId()
         const attempt = (state.phaseAttempts.get(phase) ?? 0) + 1
@@ -530,9 +1197,13 @@ export class TurnOrchestrator {
           readEvidence,
           visibleEvidence,
           retrievalGaps,
+          verificationProbeCheckpoints: state.verificationProbeCheckpoints,
           catalogSnapshot: state.catalogSnapshot,
+          modelContextChainId: state.modelContextChainId,
           budget: state.budget,
           usage: windowUsage,
+          ...(graphCapacityFeedback === undefined ? {} : { graphCapacityFeedback }),
+          ...(phase !== "draft" || queryRevisionFeedback === undefined ? {} : { revisionFeedback: queryRevisionFeedback }),
           ...(state.signal === undefined ? {} : { signal: state.signal }),
         })
         context = result.context
@@ -543,6 +1214,32 @@ export class TurnOrchestrator {
         artifacts[phase] = result.artifact
         windowUsage = addPhaseUsage(windowUsage, result.usage)
         totalUsage = addPhaseUsage(totalUsage, result.usage)
+        if (phase === "graph_capacity_rewrite") {
+          artifacts.graph_structure_plan = applyGraphCapacityRewrite(
+            graphStructurePlanArtifactSchema.parse(artifacts.graph_structure_plan),
+            graphCapacityRewriteArtifactSchema.parse(result.artifact),
+          )
+        }
+        if (phase === "graph_governance_review") {
+          const review = graphGovernanceReviewArtifactSchema.parse(result.artifact)
+          const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
+          artifacts.semantic_review = {
+            approvedMutationIndexes: governance.mutations.map((_, index) => index),
+            rejectedMutationIndexes: [],
+            approvedSpacetimeBindingIndexes: governance.sceneSpacetimeBindings.map((_, index) => index),
+            rejectedSpacetimeBindingIndexes: [],
+            approvedMutationSpacetimeSettlementIndexes: governance.mutationSpacetimeSettlements.map((_, index) => index),
+            rejectedMutationSpacetimeSettlementIndexes: [],
+            approvedAffectedFrontierRefs: governance.affectedFrontierRefs,
+            rejectedAffectedFrontierRefs: [],
+            verificationProbeAssessments: review.verificationProbeAssessments,
+            sceneInventoryComplete: true,
+            graphStillDiscoverable: review.graphStillDiscoverable,
+            graphStillConcise: review.graphStillConcise,
+            continuityPreserved: review.continuityPreserved,
+            spacetimeContinuityPreserved: review.spacetimeContinuityPreserved,
+          }
+        }
         this.log("debug", "phase.completed", {
           taskId: state.taskId,
           phase,
@@ -585,6 +1282,41 @@ export class TurnOrchestrator {
         if (phase === "chapter_naming") {
           sourceUnitIds = await this.persistDraftUnits(input, state.scopeId, state.sourceId, artifacts)
         }
+        await this.dependencies.persistence.saveTaskCheckpoint({
+          projectId: input.projectId,
+          taskId: state.taskId,
+          phaseRunId: result.phaseRunId,
+          phase,
+          context,
+          modelContextChainId: state.modelContextChainId,
+          savedAtMs: this.dependencies.now(),
+        })
+        if (workflow === "query" && phase === "response_review") {
+          const reviewDecision = queryReviewDecision(result)
+          if (reviewDecision.requiresRevision) {
+            queryDraftAuditRounds += 1
+            queryRevisionFeedback = reviewDecision.feedback
+            this.log("warn", "world.query.revision_requested", {
+              taskId: state.taskId,
+              phaseRunId: result.phaseRunId,
+              round: queryDraftAuditRounds,
+              maxRounds: defaultTurnExecutionProfile.maxDraftAuditRounds,
+              outcome: result.outcome,
+              evidenceClosed: reviewDecision.review.evidenceClosed,
+              leaksUnobservedInformation: reviewDecision.review.leaksUnobservedInformation,
+              requiresWorkflowUpgrade: reviewDecision.review.requiresWorkflowUpgrade,
+              reason: result.reason,
+            })
+            if (queryDraftAuditRounds >= defaultTurnExecutionProfile.maxDraftAuditRounds) {
+              throw new QueryDraftAuditExceededError(queryDraftAuditRounds)
+            }
+            delete artifacts.draft
+            phaseIndex = queryExecutionPhases.indexOf("draft")
+            continue
+          }
+          queryRevisionFeedback = undefined
+        }
+        if (phase !== "graph_capacity_rewrite") phaseIndex += 1
       }
 
       throwIfExecutionCancelled(state.signal)
@@ -599,7 +1331,9 @@ export class TurnOrchestrator {
       if (state.signal?.aborted) {
         const cancelledPhase = phaseRuns.size === 0 ? undefined : [...phaseRuns.keys()].at(-1)
         const cancelledAtMs = this.dependencies.now()
-        this.log("info", "turn.cancelled", {
+        const cancellation = executionCancellationReason(state.signal)
+        const status = cancellation instanceof TurnPauseRequestedError ? "paused" : "cancelled"
+        this.log("info", status === "paused" ? "turn.paused" : "turn.cancelled", {
           taskId: state.taskId,
           turnId: state.turnId,
           phase: cancelledPhase,
@@ -608,11 +1342,11 @@ export class TurnOrchestrator {
         })
         await this.dependencies.persistence.updateTask(
           state.taskId,
-          "cancelled",
+          status,
           cancelledPhase,
           cancelledAtMs,
         )
-        throw executionCancellationReason(state.signal)
+        throw cancellation
       }
       const failedPhase = phaseRuns.size === 0 ? undefined : [...phaseRuns.keys()].at(-1)
       const interruptedAtMs = this.dependencies.now()
@@ -664,18 +1398,43 @@ export class TurnOrchestrator {
       state.taskId,
       state.sourceId,
       state.scopeId,
-      phaseRuns.get("graph_governance"),
+      phaseRuns.get("graph_governance_review") ?? phaseRuns.get("graph_governance"),
       artifacts,
       sourceUnitIds,
       readEvidence,
       state.createdAtMs,
     )
 
-    await this.dependencies.commit.commit(state.scopeId)
     const chapterPath = `章节正文/${sanitizeFilename(naming.filename)}`
-    await this.dependencies.workspace.publishChapter(input.workspaceRootRef, chapterPath, chapterContent)
-    await this.dependencies.persistence.updateTask(state.taskId, "completed", "commit_review", this.dependencies.now())
     const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
+    const finalization: TurnFinalizationRecord = {
+      finalizationId: this.dependencies.createId(),
+      projectId: input.projectId,
+      taskId: state.taskId,
+      turnId: state.turnId,
+      scopeId: state.scopeId,
+      contextId: state.contextId,
+      sourceId: state.sourceId,
+      chapterSequence: input.chapterSequence,
+      chapterPath,
+      chapterHeading: naming.heading,
+      contentRef,
+      contentDigest: digest(chapterContent),
+      contentTokenEstimate: estimateTokens(chapterContent),
+      canonicalMessageId: this.dependencies.createId(),
+      graphAnchorIds,
+      modelCalls: totalUsage.modelCalls,
+      inputTokens: totalUsage.inputTokens,
+      outputTokens: totalUsage.outputTokens,
+      modelProvider: this.dependencies.model.info?.provider ?? "unknown",
+      modelName: this.dependencies.model.info?.model ?? "unknown",
+      ...cacheRateResult(totalUsage),
+      status: "prepared",
+      createdAtMs: this.dependencies.now(),
+      updatedAtMs: this.dependencies.now(),
+    }
+    await this.dependencies.persistence.createFinalization(finalization)
+    await this.executeTurnFinalization(input, finalization)
     this.log("info", "turn.committed", {
       taskId: state.taskId,
       turnId: state.turnId,
@@ -702,6 +1461,153 @@ export class TurnOrchestrator {
       modelName: this.dependencies.model.info?.model ?? "unknown",
       graphAnchorIds,
       ...cacheRateResult(totalUsage),
+    }
+  }
+
+  private async resumeTurnFinalization(
+    input: TurnOrchestratorInput,
+    finalization: TurnFinalizationRecord,
+  ): Promise<TurnExecutionResult> {
+    await this.dependencies.persistence.updateTask(
+      finalization.taskId,
+      "committing",
+      "commit_review",
+      this.dependencies.now(),
+    )
+    return this.executeTurnFinalization(input, finalization)
+  }
+
+  private async executeTurnFinalization(
+    input: TurnOrchestratorInput,
+    initial: TurnFinalizationRecord,
+  ): Promise<TurnExecutionResult> {
+    let current = initial
+    try {
+      if (current.status === "prepared") {
+        this.log("debug", "turn.finalization.step.started", {
+          taskId: current.taskId,
+          finalizationId: current.finalizationId,
+          step: "scope_commit",
+        })
+        const committed = await this.dependencies.commit.commit(current.scopeId)
+        await this.dependencies.persistence.markFinalizationScopeCommitted(
+          current.finalizationId,
+          committed.committedSequence,
+          this.dependencies.now(),
+        )
+        current = await this.requireFinalization(current.taskId)
+        this.log("debug", "turn.finalization.step.completed", {
+          taskId: current.taskId,
+          finalizationId: current.finalizationId,
+          step: "scope_commit",
+          committedSequence: current.committedSequence,
+        })
+      }
+      if (current.status === "scope_committed") {
+        this.log("debug", "turn.finalization.step.started", {
+          taskId: current.taskId,
+          finalizationId: current.finalizationId,
+          step: "chapter_publish",
+        })
+        const chapterContent = await this.dependencies.internalStore.readDocument(current.contentRef)
+        if (digest(chapterContent) !== current.contentDigest) {
+          throw new Error(`Finalization chapter content digest mismatch: ${current.sourceId}`)
+        }
+        await this.dependencies.workspace.publishChapter(input.workspaceRootRef, current.chapterPath, chapterContent)
+        await this.dependencies.persistence.markFinalizationChapterPublished(
+          current.finalizationId,
+          this.dependencies.now(),
+        )
+        current = await this.requireFinalization(current.taskId)
+        this.log("debug", "turn.finalization.step.completed", {
+          taskId: current.taskId,
+          finalizationId: current.finalizationId,
+          step: "chapter_publish",
+        })
+      }
+      if (current.status === "chapter_published") {
+        this.log("debug", "turn.finalization.step.started", {
+          taskId: current.taskId,
+          finalizationId: current.finalizationId,
+          step: "chapter_register",
+        })
+        await this.dependencies.persistence.registerCanonicalChapter(
+          current.finalizationId,
+          this.dependencies.now(),
+        )
+        current = await this.requireFinalization(current.taskId)
+        this.log("debug", "turn.finalization.step.completed", {
+          taskId: current.taskId,
+          finalizationId: current.finalizationId,
+          step: "chapter_register",
+        })
+      }
+      if (current.status === "chapter_registered") {
+        this.log("debug", "turn.finalization.step.started", {
+          taskId: current.taskId,
+          finalizationId: current.finalizationId,
+          step: "task_complete",
+        })
+        await this.dependencies.persistence.completeFinalization(
+          current.finalizationId,
+          current.taskId,
+          "commit_review",
+          this.dependencies.now(),
+        )
+        this.log("debug", "turn.finalization.step.completed", {
+          taskId: current.taskId,
+          finalizationId: current.finalizationId,
+          step: "task_complete",
+        })
+      }
+      return this.turnResultFromFinalization(current)
+    } catch (error) {
+      const interruptedAtMs = this.dependencies.now()
+      const interruption = createInterruptionRecord(error, "commit_review", undefined, interruptedAtMs)
+      this.log("warn", "turn.finalization.interrupted", {
+        taskId: current.taskId,
+        finalizationId: current.finalizationId,
+        status: current.status,
+        interruption,
+      })
+      await this.dependencies.persistence.recordFinalizationError(
+        current.finalizationId,
+        interruption,
+        interruptedAtMs,
+      )
+      await this.dependencies.persistence.updateTask(
+        current.taskId,
+        "awaiting_user_decision",
+        "commit_review",
+        interruptedAtMs,
+        interruption,
+      )
+      throw error
+    }
+  }
+
+  private async requireFinalization(taskId: string): Promise<TurnFinalizationRecord> {
+    const finalization = await this.dependencies.persistence.findFinalizationByTask(taskId)
+    if (finalization !== undefined) return finalization
+    throw new Error(`Missing finalization record for task: ${taskId}`)
+  }
+
+  private turnResultFromFinalization(finalization: TurnFinalizationRecord): TurnExecutionResult {
+    return {
+      kind: "turn",
+      taskId: finalization.taskId,
+      turnId: finalization.turnId,
+      scopeId: finalization.scopeId,
+      contextId: finalization.contextId,
+      chapterPath: finalization.chapterPath,
+      chapterHeading: finalization.chapterHeading,
+      modelCalls: finalization.modelCalls,
+      inputTokens: finalization.inputTokens,
+      outputTokens: finalization.outputTokens,
+      modelProvider: finalization.modelProvider,
+      modelName: finalization.modelName,
+      graphAnchorIds: finalization.graphAnchorIds,
+      ...(finalization.kvCacheHitRate === undefined ? {} : { kvCacheHitRate: finalization.kvCacheHitRate }),
     }
   }
 
@@ -769,7 +1675,7 @@ export class TurnOrchestrator {
       state.taskId,
       state.sourceId,
       state.scopeId,
-      phaseRuns.get("graph_governance"),
+      phaseRuns.get("graph_governance_review") ?? phaseRuns.get("graph_governance"),
       artifacts,
       [],
       readEvidence,
@@ -815,6 +1721,9 @@ export class TurnOrchestrator {
     let currentEvidence = [...input.readEvidence]
     let currentVisibleEvidence = [...input.visibleEvidence]
     let currentRetrievalGaps = [...input.retrievalGaps]
+    const currentVerificationProbeCheckpoints = [...input.verificationProbeCheckpoints]
+    let currentVerificationProbeExecutions: VerificationProbeExecution[] = currentVerificationProbeCheckpoints
+      .map((checkpoint) => checkpoint.execution)
     const inheritedRetrievalGapCount = currentRetrievalGaps.length
     const inheritedVisibleEvidence = uniqueTurnReadEvidence(input.visibleEvidence)
     const phaseCitedReadIds = new Set<string>()
@@ -848,8 +1757,15 @@ export class TurnOrchestrator {
         phaseRunIds: input.phaseRunIds,
         readEvidence: currentVisibleEvidence,
         retrievalGaps: currentRetrievalGaps,
+        ...((input.phase === "semantic_review" || input.phase === "graph_governance_review") && currentVerificationProbeExecutions.length > 0
+          ? { verificationProbeExecutions: currentVerificationProbeExecutions }
+          : {}),
         ...(phaseUsesWorkspaceCatalog(input.phase) ? { workspaceCatalog: input.catalogSnapshot } : {}),
         ...(input.input.projectSettings === undefined ? {} : { projectSettings: input.input.projectSettings }),
+        ...(input.revisionFeedback === undefined ? {} : { revisionFeedback: input.revisionFeedback }),
+        ...(input.phase === "graph_capacity_rewrite"
+          ? { graphCapacity: await this.readGraphCapacity(input) }
+          : {}),
         artifacts: selectPhaseArtifacts(input.phase, input.artifacts),
       }
       const phaseBudget = remainingBudget(input.budget, {
@@ -920,8 +1836,12 @@ export class TurnOrchestrator {
         visiblePendingCount: request.visiblePendingIds.length,
         evidenceCount: currentEvidence.length,
         visibleEvidenceCount: currentVisibleEvidence.length,
+        visibleEvidenceProfile: profileTurnEvidence(currentVisibleEvidence),
         retrievalGapCount: currentRetrievalGaps.length,
         priorArtifactCount: Object.keys(input.artifacts).length,
+        phaseInputCharacters: JSON.stringify(phaseInput).length,
+        artifactCharacters: JSON.stringify(phaseInput.artifacts).length,
+        workspaceCatalogEntryCount: phaseInput.workspaceCatalog?.entries.length ?? 0,
         remainingCalls: request.remainingBudget.remainingCalls,
         remainingInputTokens: request.remainingBudget.remainingInputTokens,
         remainingOutputTokens: request.remainingBudget.remainingOutputTokens,
@@ -931,9 +1851,76 @@ export class TurnOrchestrator {
 
       let execution: PhaseModelExecution
       try {
+        const persistedContextMessages = await this.dependencies.persistence.listModelContextMessages(input.modelContextChainId)
+        const hydratedContextContent = new Map<string, string>()
+        const contextMessagesForCompaction = await Promise.all(persistedContextMessages.map(async (message) => {
+          const content = message.content ?? await this.dependencies.internalStore.readDocument(message.contentRef as string)
+          hydratedContextContent.set(message.messageId, content)
+          return {
+            ...message,
+            tokenEstimate: estimateModelMessageTokens(content),
+          }
+        }))
+        const compaction = this.contextWindow.plan({
+          messages: contextMessagesForCompaction,
+          currentTurnId: currentContext.turnId,
+          contextWindowTokens: requireModelContextWindowTokens(this.dependencies.model),
+          triggerRatio: input.input.projectSettings?.execution.contextCompactionThresholdRatio
+            ?? defaultProjectSettings.execution.contextCompactionThresholdRatio,
+          targetRatio: input.input.projectSettings?.execution.contextCompressionTargetRatio
+            ?? defaultProjectSettings.execution.contextCompressionTargetRatio,
+          incomingTokenEstimate: estimateModelMessageTokens(JSON.stringify({ phase: input.phase, prompt: prompt.text, request })),
+        })
+        this.log("debug", "context.compaction.evaluated", {
+          taskId: currentContext.taskId,
+          phase: input.phase,
+          chainId: input.modelContextChainId,
+          messageCount: persistedContextMessages.length,
+          compactionPhase: compaction.phase,
+          estimatedTokens: compaction.estimatedTokens,
+          thresholdTokens: compaction.thresholdTokens,
+          targetTokens: compaction.targetTokens,
+          hiddenMessageCount: compaction.hiddenMessageIds.length,
+          protectedTokens: compaction.protectedTokens,
+          blocked: compaction.blocked,
+        })
+        if (compaction.blocked) {
+          throw new Error(compaction.reason ?? "Protected model context exceeds the configured model window")
+        }
+        if (compaction.hiddenMessageIds.length > 0) {
+          await this.dependencies.persistence.hideModelContextMessages(
+            input.modelContextChainId,
+            compaction.hiddenMessageIds,
+            this.dependencies.now(),
+          )
+          this.log("info", "context.compaction.applied", {
+            taskId: currentContext.taskId,
+            phase: input.phase,
+            chainId: input.modelContextChainId,
+            compactionPhase: compaction.phase,
+            hiddenMessageIds: compaction.hiddenMessageIds,
+            visibleMessageCount: compaction.visibleMessages.length,
+            estimatedTokens: compaction.estimatedTokens,
+          })
+        }
+        const contextMessages = compaction.visibleMessages.map((message) => ({
+          messageId: message.messageId,
+          sequence: message.sequence,
+          role: message.role,
+          kind: message.kind,
+          ...(message.taskId === undefined ? {} : { taskId: message.taskId }),
+          ...(message.turnId === undefined ? {} : { turnId: message.turnId }),
+          ...(message.phase === undefined ? {} : { phase: message.phase }),
+          content: hydratedContextContent.get(message.messageId) as string,
+        }))
         execution = await this.dependencies.model.execute(
           request,
-          input.signal === undefined ? undefined : { signal: input.signal },
+          {
+            contextChainId: input.modelContextChainId,
+            contextMessages,
+            phasePrompt: prompt,
+            ...(input.signal === undefined ? {} : { signal: input.signal }),
+          },
         )
         throwIfExecutionCancelled(input.signal)
       } catch (error) {
@@ -988,6 +1975,26 @@ export class TurnOrchestrator {
       for (const readId of parsedResult.citedReadIds) phaseCitedReadIds.add(readId)
       const attemptUsage = phaseUsageFromExecution(execution)
       phaseUsage = addPhaseUsage(phaseUsage, attemptUsage)
+      const effectiveRequestedReads = parsedResult.requestedReads
+      let validatedFinalArtifact: unknown
+      if (effectiveRequestedReads.length === 0) {
+        try {
+          validatedFinalArtifact = parsePhaseArtifact(input.phase, parsedResult.artifact)
+          if (input.phase === "semantic_review" || input.phase === "graph_governance_review") {
+            this.verificationProbes.assertAssessments(validatedFinalArtifact, currentVerificationProbeExecutions)
+          }
+          this.assertDraftCanBePublished(input.phase, validatedFinalArtifact, currentContext.taskId, currentPhaseRunId)
+        } catch (error) {
+          await this.dependencies.persistence.finishPhaseRun({
+            phaseRunId: currentPhaseRunId,
+            status: "failed",
+            result: { error: error instanceof Error ? error.message : String(error) },
+            usage: execution.usage,
+            finishedAtMs: this.dependencies.now(),
+          })
+          throw error
+        }
+      }
       const resultSegment = {
         segmentId: this.dependencies.createId(),
         kind: "phase_result" as const,
@@ -1006,6 +2013,12 @@ export class TurnOrchestrator {
           ...(execution.usage.reasoningContent === undefined ? {} : { modelReasoning: execution.usage.reasoningContent }),
         },
         usage: execution.usage,
+        ...(execution.contextExchange === undefined ? {} : {
+          contextMessages: [
+            ...execution.contextExchange.requestMessages,
+            execution.contextExchange.responseMessage,
+          ],
+        }),
         finishedAtMs: this.dependencies.now(),
       })
       await this.dependencies.persistence.saveContext(currentContext, this.dependencies.now())
@@ -1023,49 +2036,75 @@ export class TurnOrchestrator {
           message: "AI workflow decisions are advisory; structural persistence gates determine whether execution can continue",
         })
       }
-      if (parsedResult.requestedReads.length === 0) {
-        const artifact = parsePhaseArtifact(input.phase, parsedResult.artifact)
-        this.assertDraftCanBePublished(input.phase, artifact, currentContext.taskId, currentPhaseRunId)
+      if (effectiveRequestedReads.length === 0) {
         return {
           phaseRunId: currentPhaseRunId,
           context: currentContext,
           readEvidence: currentEvidence,
           visibleEvidence: carryForwardEvidence(),
           retrievalGaps: currentRetrievalGaps.slice(inheritedRetrievalGapCount),
-          artifact,
+          artifact: validatedFinalArtifact,
+          outcome: parsedResult.outcome,
+          reason: parsedResult.reason,
+          selfReview: parsedResult.selfReview,
           usage: phaseUsage,
         }
       }
 
+      const completedProbePlans = new Set(currentVerificationProbeCheckpoints.map((checkpoint) => checkpoint.planDigest))
+      const plannedInThisResponse = new Set<string>()
+      const requestedReads = effectiveRequestedReads.filter((read) => {
+        if ((input.phase !== "semantic_review" && input.phase !== "graph_governance_review") || read.verificationProbe === undefined) return true
+        const planDigest = this.verificationProbes.planDigest(read, input.artifacts.graph_governance)
+        if (completedProbePlans.has(planDigest) || plannedInThisResponse.has(planDigest)) return false
+        plannedInThisResponse.add(planDigest)
+        return true
+      })
+      const skippedProbeCount = effectiveRequestedReads.length - requestedReads.length
+      if (skippedProbeCount > 0) {
+        this.log("debug", "verification_probe.completed_plan_skipped", {
+          taskId: currentContext.taskId,
+          phaseRunId: currentPhaseRunId,
+          skippedProbeCount,
+          completedProbeCount: currentVerificationProbeCheckpoints.length,
+        })
+      }
+      const readsStartedAtMs = this.dependencies.now()
+      const includesVerificationProbe = (input.phase === "semantic_review" || input.phase === "graph_governance_review")
+        && requestedReads.some((request) => request.verificationProbe !== undefined)
       this.log("debug", "phase.reads.started", {
         taskId: currentContext.taskId,
         phase: input.phase,
         phaseRunId: currentPhaseRunId,
         attempt,
-        requestCount: parsedResult.requestedReads.length,
+        requestCount: requestedReads.length,
       })
 
       if (attempt >= (input.input.maxRetrievalRounds ?? input.input.projectSettings?.execution.maxRetrievalRounds ?? defaultProjectSettings.execution.maxRetrievalRounds)) {
+        if ((input.phase === "semantic_review" || input.phase === "graph_governance_review")
+          && requestedReads.some((request) => request.verificationProbe !== undefined)) {
+          throw new Error("Verification probes cannot be skipped when retrieval rounds are exhausted")
+        }
         this.log("warn", "phase.reads.exhausted", {
           taskId: currentContext.taskId,
           phase: input.phase,
           phaseRunId: currentPhaseRunId,
           attempt,
-          requestedReadIds: parsedResult.requestedReads.map((read) => read.requestId),
+          requestedReadIds: requestedReads.map((read) => read.requestId),
           ledgerReturnedReadIds: currentContext.readLedger.returnedReadIds,
           ledgerCommittedReadIds: currentContext.readLedger.committedReadIds,
           ledgerVisiblePendingIds: currentContext.readLedger.visiblePendingIds,
         })
         currentRetrievalGaps = [
           ...currentRetrievalGaps,
-          ...createRetrievalGaps(parsedResult.requestedReads),
+          ...createRetrievalGaps(requestedReads),
         ]
         this.log("debug", "retrieval.gaps.recorded", {
           taskId: currentContext.taskId,
           phase: input.phase,
           phaseRunId: currentPhaseRunId,
-          gapCount: parsedResult.requestedReads.length,
-          requestIds: parsedResult.requestedReads.map((request) => request.requestId),
+          gapCount: requestedReads.length,
+          requestIds: requestedReads.map((request) => request.requestId),
           typeId: "system:retrieval-gap",
         })
         return {
@@ -1080,24 +2119,66 @@ export class TurnOrchestrator {
             currentContext.taskId,
             currentPhaseRunId,
           ),
+          outcome: parsedResult.outcome,
+          reason: parsedResult.reason,
+          selfReview: parsedResult.selfReview,
           usage: phaseUsage,
         }
       }
       const readResult = await this.executeReads(
         currentContext,
-        parsedResult.requestedReads,
+        requestedReads,
         input.input.projectId,
         input.inputScopeId,
         input.input.projectSettings?.retrieval,
         input.input.workspaceRootRef,
         input.catalogSnapshot,
         currentEvidence,
-        currentVisibleEvidence,
+        includesVerificationProbe ? [] : currentVisibleEvidence,
         input.input.allowWorkspaceChapterReads ?? true,
+        async (request, readExecution, requestEvidence, contextRead) => {
+          if ((input.phase !== "semantic_review" && input.phase !== "graph_governance_review") || request.verificationProbe === undefined) return
+          const probeIndex = (currentVerificationProbeExecutions.at(-1)?.probeIndex ?? -1) + 1
+          const execution = this.verificationProbes.createExecutions(
+            [request],
+            [readExecution],
+            input.artifacts.graph_governance,
+            probeIndex,
+          )[0]
+          if (execution === undefined) throw new Error(`Verification probe execution was not created: ${request.requestId}`)
+          const checkpointCore = {
+            projectId: input.input.projectId,
+            taskId: currentContext.taskId,
+            phaseRunId: currentPhaseRunId,
+            probeIndex,
+            planDigest: this.verificationProbes.planDigest(request, input.artifacts.graph_governance),
+            execution,
+            evidence: requestEvidence,
+            contextRead,
+            createdAtMs: this.dependencies.now(),
+          }
+          const checkpoint = { ...checkpointCore, recordDigest: digest(checkpointCore) }
+          const savedCheckpoint = await this.dependencies.persistence.saveVerificationProbeCheckpoint(checkpoint)
+          currentVerificationProbeCheckpoints.push(savedCheckpoint)
+          currentVerificationProbeExecutions = [...currentVerificationProbeExecutions, savedCheckpoint.execution]
+          this.log("debug", "verification_probe.checkpoint.saved", {
+            taskId: currentContext.taskId,
+            phaseRunId: currentPhaseRunId,
+            probeIndex,
+            planDigest: savedCheckpoint.planDigest,
+            evidenceCount: savedCheckpoint.evidence.length,
+          })
+        },
       )
       currentContext = readResult.context
-      currentEvidence = [...currentEvidence, ...readResult.evidence]
-      currentVisibleEvidence = [...currentVisibleEvidence, ...readResult.evidence]
+      currentEvidence = reconcileCurrentGraphEvidence(
+        [...currentEvidence, ...readResult.evidence],
+        readResult.currentGraphRevisions,
+      )
+      currentVisibleEvidence = reconcileCurrentGraphEvidence(
+        [...currentVisibleEvidence, ...readResult.evidence],
+        readResult.currentGraphRevisions,
+      )
       this.log("debug", "phase.reads.completed", {
         taskId: currentContext.taskId,
         phase: input.phase,
@@ -1105,23 +2186,52 @@ export class TurnOrchestrator {
         attempt,
         evidenceAdded: readResult.evidence.length,
         evidenceReadIds: readResult.evidence.map((evidence) => evidence.readId),
+        elapsedMs: this.dependencies.now() - readsStartedAtMs,
+        addedEvidenceProfile: profileTurnEvidence(readResult.evidence),
         totalEvidence: currentEvidence.length,
         retrievalGapCount: currentRetrievalGaps.length,
         committedReadCount: currentContext.readLedger.committedReadIds.length,
         visiblePendingCount: currentContext.readLedger.visiblePendingIds.length,
         ledgerReturnedReadIds: currentContext.readLedger.returnedReadIds,
       })
-      if (readResult.evidence.length === 0) {
+      const readsResolvedFromVisibleEvidence = readResult.readExecutions.some((execution) => (
+        execution.returnedReadRefs.length > 0
+      ))
+      if (readResult.evidence.length === 0 && readsResolvedFromVisibleEvidence && !includesVerificationProbe) {
+        this.log("debug", "retrieval.visible_evidence_reused", {
+          taskId: currentContext.taskId,
+          phase: input.phase,
+          phaseRunId: currentPhaseRunId,
+          requestIds: requestedReads.map((request) => request.requestId),
+          returnedReadRefs: readResult.readExecutions.flatMap((execution) => execution.returnedReadRefs),
+        })
+        await this.dependencies.persistence.saveContext(currentContext, this.dependencies.now())
+        return {
+          phaseRunId: currentPhaseRunId,
+          context: currentContext,
+          readEvidence: currentEvidence,
+          visibleEvidence: carryForwardEvidence(),
+          retrievalGaps: currentRetrievalGaps.slice(inheritedRetrievalGapCount),
+          artifact: parsePhaseArtifact(input.phase, parsedResult.artifact),
+          outcome: parsedResult.outcome,
+          reason: parsedResult.reason,
+          selfReview: parsedResult.selfReview,
+          usage: phaseUsage,
+        }
+      }
+      if (readResult.evidence.length === 0 && !readsResolvedFromVisibleEvidence
+        && !((input.phase === "semantic_review" || input.phase === "graph_governance_review")
+          && effectiveRequestedReads.some((request) => request.verificationProbe !== undefined))) {
         currentRetrievalGaps = [
           ...currentRetrievalGaps,
-          ...createRetrievalGaps(parsedResult.requestedReads),
+          ...createRetrievalGaps(requestedReads),
         ]
         this.log("debug", "retrieval.gaps.recorded", {
           taskId: currentContext.taskId,
           phase: input.phase,
           phaseRunId: currentPhaseRunId,
-          gapCount: parsedResult.requestedReads.length,
-          requestIds: parsedResult.requestedReads.map((request) => request.requestId),
+          gapCount: requestedReads.length,
+          requestIds: requestedReads.map((request) => request.requestId),
           typeId: "system:retrieval-gap",
           reason: "no_new_evidence",
         })
@@ -1133,6 +2243,9 @@ export class TurnOrchestrator {
           visibleEvidence: carryForwardEvidence(),
           retrievalGaps: currentRetrievalGaps.slice(inheritedRetrievalGapCount),
           artifact: parsePhaseArtifact(input.phase, parsedResult.artifact),
+          outcome: parsedResult.outcome,
+          reason: parsedResult.reason,
+          selfReview: parsedResult.selfReview,
           usage: phaseUsage,
         }
       }
@@ -1140,6 +2253,138 @@ export class TurnOrchestrator {
       currentPhaseRunId = this.dependencies.createId()
       input.phaseRunIds.push(currentPhaseRunId)
       attempt += 1
+    }
+  }
+
+  private async readGraphCapacity(input: ExecutePhaseInput): Promise<NonNullable<TurnPhaseInput["graphCapacity"]>> {
+    const settings = input.input.projectSettings?.graph ?? defaultProjectSettings.graph
+    const profile: GraphDegreeProfile = await this.dependencies.graph.getDegreeProfile({
+      projectId: input.input.projectId,
+      pendingScopeId: input.inputScopeId,
+    })
+    return {
+      nodeCount: profile.nodeCount,
+      linkCount: profile.linkCount,
+      maxDirectInDegree: settings.maxDirectInDegree,
+      maxDirectOutDegree: settings.maxDirectOutDegree,
+      mergeWarningThreshold: settings.mergeWarningThreshold,
+      hotspots: profile.entries.slice(0, Math.max(8, settings.maxNeighborhoodAnchors)),
+      ...(input.graphCapacityFeedback === undefined ? {} : {
+        candidateAssessment: input.graphCapacityFeedback,
+      }),
+    }
+  }
+
+  private async readGraphCapacityEvidence(input: Readonly<{
+    context: TurnContext
+    input: TurnOrchestratorInput
+    scopeId: string
+    catalogSnapshot: WorkspaceCatalogSnapshot
+    existingEvidence: readonly TurnReadEvidence[]
+    visibleEvidence: readonly TurnReadEvidence[]
+    violations: GraphCapacityAssessment["violations"]
+  }>): Promise<Readonly<{ context: TurnContext; evidence: readonly TurnReadEvidence[] }>> {
+    const graphSettings = input.input.projectSettings?.graph ?? defaultProjectSettings.graph
+    const retrievalSettings = input.input.projectSettings?.retrieval ?? defaultProjectSettings.retrieval
+    const anchorIds = [...new Set(input.violations.map((violation) => violation.nodeId)
+      .filter((nodeId) => !nodeId.startsWith("local:")))]
+    if (anchorIds.length === 0) return { context: input.context, evidence: [] }
+    const maxCandidates = Math.max(
+      retrievalSettings.maxCandidates,
+      graphSettings.maxVisitedNodes + graphSettings.maxVisitedLinks,
+    )
+    const requestId = this.dependencies.createId()
+    const result = await this.executeReads(
+      input.context,
+      [{
+        requestId,
+        reason: "Read the bounded local graph around capacity violations before restructuring it",
+        expectedEvidence: "Current hotspot nodes, incident links, and adjacent nodes needed for a valid local graph rewrite",
+        query: {
+          exactKeys: [],
+          semanticTexts: [],
+          anchorIds,
+          directions: ["both"],
+          maxCandidates,
+          maxDepth: 1,
+          sourceKinds: ["graph", "revision"],
+        },
+      }],
+      input.input.projectId,
+      input.scopeId,
+      {
+        ...retrievalSettings,
+        maxCandidates,
+        maxDepth: Math.max(1, retrievalSettings.maxDepth),
+      },
+      input.input.workspaceRootRef,
+      input.catalogSnapshot,
+      input.existingEvidence,
+      [],
+      input.input.allowWorkspaceChapterReads ?? true,
+    )
+    this.log("debug", "graph.capacity.evidence_loaded", {
+      taskId: input.context.taskId,
+      requestId,
+      anchorIds,
+      evidenceCount: result.evidence.length,
+      graphOwnerIds: result.evidence
+        .filter((evidence) => evidence.ownerKind === "node" || evidence.ownerKind === "link")
+        .map((evidence) => evidence.ownerId),
+    })
+    return { context: result.context, evidence: result.evidence }
+  }
+
+  private async assessGraphStructureCapacity(
+    input: TurnOrchestratorInput,
+    structure: ReturnType<typeof graphStructurePlanArtifactSchema.parse>,
+  ): Promise<GraphCapacityAssessment> {
+    const settings = input.projectSettings?.graph ?? defaultProjectSettings.graph
+    return assessGraphStructureCapacity({
+      projectId: input.projectId,
+      profile: await this.dependencies.graph.getDegreeProfile({ projectId: input.projectId }),
+      structure,
+      limits: settings,
+      graph: this.dependencies.graph,
+    })
+  }
+
+  private materializeStagedGraphGovernanceArtifacts(
+    artifacts: Partial<Record<AIPhase, unknown>>,
+    sourceUnitCount: number,
+  ): void {
+    if (artifacts.graph_governance === undefined
+      && artifacts.graph_structure_plan !== undefined
+      && artifacts.graph_spacetime_settlement !== undefined
+      && artifacts.graph_retrieval_design !== undefined) {
+      artifacts.graph_governance = assembleGraphGovernanceArtifact({
+        structure: graphStructurePlanArtifactSchema.parse(artifacts.graph_structure_plan),
+        spacetime: graphSpacetimeSettlementArtifactSchema.parse(artifacts.graph_spacetime_settlement),
+        retrieval: graphRetrievalDesignArtifactSchema.parse(artifacts.graph_retrieval_design),
+        sourceUnitCount,
+      })
+    }
+    if (artifacts.semantic_review === undefined
+      && artifacts.graph_governance !== undefined
+      && artifacts.graph_governance_review !== undefined) {
+      const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
+      const review = graphGovernanceReviewArtifactSchema.parse(artifacts.graph_governance_review)
+      artifacts.semantic_review = {
+        approvedMutationIndexes: governance.mutations.map((_, index) => index),
+        rejectedMutationIndexes: [],
+        approvedSpacetimeBindingIndexes: governance.sceneSpacetimeBindings.map((_, index) => index),
+        rejectedSpacetimeBindingIndexes: [],
+        approvedMutationSpacetimeSettlementIndexes: governance.mutationSpacetimeSettlements.map((_, index) => index),
+        rejectedMutationSpacetimeSettlementIndexes: [],
+        approvedAffectedFrontierRefs: governance.affectedFrontierRefs,
+        rejectedAffectedFrontierRefs: [],
+        verificationProbeAssessments: review.verificationProbeAssessments,
+        sceneInventoryComplete: true,
+        graphStillDiscoverable: review.graphStillDiscoverable,
+        graphStillConcise: review.graphStillConcise,
+        continuityPreserved: review.continuityPreserved,
+        spacetimeContinuityPreserved: review.spacetimeContinuityPreserved,
+      }
     }
   }
 
@@ -1169,7 +2414,7 @@ export class TurnOrchestrator {
     const evidence: TurnReadEvidence[] = []
     for (const entry of requiredEntries) {
       const content = await this.dependencies.workspace.readMarkdown(input.workspaceRootRef, entry.relativePath)
-      const evidenceId = this.dependencies.createId()
+      const evidenceId = await this.nextPersistentId(input.projectId, "evidence")
       const storedEvidence = await this.dependencies.evidence.writeImmutable({
         evidenceId,
         projectId: input.projectId,
@@ -1276,7 +2521,7 @@ export class TurnOrchestrator {
         lastLocationAnchorCount: frontier.lastLocationAnchorRefs.length,
         correspondenceCount: frontier.correspondenceRefs.length,
       })
-      const readId = this.dependencies.createId()
+      const readId = await this.nextPersistentId(input.projectId, "evidence")
       const storedEvidence = await this.dependencies.evidence.writeImmutable({
         evidenceId: readId,
         projectId: input.projectId,
@@ -1332,7 +2577,7 @@ export class TurnOrchestrator {
 
     for (const projection of currentProjections) {
       const storedEvidence = await this.dependencies.evidence.writeImmutable({
-        evidenceId: this.dependencies.createId(),
+        evidenceId: await this.nextPersistentId(input.projectId, "evidence"),
         projectId: input.projectId,
         contextId: context.contextId,
         sourceKind: "graph",
@@ -1398,11 +2643,38 @@ export class TurnOrchestrator {
     existingEvidence: readonly TurnReadEvidence[],
     budgetEvidence: readonly TurnReadEvidence[],
     allowWorkspaceChapterReads: boolean,
-  ): Promise<{ context: TurnContext; evidence: readonly TurnReadEvidence[] }> {
-    const returned = [] as Array<{ readId: string; reason: string; segment: TurnContext["segments"][number] }>
+    onReadExecution?: (
+      request: PhaseResultEnvelope["requestedReads"][number],
+      execution: ReadExecutionRecord,
+      evidence: readonly TurnReadEvidence[],
+      contextRead: Readonly<{
+        requestId: string
+        returned: readonly Readonly<{
+          readId: string
+          reason: string
+          segment: TurnContext["segments"][number]
+        }>[]
+        rejectedReadIds: readonly string[]
+      }>,
+    ) => Promise<void>,
+  ): Promise<{
+    context: TurnContext
+    evidence: readonly TurnReadEvidence[]
+    readExecutions: readonly ReadExecutionRecord[]
+    currentGraphRevisions: readonly CurrentGraphOwnerRevision[]
+  }> {
+    const returned = [] as Array<{
+      requestId: string
+      readId: string
+      reason: string
+      segment: TurnContext["segments"][number]
+    }>
     const evidence: TurnReadEvidence[] = []
+    const readExecutions: ReadExecutionRecord[] = []
+    const currentGraphRevisions = new Map<string, CurrentGraphOwnerRevision>()
     const seenReadIds = new Set<string>()
     const seenEvidenceKeys = new Set(existingEvidence.map((item) => `${item.ownerId}:${item.digest}`))
+    const visibleReadIds = new Set(budgetEvidence.map((item) => item.readId))
     const selectedRequests = requests.slice(0, settings?.maxRequestsPerRound ?? requests.length)
     const evidenceTokenLimit = settings?.maxEvidenceTokens ?? Number.POSITIVE_INFINITY
     let evidenceTokens = budgetEvidence
@@ -1411,6 +2683,7 @@ export class TurnOrchestrator {
     let evidenceBudgetTruncated = false
     let includedRelatedOwnerRefs = 0
     let omittedRelatedOwnerRefs = 0
+    let nextContext = context
     if (selectedRequests.length < requests.length) {
       this.log("debug", "retrieval.requests.truncated", {
         taskId: context.taskId,
@@ -1420,6 +2693,10 @@ export class TurnOrchestrator {
       })
     }
     for (const request of selectedRequests) {
+      const evidenceStartIndex = evidence.length
+      const retrievalRequestStartedAtMs = this.dependencies.now()
+      const requestReadRefs = new Set<string>()
+      const requestGraphRefs = new Set<string>()
       const maxCandidates = Math.min(request.query.maxCandidates, settings?.maxCandidates ?? request.query.maxCandidates)
       const maxDepth = Math.min(request.query.maxDepth, settings?.maxDepth ?? request.query.maxDepth)
       const workspaceEntries = selectWorkspaceEntries(
@@ -1430,7 +2707,11 @@ export class TurnOrchestrator {
       )
       for (const entry of workspaceEntries) {
         const evidenceKey = `${entry.relativePath}:${entry.digest}`
-        if (seenEvidenceKeys.has(evidenceKey)) continue
+        if (seenEvidenceKeys.has(evidenceKey)) {
+          const existing = [...existingEvidence, ...evidence].find((item) => `${item.ownerId}:${item.digest}` === evidenceKey)
+          if (existing !== undefined) requestReadRefs.add(existing.readId)
+          continue
+        }
         const content = await this.dependencies.workspace.readMarkdown(workspaceRootRef, entry.relativePath)
         const workspaceEvidence = workspaceTurnEvidence("budget-preview", entry, content)
         const tokenEstimate = estimateRetrievalEvidenceTokens(workspaceEvidence)
@@ -1440,7 +2721,7 @@ export class TurnOrchestrator {
         }
         seenEvidenceKeys.add(evidenceKey)
         evidenceTokens += tokenEstimate
-        const evidenceId = this.dependencies.createId()
+        const evidenceId = await this.nextPersistentId(projectId, "evidence")
         const storedEvidence = await this.dependencies.evidence.writeImmutable({
           evidenceId,
           projectId,
@@ -1455,6 +2736,7 @@ export class TurnOrchestrator {
           createdAtMs: this.dependencies.now(),
         })
         returned.push({
+          requestId: request.requestId,
           readId: storedEvidence.evidenceId,
           reason: request.reason,
           segment: {
@@ -1468,6 +2750,7 @@ export class TurnOrchestrator {
           },
         })
         evidence.push(workspaceTurnEvidence(storedEvidence.evidenceId, entry, content))
+        requestReadRefs.add(storedEvidence.evidenceId)
       }
       const searchesGraph = request.query.sourceKinds.some((kind) => (
         kind === "graph" || kind === "revision" || kind === "source"
@@ -1475,9 +2758,72 @@ export class TurnOrchestrator {
       const searchesGraphOwners = request.query.sourceKinds.some((kind) => (
         kind === "graph" || kind === "revision"
       ))
-      const anchored = searchesGraph ? await this.dependencies.retrieval.findCurrentForOwners(
-        { projectId, pendingScopeId: scopeId }, request.query.anchorIds, maxCandidates,
-      ) : []
+      const graphScope = { projectId, pendingScopeId: scopeId }
+      const neighborhood = searchesGraphOwners && request.query.anchorIds.length > 0 && maxDepth > 0
+        ? await this.dependencies.graph.getNeighborhood({
+            scope: graphScope,
+            anchorIds: request.query.anchorIds,
+            direction: resolveGraphReadDirection(request.query.directions),
+            maxDepth,
+            maxNodes: maxCandidates,
+            maxLinks: maxCandidates,
+          })
+        : undefined
+      const anchoredOwnerIds = [...new Set([
+        ...request.query.anchorIds,
+        ...(neighborhood?.nodes.map((node) => node.id) ?? []),
+        ...(neighborhood?.links.map((link) => link.id) ?? []),
+      ])]
+      const currentAnchorRevisions = searchesGraphOwners
+        ? await this.dependencies.graph.getCurrentOwnerRevisions(graphScope, anchoredOwnerIds)
+        : []
+      for (const current of currentAnchorRevisions) {
+        currentGraphRevisions.set(`${current.ownerKind}:${current.ownerId}`, current)
+      }
+      const visibleGraphEvidenceByOwner = new Map(
+        budgetEvidence
+          .filter((item) => (item.ownerKind === "node" || item.ownerKind === "link") && item.revisionId !== undefined)
+          .map((item) => [`${item.ownerKind}:${item.ownerId}`, item] as const),
+      )
+      const staleOrMissingAnchorIds = currentAnchorRevisions.flatMap((current) => {
+        const visible = visibleGraphEvidenceByOwner.get(`${current.ownerKind}:${current.ownerId}`)
+        return visible?.revisionId === current.revisionId ? [] : [current.ownerId]
+      })
+      for (const current of currentAnchorRevisions) {
+        const visible = visibleGraphEvidenceByOwner.get(`${current.ownerKind}:${current.ownerId}`)
+        if (visible?.revisionId === current.revisionId) {
+          requestReadRefs.add(visible.readId)
+          requestGraphRefs.add(visible.ownerId)
+        }
+      }
+      const freshnessProfile = currentAnchorRevisions.reduce((profile, current) => {
+        const visible = visibleGraphEvidenceByOwner.get(`${current.ownerKind}:${current.ownerId}`)
+        if (visible === undefined) profile.missing += 1
+        else if (visible.revisionId === current.revisionId) profile.current += 1
+        else profile.stale += 1
+        return profile
+      }, { current: 0, stale: 0, missing: 0 })
+      this.log("debug", "retrieval.graph_freshness.checked", {
+        taskId: context.taskId,
+        requestId: request.requestId,
+        requestedAnchorCount: anchoredOwnerIds.length,
+        resolvedAnchorCount: currentAnchorRevisions.length,
+        currentEvidenceCount: freshnessProfile.current,
+        staleEvidenceCount: freshnessProfile.stale,
+        missingEvidenceCount: freshnessProfile.missing,
+      })
+      const refreshOwnerIds = [...new Set([
+        ...staleOrMissingAnchorIds,
+        ...(neighborhood?.nodes.map((node) => node.id) ?? []),
+        ...(neighborhood?.links.map((link) => link.id) ?? []),
+      ])]
+      const anchored = searchesGraph && refreshOwnerIds.length > 0
+        ? await this.dependencies.retrieval.findCurrentForOwners(
+            graphScope,
+            refreshOwnerIds,
+            Math.max(maxCandidates, refreshOwnerIds.length),
+          )
+        : []
       const exact = searchesGraph ? await this.dependencies.retrieval.searchExact(
         { projectId, pendingScopeId: scopeId }, request.query.exactKeys, maxCandidates,
       ) : []
@@ -1495,8 +2841,16 @@ export class TurnOrchestrator {
           sourceIds.length === 0 ? undefined : sourceIds,
         )))
         : []
+      const sourceLiteral = searchesGraph && request.query.sourceKinds.includes("source")
+        ? await Promise.all(request.query.exactKeys.map((text) => this.dependencies.retrieval.searchSourceText(
+          { projectId, pendingScopeId: scopeId },
+          text,
+          maxCandidates,
+          sourceIds.length === 0 ? undefined : sourceIds,
+        )))
+        : []
       const sourceOnly = request.query.sourceKinds.every((kind) => kind === "source")
-      const primarySourceMatch = sourceSemantic.find((matches) => matches.length > 0)?.[0]
+      const primarySourceMatch = [...sourceLiteral, ...sourceSemantic].find((matches) => matches.length > 0)?.[0]
       const sourceNeighborhoodRadius = Math.max(0, Math.floor((maxCandidates - 1) / 2))
       const sourceNeighborhood = !sourceOnly || primarySourceMatch === undefined
         ? []
@@ -1506,15 +2860,35 @@ export class TurnOrchestrator {
           sourceNeighborhoodRadius,
           maxCandidates,
         )
+      const sourceBoundary = !request.query.sourceKinds.includes("source")
+        || request.query.sourceBoundary === undefined
+        || (request.query.sourceIds?.length ?? 0) === 0
+        ? []
+        : await this.dependencies.retrieval.readSourceBoundary(
+          { projectId, pendingScopeId: scopeId },
+          request.query.sourceIds ?? [],
+          request.query.sourceBoundary,
+          maxCandidates,
+        )
       const orderedCandidates = sourceOnly
-        ? [...sourceNeighborhood, ...exact, ...anchored, ...sourceSemantic.flat()]
-        : [...anchored, ...exact, ...sourceNeighborhood, ...sourceSemantic.flat(), ...semantic.flat()]
-      const projections = uniqueRetrievalProjections(
-        orderedCandidates.filter((projection) => (
-          projectionMatchesRequestedSourceKinds(projection, request.query.sourceKinds)
-        )),
+        ? [...sourceBoundary, ...sourceNeighborhood, ...exact, ...sourceLiteral.flat(), ...anchored, ...sourceSemantic.flat()]
+        : [...sourceBoundary, ...anchored, ...exact, ...sourceLiteral.flat(), ...sourceNeighborhood, ...sourceSemantic.flat(), ...semantic.flat()]
+      const eligibleCandidates = orderedCandidates.filter((projection) => (
+        projectionMatchesRequestedSourceKinds(projection, request.query.sourceKinds)
+      ))
+      const projections = selectRetrievalProjections(
+        eligibleCandidates,
         maxCandidates,
+        request.query.sourceKinds,
       )
+      const projectedGraphOwnerIds = new Set(projections
+        .filter((projection) => projection.ownerKind === "node" || projection.ownerKind === "link")
+        .map((projection) => `${projection.ownerKind}:${projection.ownerId}`))
+      const graphFallbackCandidates = neighborhood === undefined ? [] : [
+        ...neighborhood.nodes.map((node) => ({ ownerKind: "node" as const, ownerId: node.id, value: node })),
+        ...neighborhood.links.map((link) => ({ ownerKind: "link" as const, ownerId: link.id, value: link })),
+      ].filter((candidate) => !projectedGraphOwnerIds.has(`${candidate.ownerKind}:${candidate.ownerId}`))
+        .slice(0, Math.max(0, maxCandidates - projections.length))
       const sourceUnitIds = [...new Set(projections
         .filter((projection) => projection.ownerKind === "source")
         .flatMap((projection) => sourceUnitIdsFromRefs(projection.sourceRefs)))]
@@ -1539,18 +2913,103 @@ export class TurnOrchestrator {
         anchorMatches: anchored.length,
         exactMatches: exact.length,
         semanticMatches: semantic.flat().length,
+        sourceLiteralMatches: sourceLiteral.flat().length,
         sourceSemanticMatches: sourceSemantic.flat().length,
         sourceNeighborhoodMatches: sourceNeighborhood.length,
+        sourceBoundaryMatches: sourceBoundary.length,
+        requestedSourceBoundary: request.query.sourceBoundary,
         sourceNeighborhoodRadius,
         workspaceMatches: workspaceEntries.length,
+        orderedCandidateCount: orderedCandidates.length,
+        eligibleCandidateCount: eligibleCandidates.length,
+        uniqueEligibleCandidateCount: new Set(eligibleCandidates.map((projection) => projection.projectionId)).size,
+        duplicateOrOverflowCandidateCount: Math.max(0, eligibleCandidates.length - projections.length),
         selectedCandidates: projections.length,
+        selectedCandidateProfile: profileRetrievalCandidates(projections, {
+          anchored,
+          exact,
+          semantic: semantic.flat(),
+          sourceLiteral: sourceLiteral.flat(),
+          sourceSemantic: sourceSemantic.flat(),
+          sourceNeighborhood,
+          sourceBoundary,
+        }),
+        selectedEvidenceProfile: profileRetrievalProjectionEvidence(projections),
         requestedSourceKinds: request.query.sourceKinds,
+        exactKeyCount: request.query.exactKeys.length,
+        semanticTextCount: request.query.semanticTexts.length,
+        anchorIdCount: request.query.anchorIds.length,
+        neighborhoodNodeCount: neighborhood?.nodes.length ?? 0,
+        neighborhoodLinkCount: neighborhood?.links.length ?? 0,
+        neighborhoodTruncated: neighborhood?.truncated ?? false,
+        elapsedMs: this.dependencies.now() - retrievalRequestStartedAtMs,
       })
+      const enrichExistingEvidenceReturnPath = (
+        existing: TurnReadEvidence,
+        relatedOwnerRefs: readonly RelatedOwnerRef[],
+        sourcePosition: TurnReadEvidence["sourcePosition"],
+      ): void => {
+        const needsRelatedOwners = (existing.relatedOwnerRefs?.length ?? 0) === 0 && relatedOwnerRefs.length > 0
+        const needsSourcePosition = existing.sourcePosition === undefined && sourcePosition !== undefined
+        if (!needsRelatedOwners && !needsSourcePosition) return
+        const selectedRelatedOwnerRefs = relatedOwnerRefs.slice(0, maxRelatedOwnersPerSourceUnit)
+        const enriched = {
+          ...existing,
+          ...(needsRelatedOwners ? { relatedOwnerRefs: selectedRelatedOwnerRefs } : {}),
+          ...(needsSourcePosition ? { sourcePosition } : {}),
+        }
+        const evidenceIndex = evidence.findIndex((item) => item.readId === existing.readId)
+        const oldEstimate = evidenceIndex >= 0 || budgetEvidence.some((item) => item.readId === existing.readId)
+          ? estimateRetrievalEvidenceTokens(existing)
+          : 0
+        const enrichedEstimate = estimateRetrievalEvidenceTokens(enriched)
+        if (evidenceTokens - oldEstimate + enrichedEstimate > evidenceTokenLimit) {
+          omittedRelatedOwnerRefs += selectedRelatedOwnerRefs.length
+          evidenceBudgetTruncated = true
+          return
+        }
+        evidenceTokens = evidenceTokens - oldEstimate + enrichedEstimate
+        includedRelatedOwnerRefs += selectedRelatedOwnerRefs.length
+        if (evidenceIndex >= 0) evidence[evidenceIndex] = enriched
+        else evidence.push(enriched)
+      }
+      const exposeExistingEvidence = (existing: TurnReadEvidence): void => {
+        if (!visibleReadIds.has(existing.readId) && !evidence.some((item) => item.readId === existing.readId)) {
+          evidence.push(existing)
+        }
+        requestReadRefs.add(existing.readId)
+        if (existing.ownerKind === "node" || existing.ownerKind === "link") {
+          requestGraphRefs.add(existing.ownerId)
+        }
+      }
       for (const projection of projections) {
         if (projection.visibility === "retired") continue
-        if (seenReadIds.has(projection.projectionId)) continue
+        if (projection.ownerKind === "node" || projection.ownerKind === "link") {
+          requestGraphRefs.add(projection.ownerId)
+        }
+        if (seenReadIds.has(projection.projectionId)) {
+          const existing = evidence.find((item) => item.ownerId === projection.ownerId && item.digest === projection.digest)
+          if (existing !== undefined) {
+            exposeExistingEvidence(existing)
+            const relatedOwnerRefs = projection.ownerKind === "source"
+              ? relatedOwnersForProjection(projection.sourceRefs, relatedOwnersBySourceUnitId)
+              : []
+            enrichExistingEvidenceReturnPath(existing, relatedOwnerRefs, projection.sourcePosition)
+          }
+          continue
+        }
         const evidenceKey = `${projection.ownerId}:${projection.digest}`
-        if (seenEvidenceKeys.has(evidenceKey)) continue
+        if (seenEvidenceKeys.has(evidenceKey)) {
+          const existing = [...existingEvidence, ...evidence].find((item) => `${item.ownerId}:${item.digest}` === evidenceKey)
+          if (existing !== undefined) {
+            exposeExistingEvidence(existing)
+            const relatedOwnerRefs = projection.ownerKind === "source"
+              ? relatedOwnersForProjection(projection.sourceRefs, relatedOwnersBySourceUnitId)
+              : []
+            enrichExistingEvidenceReturnPath(existing, relatedOwnerRefs, projection.sourcePosition)
+          }
+          continue
+        }
         const availableRelatedOwnerRefs = projection.ownerKind === "source"
           ? relatedOwnersForProjection(projection.sourceRefs, relatedOwnersBySourceUnitId)
           : []
@@ -1559,6 +3018,7 @@ export class TurnOrchestrator {
           ownerId: projection.ownerId,
           exactKeys: projection.exactKeys,
           semanticText: projection.semanticText,
+          sourcePosition: projection.sourcePosition,
         }
         let selectedRelatedOwnerRefs: RelatedOwnerRef[] = []
         let tokenEstimate = estimateRetrievalEvidenceTokens(evidenceBudgetView)
@@ -1585,7 +3045,7 @@ export class TurnOrchestrator {
         seenEvidenceKeys.add(evidenceKey)
         evidenceTokens += tokenEstimate
         const storedEvidence = await this.dependencies.evidence.writeImmutable({
-          evidenceId: this.dependencies.createId(),
+          evidenceId: await this.nextPersistentId(projectId, "evidence"),
           projectId,
           contextId: context.contextId,
           sourceKind: evidenceSourceKindForProjection(projection),
@@ -1598,6 +3058,7 @@ export class TurnOrchestrator {
           createdAtMs: this.dependencies.now(),
         })
         returned.push({
+          requestId: request.requestId,
           readId: storedEvidence.evidenceId,
           reason: request.reason,
           segment: {
@@ -1622,8 +3083,100 @@ export class TurnOrchestrator {
           ...(selectedRelatedOwnerRefs.length === 0 ? {} : { relatedOwnerRefs: selectedRelatedOwnerRefs }),
           digest: projection.digest,
           ...(projection.stateRole === undefined ? {} : { stateRole: projection.stateRole }),
+          ...(projection.committedSequence === undefined ? {} : { committedSequence: projection.committedSequence }),
+          ...(projection.sourcePosition === undefined ? {} : { sourcePosition: projection.sourcePosition }),
         })
+        requestReadRefs.add(storedEvidence.evidenceId)
       }
+      for (const candidate of graphFallbackCandidates) {
+        const semanticText = JSON.stringify(candidate.value)
+        const graphDigest = digest(semanticText)
+        const evidenceKey = `${candidate.ownerId}:${graphDigest}`
+        if (seenEvidenceKeys.has(evidenceKey)) {
+          const existing = [...existingEvidence, ...evidence].find((item) => (
+            item.ownerId === candidate.ownerId && item.digest === graphDigest
+          ))
+          if (existing !== undefined) exposeExistingEvidence(existing)
+          continue
+        }
+        const tokenEstimate = estimateRetrievalEvidenceTokens({
+          ownerKind: candidate.ownerKind,
+          ownerId: candidate.ownerId,
+          exactKeys: [candidate.ownerId],
+          semanticText,
+        })
+        if (evidenceTokens + tokenEstimate > evidenceTokenLimit) {
+          evidenceBudgetTruncated = true
+          continue
+        }
+        seenEvidenceKeys.add(evidenceKey)
+        evidenceTokens += tokenEstimate
+        const storedEvidence = await this.dependencies.evidence.writeImmutable({
+          evidenceId: await this.nextPersistentId(projectId, "evidence"),
+          projectId,
+          contextId: context.contextId,
+          sourceKind: "graph",
+          ownerId: candidate.ownerId,
+          version: graphDigest,
+          digest: graphDigest,
+          locator: `graph://${candidate.ownerKind}/${candidate.ownerId}`,
+          content: semanticText,
+          readReason: request.reason,
+          createdAtMs: this.dependencies.now(),
+        })
+        returned.push({
+          requestId: request.requestId,
+          readId: storedEvidence.evidenceId,
+          reason: request.reason,
+          segment: {
+            segmentId: this.dependencies.createId(),
+            kind: "committed_read",
+            ownerIds: [storedEvidence.evidenceId],
+            visibility: "committed",
+            canonicalDigest: storedEvidence.digest,
+            tokenEstimate,
+            sequence: context.segments.length + returned.length,
+          },
+        })
+        evidence.push({
+          readId: storedEvidence.evidenceId,
+          visibility: "committed",
+          ownerKind: candidate.ownerKind,
+          ownerId: candidate.ownerId,
+          exactKeys: [candidate.ownerId],
+          semanticText,
+          sourceRefs: [],
+          digest: graphDigest,
+          stateRole: "current",
+        })
+        requestReadRefs.add(storedEvidence.evidenceId)
+        requestGraphRefs.add(candidate.ownerId)
+      }
+      const readExecution = {
+        requestId: request.requestId,
+        operationId: request.requestId,
+        returnedReadRefs: [...requestReadRefs],
+        returnedGraphRefs: [...requestGraphRefs],
+        resultDigest: digest({
+          requestId: request.requestId,
+          query: request.query,
+          returnedReadRefs: [...requestReadRefs],
+          returnedGraphRefs: [...requestGraphRefs],
+        }),
+      }
+      readExecutions.push(readExecution)
+      const contextRead = {
+        requestId: request.requestId,
+        returned: returned
+          .filter((item) => item.requestId === request.requestId)
+          .map(({ requestId: ignoredRequestId, ...item }) => {
+            void ignoredRequestId
+            return item
+          }),
+        rejectedReadIds: [],
+      }
+      nextContext = recordContextRead(nextContext, contextRead)
+      await onReadExecution?.(request, readExecution, evidence.slice(evidenceStartIndex), contextRead)
     }
     if (omittedRelatedOwnerRefs > 0) {
       this.log("debug", "retrieval.related_owner_budget.truncated", {
@@ -1642,14 +3195,7 @@ export class TurnOrchestrator {
         selectedEvidenceCount: evidence.length,
       })
     }
-    return {
-      context: recordContextRead(context, {
-        requestId: selectedRequests[0]?.requestId ?? this.dependencies.createId(),
-        returned,
-        rejectedReadIds: [],
-      }),
-      evidence,
-    }
+    return { context: nextContext, evidence, readExecutions, currentGraphRevisions: [...currentGraphRevisions.values()] }
   }
 
   private log(
@@ -1658,6 +3204,11 @@ export class TurnOrchestrator {
     fields: Readonly<Record<string, unknown>> = {},
   ): void {
     this.dependencies.diagnostics?.log(level, event, fields)
+  }
+
+  private nextPersistentId(projectId: ProjectId, prefix: PersistentIdPrefix): Promise<string> {
+    return this.dependencies.idAllocator?.next(projectId, prefix)
+      ?? Promise.resolve(this.dependencies.createId())
   }
 
   private parseAndValidatePhaseArtifact(
@@ -1712,7 +3263,6 @@ export class TurnOrchestrator {
         sequence,
         contentRef,
         digest: digest(contentMarkdown),
-        settlementStatus: "pending",
         createdAtMs: this.dependencies.now(),
       }
     }))
@@ -1745,6 +3295,18 @@ export class TurnOrchestrator {
     content: string,
     createdAtMs: number,
   ): Promise<void> {
+    const publishPath = `章节正文/${sanitizeFilename(naming.filename)}`
+    const contentDigest = digest(content)
+    const existing = await this.dependencies.documents.findVersion(input.projectId, sourceId, scopeId)
+    if (existing !== undefined) {
+      if (existing.contentRef !== contentRef
+        || existing.heading !== naming.heading
+        || existing.publishPath !== publishPath
+        || existing.digest !== contentDigest) {
+        throw new Error(`Pending document version does not match the resumed turn: ${sourceId}`)
+      }
+      return
+    }
     const chapterId = this.dependencies.createId()
     await this.dependencies.documents.stageVersion({
       id: chapterId,
@@ -1754,8 +3316,8 @@ export class TurnOrchestrator {
       chapterId,
       contentRef,
       heading: naming.heading,
-      publishPath: `章节正文/${sanitizeFilename(naming.filename)}`,
-      digest: digest(content),
+      publishPath,
+      digest: contentDigest,
       createdAtMs,
     })
   }
@@ -1789,7 +3351,7 @@ export class TurnOrchestrator {
       rejectedSpacetimeBindingIndexes: semantic.rejectedSpacetimeBindingIndexes,
       rejectedMutationSpacetimeSettlementIndexes: semantic.rejectedMutationSpacetimeSettlementIndexes,
       rejectedAffectedFrontierRefs: semantic.rejectedAffectedFrontierRefs,
-      verificationProbeCount: semantic.verificationProbes.length,
+      verificationProbeCount: semantic.verificationProbeAssessments.length,
     })
     const readableGraphIds = new Set(readEvidence
       .filter((evidence) => evidence.ownerKind === "node" || evidence.ownerKind === "link")
@@ -1803,7 +3365,10 @@ export class TurnOrchestrator {
     for (const mutation of governance.mutations) {
       if (mutation.operation === "create_node" || mutation.operation === "create_link") {
         if (localReferences.has(mutation.ref)) throw new Error(`Duplicate local graph reference: ${mutation.ref}`)
-        localReferences.set(mutation.ref, this.dependencies.createId())
+        localReferences.set(
+          mutation.ref,
+          await this.nextPersistentId(input.projectId, mutation.operation === "create_node" ? "node" : "link"),
+        )
       }
     }
     const resolveReference = (reference: string): string => {
@@ -1891,6 +3456,30 @@ export class TurnOrchestrator {
       revisionByMutation.set(index, revision.revisionId)
     }
     await this.dependencies.graph.stageRevisions(input.projectId, scopeId, revisions)
+    const stagedProfile = await this.dependencies.graph.getDegreeProfile({
+      projectId: input.projectId,
+      pendingScopeId: scopeId,
+    })
+    const graphSettings = input.projectSettings?.graph ?? defaultProjectSettings.graph
+    const stagedViolations = findGraphCapacityViolations(stagedProfile, graphSettings)
+    this.log(stagedViolations.length === 0 ? "debug" : "error", "graph.capacity.staged_verified", {
+      taskId,
+      scopeId,
+      nodeCount: stagedProfile.nodeCount,
+      linkCount: stagedProfile.linkCount,
+      maxDirectInDegree: graphSettings.maxDirectInDegree,
+      maxDirectOutDegree: graphSettings.maxDirectOutDegree,
+      violations: stagedViolations,
+      hotspots: stagedProfile.entries.slice(0, 12),
+    })
+    if (stagedViolations.length > 0) {
+      await this.dependencies.commit.resetPending(scopeId)
+      throw new GraphCapacityExceededError(stagedViolations)
+    }
+    const revisionByOwner = new Map(revisions.map((revision) => [
+      `${revision.targetKind}:${revision.targetId}`,
+      revision.revisionId,
+    ]))
     await this.stageInheritedMutationProjections(
       input.projectId,
       scopeId,
@@ -1976,7 +3565,8 @@ export class TurnOrchestrator {
         : mutationTargetId(mutations[projection.ownerMutationIndex])
       if (ownerId === undefined) throw new Error("Projection has no resolvable owner")
       const ownerRevisionId = projection.ownerMutationIndex === undefined
-        ? (await this.dependencies.graph.listRevisions(input.projectId, projection.ownerKind, ownerId)).at(-1)?.revisionId
+        ? revisionByOwner.get(`${projection.ownerKind}:${ownerId}`)
+          ?? (await this.dependencies.graph.listRevisions(input.projectId, projection.ownerKind, ownerId)).at(-1)?.revisionId
         : revisionByMutation.get(projection.ownerMutationIndex)
       if (ownerRevisionId === undefined) throw new Error("Projection has no approved owner revision")
       await this.dependencies.retrieval.stageProjection({
@@ -2155,7 +3745,7 @@ export class TurnOrchestrator {
       : mutation.linkId
     const predecessorRevisionId = (await this.dependencies.graph.listRevisions(projectId, targetKind, targetId)).at(-1)?.revisionId
     const base = {
-      revisionId: this.dependencies.createId(),
+      revisionId: await this.nextPersistentId(projectId, "revision"),
       scopeId,
       ...(predecessorRevisionId === undefined ? {} : { predecessorRevisionId }),
       reason,
@@ -2206,11 +3796,17 @@ type ExecutePhaseInput = Readonly<{
   readEvidence: readonly TurnReadEvidence[]
   visibleEvidence: readonly TurnReadEvidence[]
   retrievalGaps: readonly TurnRetrievalGap[]
+  verificationProbeCheckpoints: readonly VerificationProbeCheckpoint[]
   catalogSnapshot: WorkspaceCatalogSnapshot
+  modelContextChainId: string
   budget: ModelCallBudget
   usage: { modelCalls: number; inputTokens: number; outputTokens: number; cacheHits: number; cacheMisses: number }
+  graphCapacityFeedback?: GraphCapacityFeedback
+  revisionFeedback?: TurnPhaseInput["revisionFeedback"]
   signal?: AbortSignal
 }>
+
+type GraphCapacityFeedback = NonNullable<NonNullable<TurnPhaseInput["graphCapacity"]>["candidateAssessment"]>
 
 type TurnExecutionState = {
   taskId: string
@@ -2220,6 +3816,7 @@ type TurnExecutionState = {
   sourceId: string
   createdAtMs: number
   baseRuleVersion: string
+  modelContextChainId: string
   catalogSnapshot: WorkspaceCatalogSnapshot
   context: TurnContext
   artifacts: Partial<Record<AIPhase, unknown>>
@@ -2230,10 +3827,50 @@ type TurnExecutionState = {
   readEvidence: TurnReadEvidence[]
   visibleEvidence: TurnReadEvidence[]
   retrievalGaps: TurnRetrievalGap[]
+  verificationProbeCheckpoints: VerificationProbeCheckpoint[]
   totalUsage: PhaseUsage
+  budgetWindowUsage: PhaseUsage
   budget: ModelCallBudget
   startPhaseIndex: number
+  graphCapacityFeedback?: GraphCapacityFeedback
+  queryDraftAuditRounds: number
+  queryRevisionFeedback?: TurnPhaseInput["revisionFeedback"]
   signal?: AbortSignal
+}
+
+function restoreVerificationProbeContext(
+  context: TurnContext,
+  checkpoints: readonly VerificationProbeCheckpoint[],
+): TurnContext {
+  return checkpoints.reduce((current, checkpoint) => {
+    if (current.readLedger.requestedReadIds.includes(checkpoint.contextRead.requestId)) return current
+    return recordContextRead(current, checkpoint.contextRead)
+  }, context)
+}
+
+function restoreContextToPhaseEntry(
+  context: TurnContext,
+  phaseRunIds: readonly string[],
+  entryEvidence: readonly TurnReadEvidence[],
+  phase: AIPhase,
+): TurnContext {
+  void phaseRunIds
+  const readableIds = new Set(entryEvidence.map((evidence) => evidence.readId))
+  const restored = {
+    ...context,
+    readLedger: {
+      ...context.readLedger,
+      committedReadIds: context.readLedger.committedReadIds.filter((readId) => readableIds.has(readId)),
+      visiblePendingIds: context.readLedger.visiblePendingIds.filter((readId) => readableIds.has(readId)),
+      returnedReadIds: context.readLedger.returnedReadIds.filter((readId) => readableIds.has(readId)),
+      readReasons: Object.fromEntries(Object.entries(context.readLedger.readReasons)
+        .filter(([readId]) => readableIds.has(readId))),
+    },
+  }
+  if (phase !== "rule_assembly") return restored
+  const { ruleSnapshotId: ignoredRuleSnapshotId, ...withoutRuleSnapshot } = restored
+  void ignoredRuleSnapshotId
+  return withoutRuleSnapshot
 }
 
 function throwIfExecutionCancelled(signal: AbortSignal | undefined): void {
@@ -2241,7 +3878,7 @@ function throwIfExecutionCancelled(signal: AbortSignal | undefined): void {
 }
 
 function executionCancellationReason(signal: AbortSignal | undefined): Error {
-  const reason = signal?.reason
+  const reason: unknown = signal?.reason as unknown
   if (reason instanceof Error) return reason
   const error = new Error(
     typeof reason === "string" && reason.length > 0 ? reason : "Turn execution cancelled",
@@ -2255,6 +3892,15 @@ function isMandatoryWorkspaceEntry(entry: WorkspaceCatalogEntry): boolean {
   return entry.relativePath === "设定集/readme.md"
     || entry.relativePath === "参考文件/readme.md"
     || entry.relativePath.startsWith("世界推演规则/用户规则/")
+}
+
+function filterInheritedModelEvidence(
+  evidence: readonly TurnReadEvidence[],
+  allowWorkspaceChapterReads: boolean,
+): TurnReadEvidence[] {
+  return allowWorkspaceChapterReads
+    ? [...evidence]
+    : evidence.filter((item) => item.ownerKind !== "workspace:chapters")
 }
 
 function resolveSelectedPresentationPaths(
@@ -2290,6 +3936,14 @@ function workspaceTurnEvidence(
     sourceRefs: [{ sourceKind: "workspace", relativePath: entry.relativePath, version: entry.version }],
     digest: entry.digest,
   }
+}
+
+function resolveGraphReadDirection(
+  directions: readonly ("out" | "in" | "both")[],
+): "out" | "in" | "both" {
+  const unique = new Set(directions)
+  if (unique.has("both") || unique.size !== 1) return "both"
+  return unique.has("in") ? "in" : "out"
 }
 
 function resolveRuleSourceVersions(
@@ -2373,7 +4027,7 @@ function describeInheritedGraphValue(value: { content?: unknown }, fallback: str
   if (typeof content === "object" && content !== null) {
     const record = content as Record<string, unknown>
     const preferred = ["semanticText", "text", "summary", "name", "description"]
-      .flatMap((key) => typeof record[key] === "string" ? [record[key] as string] : [])
+      .flatMap((key) => typeof record[key] === "string" ? [record[key]] : [])
     if (preferred.length > 0) return preferred.join("；")
   }
   return fallback
@@ -2391,6 +4045,9 @@ type ExecutePhaseResult = Readonly<{
   visibleEvidence: readonly TurnReadEvidence[]
   retrievalGaps: readonly TurnRetrievalGap[]
   artifact: unknown
+  outcome: PhaseResultEnvelope["outcome"]
+  reason: string
+  selfReview: string
   usage: { modelCalls: number; inputTokens: number; outputTokens: number; cacheHits: number; cacheMisses: number }
 }>
 
@@ -2439,7 +4096,7 @@ function phaseUsageFromExecution(execution: PhaseModelExecution): PhaseUsage {
 function phaseUsageFromStored(value: unknown): PhaseUsage {
   if (typeof value !== "object" || value === null) return emptyPhaseUsage()
   const record = value as Record<string, unknown>
-  const number = (key: string): number => typeof record[key] === "number" && Number.isFinite(record[key]) ? record[key] as number : 0
+  const number = (key: string): number => typeof record[key] === "number" && Number.isFinite(record[key]) ? record[key] : 0
   return {
     modelCalls: number("modelCalls") || (number("inputTokens") > 0 || number("outputTokens") > 0 ? 1 : 0),
     inputTokens: number("inputTokens"),
@@ -2482,7 +4139,7 @@ function isRecordWithRawResponse(error: unknown): error is { rawResponse: string
     && typeof error.rawResponse === "string"
 }
 
-function createBudget(input: TurnOrchestratorInput, nowMs: number): ModelCallBudget {
+function createBudget(input: TurnOrchestratorInput, nowMs: number, elapsedWindowWallTimeMs = 0): ModelCallBudget {
   const requestedCalls = input.maxModelCalls ?? defaultTurnExecutionProfile.maxTurnModelCalls
   const maxCalls = requestedCalls
   const maxInputTokens = input.maxInputTokens ?? Number.MAX_SAFE_INTEGER
@@ -2494,7 +4151,7 @@ function createBudget(input: TurnOrchestratorInput, nowMs: number): ModelCallBud
     remainingInputTokens: maxInputTokens,
     maxOutputTokens,
     remainingOutputTokens: maxOutputTokens,
-    deadlineAtMs: nowMs + (input.deadlineMs ?? defaultTurnExecutionProfile.maxTurnWallTimeMs),
+    deadlineAtMs: nowMs + Math.max(1, (input.deadlineMs ?? defaultTurnExecutionProfile.maxTurnWallTimeMs) - elapsedWindowWallTimeMs),
     modelRequestDeadlineAtMs: nowMs + (
       input.projectSettings?.execution.maxModelRequestTimeMs
       ?? defaultProjectSettings.execution.maxModelRequestTimeMs
@@ -2505,13 +4162,19 @@ function createBudget(input: TurnOrchestratorInput, nowMs: number): ModelCallBud
 }
 
 function resolveContextTokenLimit(
-  requestedTokens: number | undefined,
-  modelContextWindowTokens: number | undefined,
+  modelContextWindowTokens: number,
   compactionThresholdRatio: number,
 ): number {
-  const contextWindowTokens = modelContextWindowTokens ?? defaultProjectSettings.execution.contextWindowTokens
-  const compactionThreshold = Math.max(1, Math.floor(contextWindowTokens * compactionThresholdRatio))
-  return requestedTokens === undefined ? compactionThreshold : Math.min(requestedTokens, compactionThreshold)
+  const compactionThreshold = Math.max(1, Math.floor(modelContextWindowTokens * compactionThresholdRatio))
+  return compactionThreshold
+}
+
+function requireModelContextWindowTokens(model: AIModelPort): number {
+  const capacity = model.info?.contextWindowTokens
+  if (capacity === undefined || !Number.isInteger(capacity) || capacity <= 0) {
+    throw new Error("The active model profile does not declare a valid context window")
+  }
+  return capacity
 }
 
 function remainingBudget(
@@ -2555,14 +4218,73 @@ function createInterruptionRecord(
   const message = error instanceof Error ? error.message : String(error)
   const blockedMetrics = error instanceof TurnBudgetExceededError ? [error.metric] : []
   return {
-    kind: blockedMetrics.length === 0 ? "execution_error" : "limit_exhausted",
+    kind: error instanceof GraphCapacityExceededError
+      ? "graph_governance_limit_exhausted"
+      : blockedMetrics.length === 0 ? "execution_error" : "limit_exhausted",
     message,
     recoverable: true,
     blockedMetrics,
     ...(phase === undefined ? {} : { phase }),
     ...(phaseRunId === undefined ? {} : { phaseRunId }),
+    ...(error instanceof GraphCapacityExceededError ? { graphCapacityViolations: error.violations } : {}),
     interruptedAtMs,
   }
+}
+
+function readBlockedMetrics(error: unknown): readonly ("model_calls" | "input_tokens" | "output_tokens" | "wall_time")[] {
+  if (typeof error !== "object" || error === null || !("blockedMetrics" in error)) return []
+  const value = error.blockedMetrics
+  if (!Array.isArray(value)) return []
+  return value.filter((metric): metric is "model_calls" | "input_tokens" | "output_tokens" | "wall_time" => (
+    metric === "model_calls" || metric === "input_tokens" || metric === "output_tokens" || metric === "wall_time"
+  ))
+}
+
+function readInterruptionTimestamp(error: unknown): number {
+  if (typeof error !== "object" || error === null || !("interruptedAtMs" in error)) return Number.MAX_SAFE_INTEGER
+  const value = error.interruptedAtMs
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : Number.MAX_SAFE_INTEGER
+}
+
+function readGraphCapacityFeedback(error: unknown): GraphCapacityFeedback | undefined {
+  if (typeof error !== "object" || error === null || !("graphCapacityViolations" in error)) return undefined
+  const violations = error.graphCapacityViolations
+  if (!Array.isArray(violations)) return undefined
+  const parsed = violations.flatMap((value) => {
+    if (typeof value !== "object" || value === null) return []
+    const record = value as Record<string, unknown>
+    if (typeof record.nodeId !== "string"
+      || typeof record.inDegree !== "number"
+      || typeof record.outDegree !== "number"
+      || !Array.isArray(record.exceeded)) return []
+    const exceeded = record.exceeded.filter((direction): direction is "in" | "out" => (
+      direction === "in" || direction === "out"
+    ))
+    return exceeded.length === 0 ? [] : [{
+      nodeId: record.nodeId,
+      inDegree: record.inDegree,
+      outDegree: record.outDegree,
+      exceeded,
+    }]
+  })
+  if (parsed.length === 0) return undefined
+  return {
+    round: 1,
+    nodeCount: 0,
+    linkCount: 0,
+    violations: parsed,
+  }
+}
+
+function readRuntimeMetricLimit(
+  snapshot: { metrics: readonly { metricId: string; limit: number | null }[] },
+  metricId: "model_calls" | "input_tokens" | "output_tokens" | "wall_time",
+): number | undefined {
+  return snapshot.metrics.find((metric) => metric.metricId === metricId)?.limit ?? undefined
+}
+
+function finiteApplicationLimit(value: number): number | null {
+  return value >= Number.MAX_SAFE_INTEGER ? null : value
 }
 
 function estimateTokens(value: unknown): number {
@@ -2575,21 +4297,39 @@ function estimateRetrievalEvidenceTokens(evidence: Readonly<{
   exactKeys: readonly string[]
   semanticText: string
   relatedOwnerRefs?: readonly RelatedOwnerRef[]
+  sourcePosition?: TurnReadEvidence["sourcePosition"]
 }>): number {
   return estimateTokens({
     ownerKind: evidence.ownerKind,
-    ownerId: evidence.ownerId,
+    ownerId: normalizeIdentityForTokenEstimate(evidence.ownerId),
     exactKeys: evidence.exactKeys,
     semanticText: evidence.semanticText,
     ...(evidence.relatedOwnerRefs === undefined ? {} : {
       relatedOwnerRefs: evidence.relatedOwnerRefs.map((relatedOwner) => ({
         ownerKind: relatedOwner.ownerKind,
-        ownerId: relatedOwner.ownerId,
+        ownerId: normalizeIdentityForTokenEstimate(relatedOwner.ownerId),
         ...(relatedOwner.exactKeys === undefined ? {} : { exactKeys: relatedOwner.exactKeys }),
         ...(relatedOwner.semanticText === undefined ? {} : { semanticText: relatedOwner.semanticText }),
       })),
     }),
+    ...(evidence.sourcePosition === undefined ? {} : {
+      sourcePosition: {
+        sourceRef: normalizeIdentityForTokenEstimate(evidence.sourcePosition.sourceRef),
+        sequence: evidence.sourcePosition.sequence,
+        firstSequence: evidence.sourcePosition.firstSequence,
+        lastSequence: evidence.sourcePosition.lastSequence,
+        unitCount: evidence.sourcePosition.unitCount,
+        isStart: evidence.sourcePosition.isStart,
+        isEnd: evidence.sourcePosition.isEnd,
+      },
+    }),
   })
+}
+
+function normalizeIdentityForTokenEstimate(value: string): string {
+  return /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|(?:node|link|evidence|source|revision)_[1-9][0-9]*)$/iu.test(value)
+    ? "00000000-0000-4000-8000-000000000000"
+    : value
 }
 
 function sourceUnitIdsFromRefs(sourceRefs: readonly unknown[]): string[] {
@@ -2750,6 +4490,76 @@ function countsAgainstRetrievalEvidenceBudget(evidence: TurnReadEvidence): boole
   return !isProtectedContextEvidence(evidence)
 }
 
+function profileTurnEvidence(evidence: readonly TurnReadEvidence[]): Record<string, unknown> {
+  const byOwnerKind = new Map<string, { count: number; estimatedTokens: number; semanticCharacters: number }>()
+  let estimatedTokens = 0
+  let semanticCharacters = 0
+  let relatedOwnerRefCount = 0
+  for (const item of evidence) {
+    const itemTokens = estimateRetrievalEvidenceTokens(item)
+    estimatedTokens += itemTokens
+    semanticCharacters += item.semanticText.length
+    relatedOwnerRefCount += item.relatedOwnerRefs?.length ?? 0
+    const current = byOwnerKind.get(item.ownerKind) ?? { count: 0, estimatedTokens: 0, semanticCharacters: 0 }
+    byOwnerKind.set(item.ownerKind, {
+      count: current.count + 1,
+      estimatedTokens: current.estimatedTokens + itemTokens,
+      semanticCharacters: current.semanticCharacters + item.semanticText.length,
+    })
+  }
+  return {
+    count: evidence.length,
+    estimatedTokens,
+    semanticCharacters,
+    relatedOwnerRefCount,
+    byOwnerKind: Object.fromEntries([...byOwnerKind.entries()].sort(([left], [right]) => left.localeCompare(right))),
+  }
+}
+
+function profileRetrievalProjectionEvidence(projections: readonly RetrievalProjection[]): Record<string, unknown> {
+  const evidence = projections.map((projection) => ({
+    readId: projection.projectionId,
+    visibility: projection.visibility === "pending" ? "pending" as const : "committed" as const,
+    ownerKind: projection.ownerKind,
+    ownerId: projection.ownerId,
+    exactKeys: projection.exactKeys,
+    semanticText: projection.semanticText,
+    sourceRefs: projection.sourceRefs,
+    digest: projection.digest,
+    ...(projection.stateRole === undefined ? {} : { stateRole: projection.stateRole }),
+    ...(projection.committedSequence === undefined ? {} : { committedSequence: projection.committedSequence }),
+    ...(projection.sourcePosition === undefined ? {} : { sourcePosition: projection.sourcePosition }),
+  }))
+  return profileTurnEvidence(evidence)
+}
+
+function profileRetrievalCandidates(
+  projections: readonly RetrievalProjection[],
+  origins: Readonly<Record<"anchored" | "exact" | "semantic" | "sourceLiteral" | "sourceSemantic" | "sourceNeighborhood" | "sourceBoundary", readonly RetrievalProjection[]>>,
+): readonly Record<string, unknown>[] {
+  const originIds = Object.fromEntries(Object.entries(origins).map(([name, values]) => [
+    name,
+    new Set(values.map((projection) => projection.projectionId)),
+  ])) as Record<string, Set<string>>
+  return projections.map((projection, index) => ({
+    rank: index + 1,
+    projectionId: projection.projectionId,
+    ownerKind: projection.ownerKind,
+    stateRole: projection.stateRole,
+    semanticCharacters: projection.semanticText.length,
+    exactKeyCount: projection.exactKeys.length,
+    sourceRefCount: projection.sourceRefs.length,
+    estimatedTokens: estimateRetrievalEvidenceTokens({
+      ownerKind: projection.ownerKind,
+      ownerId: projection.ownerId,
+      exactKeys: projection.exactKeys,
+      semanticText: projection.semanticText,
+      sourcePosition: projection.sourcePosition,
+    }),
+    origins: Object.entries(originIds).flatMap(([name, ids]) => ids.has(projection.projectionId) ? [name] : []),
+  }))
+}
+
 function isProtectedContextEvidence(evidence: TurnReadEvidence): boolean {
   return evidence.ownerKind === "workspace:world_rules"
     || evidence.ownerKind === "workspace:presentation"
@@ -2763,17 +4573,29 @@ function selectCarryForwardEvidence(
   evidence: readonly TurnReadEvidence[],
   citedReadIds: readonly string[],
 ): TurnReadEvidence[] {
-  const selectedReadIds = new Set(citedReadIds)
-  if (phase !== "interpret") {
-    for (const item of inheritedEvidence) selectedReadIds.add(item.readId)
-  }
-  return uniqueTurnReadEvidence(evidence.filter((item) => (
-    isProtectedContextEvidence(item) || selectedReadIds.has(item.readId)
-  )))
+  void phase
+  void citedReadIds
+  return uniqueTurnReadEvidence([...inheritedEvidence, ...evidence])
 }
 
 function uniqueTurnReadEvidence(evidence: readonly TurnReadEvidence[]): TurnReadEvidence[] {
   return [...new Map(evidence.map((item) => [item.readId, item])).values()]
+}
+
+function reconcileCurrentGraphEvidence(
+  evidence: readonly TurnReadEvidence[],
+  currentRevisions: readonly CurrentGraphOwnerRevision[],
+): TurnReadEvidence[] {
+  const currentByOwner = new Map(currentRevisions.map((item) => [
+    `${item.ownerKind}:${item.ownerId}`,
+    item.revisionId,
+  ]))
+  if (currentByOwner.size === 0) return uniqueTurnReadEvidence(evidence)
+  return uniqueTurnReadEvidence(evidence).map((item) => {
+    const currentRevisionId = currentByOwner.get(`${item.ownerKind}:${item.ownerId}`)
+    if (currentRevisionId === undefined || item.revisionId === currentRevisionId) return item
+    return { ...item, stateRole: "historical" as const }
+  })
 }
 
 function selectPhaseArtifacts(
@@ -2783,6 +4605,44 @@ function selectPhaseArtifacts(
   return Object.fromEntries(phaseArtifactDependencies[phase].flatMap((dependency) => (
     artifacts[dependency] === undefined ? [] : [[dependency, artifacts[dependency]]]
   )))
+}
+
+function queryReviewDecision(result: Pick<PhaseResultEnvelope, "outcome" | "artifact" | "reason" | "selfReview">): Readonly<{
+  requiresRevision: boolean
+  review: Readonly<{
+    evidenceClosed: boolean
+    leaksUnobservedInformation: boolean
+    requiresWorkflowUpgrade: boolean
+  }>
+  feedback: NonNullable<TurnPhaseInput["revisionFeedback"]>
+}> {
+  const review = parsePhaseArtifact("response_review", result.artifact) as {
+    evidenceClosed: boolean
+    leaksUnobservedInformation: boolean
+    requiresWorkflowUpgrade: boolean
+  }
+  return {
+    requiresRevision: result.outcome === "revise"
+      || !review.evidenceClosed
+      || review.leaksUnobservedInformation
+      || review.requiresWorkflowUpgrade,
+    review,
+    feedback: {
+      phase: "response_review",
+      outcome: result.outcome,
+      artifact: review,
+      reason: result.reason,
+      selfReview: result.selfReview,
+    },
+  }
+}
+
+function countFailedQueryReviews(runs: readonly { phase: AIPhase; status: string; result?: unknown }[]): number {
+  return runs.filter((run) => {
+    if (run.phase !== "response_review" || run.status !== "completed" || run.result === undefined) return false
+    const result = phaseResultEnvelopeSchema.safeParse(run.result)
+    return result.success && queryReviewDecision(result.data).requiresRevision
+  }).length
 }
 
 function phaseUsesWorkspaceCatalog(phase: AIPhase): boolean {
@@ -2824,6 +4684,29 @@ function uniqueRetrievalProjections<T extends { projectionId: string }>(
   limit: number,
 ): readonly T[] {
   return [...new Map(projections.map((projection) => [projection.projectionId, projection])).values()].slice(0, limit)
+}
+
+function selectRetrievalProjections<T extends { projectionId: string; ownerKind: string }>(
+  candidates: readonly T[],
+  limit: number,
+  sourceKinds: readonly string[],
+): readonly T[] {
+  const uniqueCandidates = uniqueRetrievalProjections(candidates, candidates.length)
+  const mixesGraphAndSource = sourceKinds.includes("source")
+    && (sourceKinds.includes("graph") || sourceKinds.includes("revision"))
+  if (!mixesGraphAndSource) return uniqueCandidates.slice(0, limit)
+
+  const graphCandidates = uniqueCandidates.filter((candidate) => candidate.ownerKind !== "source")
+  const sourceCandidates = uniqueCandidates.filter((candidate) => candidate.ownerKind === "source")
+  const selected: T[] = []
+  for (let index = 0; selected.length < limit; index += 1) {
+    const graphCandidate = graphCandidates[index]
+    const sourceCandidate = sourceCandidates[index]
+    if (graphCandidate === undefined && sourceCandidate === undefined) break
+    if (graphCandidate !== undefined) selected.push(graphCandidate)
+    if (sourceCandidate !== undefined && selected.length < limit) selected.push(sourceCandidate)
+  }
+  return selected
 }
 
 function resolveEmbeddedGraphReferences(

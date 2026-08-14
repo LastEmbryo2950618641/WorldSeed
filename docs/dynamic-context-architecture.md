@@ -341,7 +341,6 @@ interface ContextAssembler {
     readmeEvidence: readonly Evidence[]
     dynamicEvidence: readonly Evidence[]
     userTurn: UserTurnPrompt
-    checkpoint?: ContextCheckpoint
   }): ModelContext
 }
 ```
@@ -413,14 +412,16 @@ interface RetrievalBudgetLedgerRepository {
 阶段可见视图遵守以下约束：
 
 1. 用户规则正文、两个强制 `readme.md` 和本轮选择的表现规则属于当前回合保护资料，不因普通阶段切换而丢失；
-2. `interpret` 负责从初始候选中选择与本轮任务相关的动态 Evidence；被任一阶段通过 `citedReadIds` 合法引用后，该 Evidence 进入本轮已接纳窗口，后续阶段只能增补，不能因自身没有再次引用而删除；
+2. `interpret` 可以用 `citedReadIds` 记录本阶段实际依据了哪些 Evidence，但所有本轮实际读取且仍在模型链可见范围内的 Evidence 都进入本轮接纳窗口；后续阶段只能增补，不能因某阶段没有再次引用而删除；
 3. `committedReadIds` 与 `visiblePendingIds` 只列本次请求中实际可见的 Evidence，不能暴露完整读取账本中的不可见 ID；
 4. 每个阶段只接收其直接依赖的 artifact。完整 artifact 历史仍保存在阶段运行记录中，用于恢复和审计；
 5. 目录快照只进入需要选择资料的阶段；后续正文、治理和审查阶段不重复序列化完整目录；
-6. 阶段内多轮检索可以累加候选，但只有该阶段实际引用的新增 Evidence 能进入已接纳窗口。规则组装、命名、审查和治理等阶段没有清除先前已接纳世界证据的权限；
+6. 阶段内多轮检索可以累加实际返回的 Evidence；`citedReadIds` 只用于审计，不是保留权限。规则组装、命名、审查和治理等阶段没有清除先前已接纳世界证据的权限；
 7. 当前节点或连接的多个历史修订不能因为 owner 相同被机械删除。普通当前状态查询优先当前有效修订；明确历史查询可以保留多个修订，具体选择由 AI 依据查询意图和返回证据决定；
 8. 已接纳窗口使用稳定所有者与投影摘要去重，并受累计 `maxEvidenceTokens` 约束；新增检索必须在剩余窗口预算内进行，不能通过跨阶段重复读取绕过限制；
 9. 可见视图裁剪只改变默认可见范围。被裁剪 Evidence 的不可变内容、版本、来源定位和读取账本记录继续保留，可由后续查询重新读取。
+
+当前可见图 Evidence 的 `revisionId` 是读取时快照。AI 仍负责根据本轮语义提出已有图身份 `anchorIds`；应用只对这些锚点及实际展开的局部批量比较当前 head。版本相同则复用可见 Evidence 并登记该请求已满足，版本不同才返回新投影并将旧修订标记为历史。该机制不扫描全图、不预定义领域类型，也不让代码替 AI 决定哪些事物与本轮有关。
 
 ### 4.9 身份锚点与当前状态闭包
 
@@ -558,7 +559,6 @@ type TurnContext = {
   segments: ContextSegmentRef[]
   readLedger: ContextReadLedger
   budget: ContextBudgetSnapshot
-  checkpoint?: ContextCheckpoint
 }
 
 type ContextReadLedger = {
@@ -630,102 +630,22 @@ context_evidence_refs
 
 ## 8. 上下文压缩架构
 
-上下文分为三个区域：
+上下文压缩由业务层确定性执行，不属于 AI 阶段，也不生成摘要、复核结果或压缩检查点。
 
-```text
-A. 常驻系统区：永不压缩
-B. 当前回合保护区：当前回合完成前不压缩
-C. 历史动态区：可压缩，但保留来源和返回路径
-```
+1. 业务层组装本次完整请求，并使用当前模型 tokenizer 计算实际输入 Token；
+2. 输入达到模型窗口的 97% 时触发机械压缩；
+3. 第一阶段保留系统规则、当前有效用户规则、完整当前轮和旧轮次最终正文，移出旧轮次其他消息；
+4. 第一阶段后仍超过 50% 时，从最旧章节开始按完整章节移出，直到不超过 50%；
+5. 历史事实继续保存在图、图修订、不可变 `source` 和章节 Markdown 中；
+6. 用户回到过去时由内部 Git 推演历史恢复当时唯一的完整上下文，不维护第二份当前消息链。
 
-### 8.1 常驻系统区
+系统规则、当前有效用户规则和完整当前轮属于保护内容。旧模型上下文窗口无法容纳保护内容时，该模型不满足项目能力要求，任务暂停并提示用户切换模型。
 
-平台锁定的基础规则 Markdown、Prompt Contract 和协议纪律始终作为稳定系统前缀发送。它们不进入普通动态摘要。
-
-### 8.2 当前回合保护区
-
-保护用户输入、用户前后置提示、表现规则、字数、当前时空锚点、未解决依赖和最新阶段结果。
-
-### 8.3 历史动态区
-
-历史资料、旧阶段结果、重复图邻域和已经闭合的依赖可以压缩为检查点：
-
-```ts
-type ContextCheckpoint = {
-  checkpointId: string
-  coveredSegmentIds: string[]
-  retainedFactDigests: string[]
-  retainedAnchorIds: string[]
-  unresolvedDependencyIds: string[]
-  sourceRefs: string[]
-  summaryDigest: string
-}
-```
-
-压缩后的摘要只是导航，不是新事实。需要精确原文时，AI 必须沿 `sourceRefs` 重新读取原始 Markdown、章节正文或图修订。
-
-语义压缩不能由代码机械截断或自行总结。内部增加两个维护阶段：
-
-```text
-context_compaction
-  -> AI 读取允许压缩的历史动态区
-  -> 生成摘要、保留锚点、未解决依赖和来源引用
-  -> AI 自审是否丢失当前有效状态
-
-context_compaction_review
-  -> 独立读取压缩提案和原始片段引用
-  -> 检查时间、空间、状态、否定条件、认知边界和返回路径
-  -> approve / revise / block
-```
-
-这两个阶段不创作世界事实，不修改图，只生成和复核上下文导航产物。
-
-```ts
-type ContextCompactionProposal = {
-  coveredSegmentIndexes: number[]
-  summary: string
-  retainedFactDigests: string[]
-  retainedAnchorRefs: string[]
-  unresolvedDependencyRefs: string[]
-  sourceRefs: string[]
-  reason: string
-  selfReview: string
-}
-
-type ContextCompactionReview = {
-  decision: "approve" | "revise" | "block"
-  missingFactDigests: string[]
-  missingAnchorRefs: string[]
-  missingSourceRefs: string[]
-  reason: string
-}
-```
-
-只有独立复核为 `approve` 时，代码才创建 `ContextCheckpoint`。复核失败时继续使用原片段、缩小可选资料，或停止当前任务；不能使用未批准摘要。
-
-检查点必须持久化，不能只保存在内存：
-
-```ts
-interface ContextCheckpointRepository {
-  save(checkpoint: ContextCheckpoint): Promise<void>
-  readLatest(contextId: string): Promise<ContextCheckpoint | undefined>
-  listCoveredSegments(checkpointId: string): Promise<readonly string[]>
-}
-```
-
-建议内部表：
-
-```text
-context_checkpoints
-context_checkpoint_segments
-context_evidence_refs
-```
-
-压缩时只替换下一次模型请求的可见片段；原始 `ContextSegment`、读取账本、来源引用和文件/图版本继续保存。恢复时先加载最新检查点，再按未解决依赖和来源引用补充读取。
+完整设计以 [模型上下文链、KV 缓存与机械压缩设计](context-and-kv-cache.md) 为准。
 
 ## 9. 可配置参数
 
-模型上下文容量与整轮累计用量分开。项目默认声明 `contextWindowTokens = 1000000`、`contextCompactionThresholdRatio = 0.95`；下一次上下文装配预计达到 `950000` Token 时，必须先运行 `context_compaction -> context_compaction_review`。累计输入和输出 Token 只用于成本与诊断，不作为硬截止线；正文阶段根据用户字数范围计算供应商单次输出预算，控制阶段使用各自较小的结构化护栏，防止任何控制 JSON 无限膨胀。护栏不是整轮累计输出上限。
+模型上下文容量与整轮累计用量分开。模型配置声明 `contextWindowTokens`，默认 `1000000`；项目默认 `contextCompactionThresholdRatio = 0.97`。业务层在发送前计算本次完整请求输入，达到 `970000` Token 时先执行两阶段机械压缩。累计输入和输出 Token 只用于成本与诊断，不作为硬截止线；默认不发送 `max_tokens`。
 
 ```ts
 type RetrievalBudget = {
@@ -820,7 +740,7 @@ type GraphRetrievalBudget = {
 - 图查询超时：保留已返回局部，并将未解决依赖标记为不确定；
 - 达到读取轮次或 token 上限：停止扩展，要求 AI 基于已有证据继续或明确不确定性；
 - 用户规则超过上下文预算：只允许无损规范化；仍然超限则阻止正式推演；
-- 上下文压缩失败：降低可选资料范围，保留当前回合和时空锚点，不删除持久化原始资料。
+- 机械压缩后保护内容仍超过模型窗口：暂停任务并提示用户切换满足上下文能力要求的模型，不删除持久化原始资料。
 
 ## 12. 实现顺序
 
@@ -833,7 +753,7 @@ type GraphRetrievalBudget = {
 7. 实现全局 `RetrievalBudgetLedger` 和 `RetrievalCoordinator`；
 8. 实现 `ContextAssembler`，统一三类上下文的装配顺序；
 9. 将所有返回结果先写入不可变证据存储，再写入统一 `TurnContextLedger`；
-10. 实现 AI `context_compaction`、独立 `context_compaction_review`、检查点数据库和恢复读取；
+10. 实现发送前 Token 计算和两阶段机械压缩，并通过内部 Git 推演历史恢复旧上下文；
 11. 增加读取轮次、深度、token、耗时和缓存指标；
 12. 对“历史召回、跨文件召回、跨图局部召回、压缩后恢复”增加集成测试。
 
@@ -842,12 +762,12 @@ type GraphRetrievalBudget = {
 | 现有位置 | 修改方式 |
 |---|---|
 | `application/turns/turn-orchestrator.ts` | 删除直接执行 `searchExact/searchText` 的职责，改为调用 `RetrievalCoordinator`；移除固定 `attempt >= 3` 作为唯一读取预算的做法 |
-| `application/turns/ports/ai-model-port.ts` | 扩展 `TurnPhaseInput`，接收目录快照引用、统一证据、用户回合提示、预算快照和检查点引用 |
+| `application/turns/ports/ai-model-port.ts` | 扩展 `TurnPhaseInput`，接收目录快照引用、统一证据、用户回合提示和预算快照 |
 | `application/turns/ports/retrieval-repository.ts` | 保留底层投影索引职责，不扩展为业务编排器 |
 | `application/turns/ports/graph-repository.ts` | 保留节点、连接、邻域和修订读取；由 `GraphRetriever` 组合调用 |
 | `application/turns/ports/document-repository.ts` | 通过独立 `SourceContentPort` 适配正文原文读取，不让图检索器直接依赖内部对象存储 |
 | `application/workspace/ports/workspace-port.ts` | 保留工作区机械读写能力；新增独立工作区资料检索 port，不把 AI 选择逻辑放入该接口 |
-| `core/context/turn-context-ledger.ts` | 增加统一 Evidence 追加、全局检索预算快照和检查点引用操作 |
+| `core/context/turn-context-ledger.ts` | 增加统一 Evidence 追加和全局检索预算快照操作 |
 | `infrastructure/filesystem/node-workspace-adapter.ts` | 实现目录快照、受限 Markdown 读取和版本摘要，不解析世界语义 |
 | `bootstrap/project-runtime.ts` | 组装工作区检索器、图检索器、检索编排器、上下文装配器和检查点仓储 |
 | `packages/contracts` | 增加动态读取请求、证据、预算、目录快照和检查点的 Zod 契约 |
@@ -875,7 +795,7 @@ type GraphRetrievalBudget = {
 - 所有模型阶段都由同一个 `ContextAssembler` 构造系统区、动态区和用户回合区；
 - 完整读取账本和模型可见视图彼此分离，阶段切换不会把完整账本重新序列化给模型；
 - 模型只能引用本次请求中实际可见的 Evidence ID，不能通过完整账本 ID 列表引用未发送内容；
-- 动态 Evidence 经 `citedReadIds` 进入本轮已接纳窗口，后续阶段不会因职责不同而清除已经确认的世界证据；
+- 本轮实际返回的动态 Evidence 进入本轮已接纳窗口，`citedReadIds` 只记录阶段依据；后续阶段不会因职责不同或漏引而清除已经可见的世界证据；
 - 每个阶段只接收直接依赖的 artifact，目录快照只在资料选择阶段可见；
 - 系统提示词不会被上下文压缩；
 - 当前回合未完成前，用户输入、表现规则、时空锚点和未解决依赖不会被摘要替代；

@@ -447,4 +447,284 @@ export const projectMigrations = Object.freeze([
     "DROP TABLE frontier_refs_legacy",
     "CREATE INDEX frontier_refs_schedule ON frontier_refs(project_id, disposition, last_processed_at)",
   ]),
+  defineSqlMigration<ProjectDatabase>(14, "014_turn_finalization", [
+    "ALTER TABLE artifact_scopes ADD COLUMN committed_sequence INTEGER CHECK (committed_sequence >= 0)",
+    `CREATE TABLE turn_finalizations (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+      turn_id TEXT NOT NULL,
+      scope_id TEXT NOT NULL UNIQUE REFERENCES artifact_scopes(id),
+      context_id TEXT NOT NULL REFERENCES turn_contexts(id),
+      source_id TEXT NOT NULL,
+      chapter_sequence INTEGER NOT NULL CHECK (chapter_sequence >= 1),
+      chapter_path TEXT NOT NULL,
+      chapter_heading TEXT NOT NULL,
+      content_ref TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      canonical_message_id TEXT NOT NULL UNIQUE,
+      graph_anchor_ids_json TEXT NOT NULL,
+      model_calls INTEGER NOT NULL CHECK (model_calls >= 0),
+      input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+      output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+      model_provider TEXT NOT NULL,
+      model_name TEXT NOT NULL,
+      kv_cache_hit_rate REAL CHECK (kv_cache_hit_rate >= 0 AND kv_cache_hit_rate <= 1),
+      status TEXT NOT NULL CHECK (status IN ('prepared', 'scope_committed', 'chapter_published', 'chapter_registered', 'completed')),
+      committed_sequence INTEGER,
+      error_json TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
+    `CREATE TABLE canonical_chapter_messages (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+      turn_id TEXT NOT NULL,
+      context_id TEXT NOT NULL REFERENCES turn_contexts(id),
+      source_id TEXT NOT NULL UNIQUE,
+      chapter_sequence INTEGER NOT NULL CHECK (chapter_sequence >= 1),
+      chapter_path TEXT NOT NULL,
+      chapter_heading TEXT NOT NULL,
+      content_ref TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+    "CREATE INDEX turn_finalizations_project_status ON turn_finalizations(project_id, status, updated_at)",
+    "CREATE INDEX canonical_chapter_messages_project_sequence ON canonical_chapter_messages(project_id, chapter_sequence)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(15, "015_model_context_chain", [
+    "ALTER TABLE turn_finalizations ADD COLUMN content_token_estimate INTEGER NOT NULL DEFAULT 0 CHECK (content_token_estimate >= 0)",
+    `CREATE TABLE model_context_chains (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL UNIQUE REFERENCES projects(id),
+      protocol_version TEXT NOT NULL,
+      system_rules_digest TEXT NOT NULL,
+      message_count INTEGER NOT NULL CHECK (message_count >= 0),
+      token_estimate INTEGER NOT NULL CHECK (token_estimate >= 0),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
+    `CREATE TABLE model_context_messages (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      chain_id TEXT NOT NULL REFERENCES model_context_chains(id),
+      sequence_no INTEGER NOT NULL CHECK (sequence_no >= 0),
+      role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant')),
+      kind TEXT NOT NULL,
+      task_id TEXT,
+      turn_id TEXT,
+      phase TEXT,
+      content_text TEXT,
+      content_ref TEXT,
+      content_digest TEXT NOT NULL,
+      token_estimate INTEGER NOT NULL CHECK (token_estimate >= 0),
+      origin_phase_run_id TEXT REFERENCES phase_runs(id),
+      origin_index INTEGER,
+      created_at INTEGER NOT NULL,
+      CHECK ((content_text IS NULL) <> (content_ref IS NULL)),
+      CHECK ((origin_phase_run_id IS NULL) = (origin_index IS NULL)),
+      UNIQUE(chain_id, sequence_no),
+      UNIQUE(origin_phase_run_id, origin_index)
+    )`,
+    "CREATE INDEX model_context_messages_chain_sequence ON model_context_messages(chain_id, sequence_no)",
+    "CREATE INDEX model_context_messages_project_kind ON model_context_messages(project_id, kind, sequence_no)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(16, "016_project_id_counters", [
+    `CREATE TABLE id_counters (
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      prefix TEXT NOT NULL CHECK (prefix IN ('node', 'link', 'evidence', 'source', 'revision')),
+      current_value INTEGER NOT NULL CHECK (current_value >= 0),
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (project_id, prefix)
+    )`,
+  ]),
+  defineSqlMigration<ProjectDatabase>(17, "017_model_context_visibility", [
+    "ALTER TABLE model_context_messages ADD COLUMN hidden_at INTEGER",
+    "CREATE INDEX model_context_messages_visible_chain_sequence ON model_context_messages(chain_id, sequence_no) WHERE hidden_at IS NULL",
+  ]),
+  defineSqlMigration<ProjectDatabase>(18, "018_world_history_foundation", [
+    "ALTER TABLE projects ADD COLUMN active_generation INTEGER NOT NULL DEFAULT 0 CHECK (active_generation >= 0)",
+    "ALTER TABLE artifact_scopes ADD COLUMN base_generation INTEGER NOT NULL DEFAULT 0 CHECK (base_generation >= 0)",
+    `CREATE TABLE active_scope_refs (
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      scope_id TEXT NOT NULL REFERENCES artifact_scopes(id),
+      PRIMARY KEY (project_id, scope_id)
+    )`,
+    `INSERT INTO active_scope_refs(project_id, scope_id)
+      SELECT project_id, id FROM artifact_scopes WHERE visibility = 'committed'`,
+    `CREATE TABLE active_document_heads (
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      chapter_id TEXT NOT NULL,
+      document_version_id TEXT NOT NULL REFERENCES document_versions(id),
+      scope_id TEXT NOT NULL REFERENCES artifact_scopes(id),
+      PRIMARY KEY (project_id, chapter_id)
+    )`,
+    `INSERT INTO active_document_heads(project_id, chapter_id, document_version_id, scope_id)
+      SELECT current.project_id, current.chapter_id, current.id, current.scope_id
+      FROM document_versions current
+      WHERE current.visibility = 'committed'
+        AND current.id = (
+          SELECT candidate.id FROM document_versions candidate
+          WHERE candidate.project_id = current.project_id
+            AND candidate.chapter_id = current.chapter_id
+            AND candidate.visibility = 'committed'
+          ORDER BY candidate.created_at DESC, candidate.id DESC LIMIT 1
+        )`,
+    `CREATE TABLE world_branches (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      parent_branch_id TEXT REFERENCES world_branches(id),
+      fork_entry_id TEXT,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('active', 'archived')),
+      world_head_entry_id TEXT,
+      history_head_entry_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
+    `CREATE TABLE history_entries (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      branch_id TEXT NOT NULL REFERENCES world_branches(id),
+      parent_entry_id TEXT REFERENCES history_entries(id),
+      kind TEXT NOT NULL CHECK (kind IN ('automatic', 'manual')),
+      state TEXT NOT NULL CHECK (state IN ('complete_world', 'paused_checkpoint')),
+      status TEXT NOT NULL CHECK (status IN ('preparing', 'ready', 'failed')),
+      name TEXT NOT NULL,
+      note TEXT,
+      operation_id TEXT NOT NULL,
+      git_commit_oid TEXT,
+      manifest_digest TEXT,
+      committed_sequence INTEGER NOT NULL CHECK (committed_sequence >= 0),
+      checkpoint_id TEXT,
+      task_id TEXT REFERENCES tasks(id),
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      UNIQUE(project_id, operation_id)
+    )`,
+    `CREATE TABLE project_history_state (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id),
+      active_branch_id TEXT NOT NULL REFERENCES world_branches(id),
+      selected_entry_id TEXT REFERENCES history_entries(id),
+      updated_at INTEGER NOT NULL
+    )`,
+    `CREATE TABLE history_finalizations (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      entry_id TEXT REFERENCES history_entries(id),
+      operation_id TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK (operation IN ('save', 'restore', 'retention')),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'paused', 'completed', 'failed')),
+      step TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      error_json TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(project_id, operation_id)
+    )`,
+    `CREATE TABLE history_retention_events (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      entry_id TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      deleted_at INTEGER NOT NULL
+    )`,
+    "CREATE INDEX active_scope_refs_scope ON active_scope_refs(scope_id, project_id)",
+    "CREATE INDEX history_entries_project_created ON history_entries(project_id, created_at DESC, id DESC)",
+    "CREATE INDEX history_entries_branch_created ON history_entries(branch_id, created_at DESC, id DESC)",
+    "CREATE INDEX history_finalizations_project_status ON history_finalizations(project_id, status, updated_at)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(19, "019_verification_probe_checkpoints", [
+    `CREATE TABLE verification_probe_executions (
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      task_id TEXT NOT NULL REFERENCES tasks(id),
+      phase_run_id TEXT NOT NULL REFERENCES phase_runs(id),
+      probe_index INTEGER NOT NULL CHECK (probe_index >= 0),
+      plan_digest TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (task_id, probe_index),
+      UNIQUE (task_id, plan_digest)
+    )`,
+    "CREATE INDEX verification_probe_executions_phase_run ON verification_probe_executions(phase_run_id, probe_index)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(20, "020_verification_probe_generations", [
+    "DROP INDEX verification_probe_executions_phase_run",
+    "ALTER TABLE verification_probe_executions RENAME TO verification_probe_executions_v19",
+    `CREATE TABLE verification_probe_executions (
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      task_id TEXT NOT NULL REFERENCES tasks(id),
+      phase_run_id TEXT NOT NULL REFERENCES phase_runs(id),
+      probe_index INTEGER NOT NULL CHECK (probe_index >= 0),
+      plan_digest TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (task_id, phase_run_id, probe_index),
+      UNIQUE (task_id, phase_run_id, plan_digest)
+    )`,
+    `INSERT INTO verification_probe_executions(
+      project_id, task_id, phase_run_id, probe_index, plan_digest, request_id, payload_json, digest, created_at
+    ) SELECT
+      project_id, task_id, phase_run_id, probe_index, plan_digest, request_id, payload_json, digest, created_at
+    FROM verification_probe_executions_v19`,
+    "DROP TABLE verification_probe_executions_v19",
+    "CREATE INDEX verification_probe_executions_phase_run ON verification_probe_executions(phase_run_id, probe_index)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(21, "021_runtime_budget_windows", [
+    `CREATE TABLE turn_budget_windows (
+      task_id TEXT NOT NULL REFERENCES tasks(id),
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      metric_id TEXT NOT NULL CHECK (metric_id IN ('model_calls', 'input_tokens', 'output_tokens', 'wall_time')),
+      generation INTEGER NOT NULL CHECK (generation >= 0),
+      baseline_value INTEGER NOT NULL CHECK (baseline_value >= 0),
+      limit_value INTEGER CHECK (limit_value > 0),
+      started_at INTEGER NOT NULL,
+      last_reset_at INTEGER,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (task_id, metric_id)
+    )`,
+    `CREATE TABLE turn_budget_resets (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      task_id TEXT NOT NULL REFERENCES tasks(id),
+      metric_id TEXT NOT NULL CHECK (metric_id IN ('model_calls', 'input_tokens', 'output_tokens', 'wall_time')),
+      previous_generation INTEGER NOT NULL CHECK (previous_generation >= 0),
+      new_generation INTEGER NOT NULL CHECK (new_generation > previous_generation),
+      previous_current INTEGER NOT NULL CHECK (previous_current >= 0),
+      limit_value INTEGER NOT NULL CHECK (limit_value > 0),
+      created_at INTEGER NOT NULL
+    )`,
+    "CREATE INDEX turn_budget_resets_task_created ON turn_budget_resets(task_id, created_at, id)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(22, "022_stable_task_checkpoints", [
+    `CREATE TABLE task_checkpoints (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      task_id TEXT NOT NULL REFERENCES tasks(id),
+      phase_run_id TEXT NOT NULL UNIQUE REFERENCES phase_runs(id),
+      context_id TEXT NOT NULL REFERENCES turn_contexts(id),
+      phase TEXT NOT NULL,
+      model_context_chain_id TEXT NOT NULL REFERENCES model_context_chains(id),
+      model_context_sequence INTEGER NOT NULL CHECK (model_context_sequence >= 0),
+      context_json TEXT NOT NULL,
+      budget_windows_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
+    `CREATE TABLE task_checkpoint_heads (
+      task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      checkpoint_id TEXT NOT NULL REFERENCES task_checkpoints(id),
+      updated_at INTEGER NOT NULL
+    )`,
+    "CREATE INDEX task_checkpoints_task_created ON task_checkpoints(task_id, created_at, id)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(23, "023_settlement_records_are_authoritative", [
+    "ALTER TABLE source_units DROP COLUMN settlement_status",
+  ]),
 ])

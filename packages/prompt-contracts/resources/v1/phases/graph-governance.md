@@ -13,12 +13,14 @@
 - 为每个场景索引建立 `sceneSpacetimeBindings`；正文场景填写直接覆盖的 `sourceUnitIndexes`，后台无正文演化填写空数组。
 - `sceneSpacetimeBindings[].predecessorSceneIndexes` 必须逐项复制 `dependency_audit.sceneContinuity[].predecessorSceneIndexes`，包括第一个场景可能为空的情况；`predecessorRequired` 为真时也不能为了满足要求虚构 `scene 0` 自己指向自己。
 - 当前轮第一个场景若必须承接上一轮，使用 `predecessorSceneAnchorRefs` 指向本轮已读证据映射出的既有图身份，并使用 `transitionPathRefs` 表达从上一轮状态进入本场景的实际路径；`predecessorSceneIndexes` 仍保持与依赖审计完全一致。依赖审计中的 `predecessorSceneRefs` 是证据别名，不能原样当作图引用。
-- 为每个图修改建立唯一 `mutationSpacetimeSettlement`。它必须包含 `historicalReturnRefs`；`world_effect` 还必须包含 `currentEntryRefs` 和生效场景；需要继承历史修订时使用实际读取证据的 `read-*` 引用，不使用 node owner 冒充 revision。
+- 为每个图修改建立唯一 `mutationSpacetimeSettlement`。它必须包含 `historicalReturnRefs`；`world_effect` 还必须包含 `currentEntryRefs` 和生效场景；需要继承历史修订时使用实际读取证据的 `evidence_*` 或旧项目 `read-*` 引用，不使用 node owner 冒充 revision。
 - `mutationIndexes` 是当前 `mutations` 数组的零基索引；全部修改索引必须在所有 `mutationSpacetimeSettlements` 中恰好出现一次，从 `0` 连续到最后一个索引，不能使用一基编号或遗漏最后一项。
 - `settlementRecords` 是可选的原文返回投影，不是新的语义事实；若与场景绑定和修改时空结算重复，可以省略，后台会从这些结构机械生成缺失的原文单元入口。若主动返回，只填写实际知道的零基 `sourceUnitIndex`，不要重复或制造新事实。
 - `decisionRecords` 记录需要单独说明的修改决定，可以按共同治理理由分组；未单列的修改自动继承本阶段 AI 返回的总理由和总自审，不要求重复穷举全部修改索引。
 - 声明本轮完整的 `affectedFrontierRefs`，供语义审查逐项批准后结算。它只包含本轮确实需要独立继续、暂停或归档的局部演化入口，不是 `mutations` 数组、节点或连接的逐项清单；一个前沿可以承载多项修改，没有受影响前沿时返回空数组。
 - 双向邻接接近上限时递归抽象并保留下一层细节。
+- 本阶段输入中的 `graphCapacity` 是应用层从当前可见图机械计算的容量画像，不是事实类别或固定领域 schema。先阅读其中的上限、预警值和热点节点；若已有局部超限，必须查询该热点的相关局部后自主决定复用、抽象、合并、编辑或归档，直到新的治理结果不再扩大超限。不要因为容量画像缺少某类细节而拒绝本轮推演。
+- `graphCapacity` 只告诉你当前图的容量状态，不替你决定出口含义、合并方式或历史组织方式；这些仍由你依据当前图、原文和上下文自主定义，并在修改原因和自审中说明。
 - 治理结果必须完整表达候选正文中全部事务的演化过程与当前有效状态，并能在有限预算内准确、选择性地恢复相关当前状态、历史过程和小说原文。
 - 局部含义或组织方式变化时，由你同步重构必要的当前入口、检索投影、历史返回路径和归档结构；如何实现由你决定，不能把旧资料变成不可发现内容。
 - 返回检索投影的实际精确键与语义文本、逐原文单元结算映射、连续性载荷和决定记录，不能只返回尚未创建的 ID。

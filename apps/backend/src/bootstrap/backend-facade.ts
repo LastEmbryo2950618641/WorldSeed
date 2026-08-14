@@ -15,10 +15,21 @@ import type {
   TaskStatus,
 } from "@worldseed/contracts"
 import {
+  calculateEffectiveWorldEvolutionLimits,
+  defaultTurnExecutionProfile,
+  defaultWorldEvolutionProfile,
+} from "@worldseed/config"
+import {
   GRAPH_NEIGHBORHOOD_MAX_ANCHORS,
   phaseRequestEnvelopeSchema,
   projectCreatePayloadSchema,
   graphNeighborhoodPayloadSchema,
+  historyBranchesPayloadSchema,
+  historyEntryOperationPayloadSchema,
+  historyListPayloadSchema,
+  historyReturnPreviousRoundPayloadSchema,
+  historyRetentionPreviewPayloadSchema,
+  historySaveManualPayloadSchema,
   modelListPayloadSchema,
   modelProfilesReadPayloadSchema,
   modelProfilesSavePayloadSchema,
@@ -27,6 +38,7 @@ import {
   projectWorkspacePayloadSchema,
   taskPayloadSchema,
   turnRecoverableTasksPayloadSchema,
+  turnMetricsResetPayloadSchema,
   turnResumePayloadSchema,
   turnStartPayloadSchema,
   workspaceReadPayloadSchema,
@@ -35,6 +47,8 @@ import {
   worldQueryPayloadSchema,
 } from "@worldseed/contracts"
 import { digest } from "../core/index.js"
+import { ProjectLifecycleError, TurnBudgetExceededError, TurnPauseRequestedError } from "../application/index.js"
+import { DeepSeekModelError } from "../infrastructure/index.js"
 import { errorDetails, runtimeLog } from "../infrastructure/diagnostics/index.js"
 import type { StoredPhaseRun, TurnOrchestratorInput, WorkflowExecutionResult } from "../application/index.js"
 import type { BackendContainer } from "./container.js"
@@ -48,10 +62,23 @@ type TaskRecord = Readonly<{
   turnInput?: TurnOrchestratorInput
   orchestrator?: import("../application/index.js").TurnOrchestrator
   abortController?: AbortController
+  modelSelection?: ModelSelection
+}>
+
+type AutomaticEvolutionTrigger = Readonly<{
+  projectId: ProjectId
+  workspaceRootRef: string
+  triggerTaskId: string
+  model?: ModelSelection
 }>
 
 export class BackendFacade {
   private readonly tasks = new Map<string, TaskRecord>()
+  private readonly automaticEvolutionTasks = new Set<string>()
+  private readonly activeAutomaticEvolutionByProject = new Map<string, string>()
+  private readonly pausedAutomaticEvolutionByProject = new Map<string, string[]>()
+  private readonly pendingAutomaticEvolutionByProject = new Map<string, AutomaticEvolutionTrigger[]>()
+  private closed = false
 
   public constructor(private readonly container: BackendContainer) {}
 
@@ -96,6 +123,8 @@ export class BackendFacade {
   }
 
   public async close(): Promise<void> {
+    this.closed = true
+    for (const task of this.tasks.values()) task.abortController?.abort("Backend is closing")
     await this.container.close()
   }
 
@@ -133,6 +162,79 @@ export class BackendFacade {
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
         return runtime.saveSettings(payload.settings)
       }
+      case "history.list": {
+        const payload = historyListPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.listHistoryEntries()
+      }
+      case "history.branches": {
+        const payload = historyBranchesPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.listHistoryBranches()
+      }
+      case "history.saveManual": {
+        const payload = historySaveManualPayloadSchema.parse(request.payload)
+        await this.preemptAutomaticEvolution(payload.projectId)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        const activeTask = [...this.tasks.values()].find((task) => (
+          task.handle.projectId === payload.projectId
+          && !this.automaticEvolutionTasks.has(task.handle.taskId)
+          && (task.status === "created" || task.status === "running" || task.status === "committing"
+            || task.status === "paused" || task.status === "awaiting_user_decision")
+        ))
+        const stableCheckpoint = activeTask === undefined
+          ? undefined
+          : await runtime.findTaskCheckpoint(activeTask.handle.taskId)
+        if (activeTask !== undefined && stableCheckpoint === undefined) {
+          throw new Error("The running task has no stable checkpoint available for manual history save")
+        }
+        const saved = await runtime.saveManualHistory({
+          operationId: payload.operationId,
+          name: payload.name,
+          ...(payload.note === undefined ? {} : { note: payload.note }),
+          ...(activeTask === undefined ? {} : { taskId: activeTask.handle.taskId }),
+          ...(stableCheckpoint === undefined ? {} : { checkpointId: stableCheckpoint.phaseRunId }),
+          createdAtMs: this.container.now(),
+        })
+        void this.drainAutomaticEvolution(payload.projectId)
+        return saved
+      }
+      case "history.restore": {
+        const payload = historyEntryOperationPayloadSchema.parse(request.payload)
+        await this.ensureHistoryCheckoutAvailable(payload.projectId)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.checkoutHistory({
+          operationId: payload.operationId,
+          entryId: payload.entryId,
+          mode: "restore",
+          startedAtMs: this.container.now(),
+        })
+      }
+      case "history.continueFrom": {
+        const payload = historyEntryOperationPayloadSchema.parse(request.payload)
+        await this.ensureHistoryCheckoutAvailable(payload.projectId)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.checkoutHistory({
+          operationId: payload.operationId,
+          entryId: payload.entryId,
+          mode: "continue_from",
+          startedAtMs: this.container.now(),
+        })
+      }
+      case "history.returnPreviousRound": {
+        const payload = historyReturnPreviousRoundPayloadSchema.parse(request.payload)
+        await this.ensureHistoryCheckoutAvailable(payload.projectId)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.returnPreviousRound({
+          operationId: payload.operationId,
+          startedAtMs: this.container.now(),
+        })
+      }
+      case "history.retention.preview": {
+        const payload = historyRetentionPreviewPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.previewHistoryRetention(payload.retentionLimit)
+      }
       case "workspace.list": {
         const payload = projectWorkspacePayloadSchema.parse(request.payload)
         return this.container.validateProject(payload.workspaceRootRef)
@@ -145,6 +247,7 @@ export class BackendFacade {
       case "workspace.save": {
         const payload = workspaceSavePayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.ensureWritableHistoryBranch(this.container.now())
         await runtime.saveMarkdown(payload.relativePath, payload.content)
         return { relativePath: payload.relativePath, saved: true }
       }
@@ -240,6 +343,17 @@ export class BackendFacade {
         const payload = taskPayloadSchema.parse(request.payload)
         return this.readTask(payload.taskId)
       }
+      case "turn.metrics.reset": {
+        const payload = turnMetricsResetPayloadSchema.parse(request.payload)
+        const runtime = this.container.getCurrentRuntime()
+        if (runtime === undefined) throw new Error("No project is open")
+        const result = await runtime.resetRuntimeMetrics(payload.taskId, payload.metricIds, this.container.now())
+        runtimeLog("info", "backend-facade", "turn.metrics.reset", {
+          taskId: payload.taskId,
+          metricIds: payload.metricIds,
+        })
+        return result
+      }
       case "turn.resume": {
         const payload = turnResumePayloadSchema.parse(request.payload)
         return this.resumeTurn(payload)
@@ -300,6 +414,7 @@ export class BackendFacade {
     } | undefined
     model?: ModelSelection | undefined
     maxModelCalls?: number | undefined
+    allowWorkspaceChapterReads: boolean
   }): Promise<TaskHandle> {
     return this.startWorkflow({
       workflow: "turn",
@@ -307,7 +422,7 @@ export class BackendFacade {
       workspaceRootRef: payload.workspaceRootRef,
       userInput: payload.userInput,
       chapterSequence: payload.chapterSequence,
-      allowWorkspaceChapterReads: true,
+      allowWorkspaceChapterReads: payload.allowWorkspaceChapterReads,
       ...(payload.presentation === undefined ? {} : { presentation: payload.presentation }),
       ...(payload.model === undefined ? {} : { model: payload.model }),
       ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
@@ -326,13 +441,18 @@ export class BackendFacade {
     maxModelCalls?: number
     deadlineMs?: number
     maxRetrievalRounds?: number
+    executionOrigin?: TurnOrchestratorInput["executionOrigin"]
   }>): Promise<TaskHandle> {
+    if (input.executionOrigin?.kind !== "automatic_evolution" && input.workflow !== "query") {
+      await this.preemptAutomaticEvolution(input.projectId)
+    }
     const model = this.resolveModel(input.model)
     const modelInfo = model.info
     if (modelInfo?.available === false) {
-      throw new Error(modelInfo.detail ?? `AI model is unavailable: ${modelInfo.provider}/${modelInfo.model}`)
+      throw new DeepSeekModelError("configuration", modelInfo.detail ?? `AI model is unavailable: ${modelInfo.provider}/${modelInfo.model}`)
     }
     const runtime = await this.container.getRuntime(input.projectId, input.workspaceRootRef)
+    await runtime.ensureWritableHistoryBranch(this.container.now())
     const projectSettings = await runtime.readSettings()
     const taskId = this.container.createId()
     const abortController = new AbortController()
@@ -342,7 +462,16 @@ export class BackendFacade {
       kind: input.workflow as TaskKind,
       status: "created",
     }
-    this.tasks.set(taskId, { handle, status: "created", abortController })
+    this.tasks.set(taskId, {
+      handle,
+      status: "created",
+      abortController,
+      ...(input.model === undefined ? {} : { modelSelection: input.model }),
+    })
+    if (input.executionOrigin?.kind === "automatic_evolution") {
+      this.automaticEvolutionTasks.add(taskId)
+      this.activeAutomaticEvolutionByProject.set(input.projectId, taskId)
+    }
     runtimeLog("debug", "backend-facade", `${input.workflow}.accepted`, {
       taskId,
       projectId: input.projectId,
@@ -363,16 +492,20 @@ export class BackendFacade {
       ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
       taskId,
       maxModelCalls: input.maxModelCalls ?? projectSettings.execution.maxModelCalls,
-      maxContextTokens: Math.floor(
-        projectSettings.execution.contextWindowTokens
-          * projectSettings.execution.contextCompactionThresholdRatio,
-      ),
       deadlineMs: input.deadlineMs ?? projectSettings.execution.maxWallTimeMs,
       maxRetrievalRounds: input.maxRetrievalRounds ?? projectSettings.execution.maxRetrievalRounds,
       projectSettings,
+      executionOrigin: input.executionOrigin ?? { kind: "user" },
     }
     const storedTurnInput = turnInput as TurnOrchestratorInput
-    this.tasks.set(taskId, { handle, status: "created", turnInput: storedTurnInput, orchestrator, abortController })
+    this.tasks.set(taskId, {
+      handle,
+      status: "created",
+      turnInput: storedTurnInput,
+      orchestrator,
+      abortController,
+      ...(input.model === undefined ? {} : { modelSelection: input.model }),
+    })
     let markPrepared: (() => void) | undefined
     const prepared = new Promise<void>((resolve) => { markPrepared = resolve })
     const execution = orchestrator.execute(turnInput, {
@@ -382,8 +515,8 @@ export class BackendFacade {
     void execution.then(
       (result) => {
         const current = this.tasks.get(taskId)
-        if (current?.abortController !== abortController || current.status === "cancelled") return
-        this.tasks.set(taskId, { handle: { ...handle, status: "completed" }, status: "completed", result, turnInput: storedTurnInput, orchestrator, abortController })
+        if (current?.abortController !== abortController || current.status === "cancelled" || current.status === "paused") return
+        this.tasks.set(taskId, { ...current, handle: { ...handle, status: "completed" }, status: "completed", result, turnInput: storedTurnInput, orchestrator, abortController })
         runtimeLog("info", "backend-facade", `${input.workflow}.completed`, {
           taskId,
           ...(result.kind === "turn" ? { chapterPath: result.chapterPath } : {}),
@@ -392,16 +525,18 @@ export class BackendFacade {
           inputTokens: result.inputTokens,
           outputTokens: result.outputTokens,
         })
+        this.handleWorkflowCompleted(runtime, result, taskId, input)
       },
       (error: unknown) => {
         const current = this.tasks.get(taskId)
-        if (current?.abortController !== abortController || current.status === "cancelled") return
+        if (current?.abortController !== abortController || current.status === "cancelled" || current.status === "paused") return
         const backendError = this.errorFrom(error)
-        this.tasks.set(taskId, { handle: { ...handle, status: "awaiting_user_decision" }, status: "awaiting_user_decision", error: backendError, turnInput: storedTurnInput, orchestrator, abortController })
+        this.tasks.set(taskId, { ...current, handle: { ...handle, status: "awaiting_user_decision" }, status: "awaiting_user_decision", error: backendError, turnInput: storedTurnInput, orchestrator, abortController })
         runtimeLog("warn", "backend-facade", `${input.workflow}.interrupted`, {
           taskId,
           error: errorDetails(error),
         })
+        this.handleAutomaticEvolutionStopped(input.projectId, taskId, false)
       },
     )
     await Promise.race([
@@ -417,6 +552,7 @@ export class BackendFacade {
       baseUrl: selection.baseUrl,
       model: selection.model,
       apiKey: requireResolvedApiKey(selection.apiKey),
+      contextWindowTokens: selection.contextWindowTokens,
       thinkingModeEnabled: selection.thinkingModeEnabled,
       reasoningEffort: selection.reasoningEffort,
       jsonModeEnabled: selection.jsonModeEnabled,
@@ -428,6 +564,8 @@ export class BackendFacade {
     const runtime = this.container.getCurrentRuntime()
     const stored = await runtime?.taskScopes.findTask(taskId)
     const phaseRuns = await this.readPhaseRuns(runtime, taskId)
+    const finalization = await runtime?.findFinalizationByTask(taskId)
+    const runtimeMetrics = await runtime?.readRuntimeMetrics(taskId, this.container.now())
     if (stored !== undefined) {
       const storedHandle = {
         taskId: stored.taskId,
@@ -441,6 +579,8 @@ export class BackendFacade {
         status: stored.status,
         ...(stored?.lastPhase === undefined ? {} : { lastPhase: stored.lastPhase }),
         ...(stored?.error === undefined ? {} : { interruption: stored.error }),
+        ...(finalization === undefined ? {} : { finalization }),
+        ...(runtimeMetrics === undefined ? {} : { runtimeMetrics }),
         phaseRuns,
       }
     }
@@ -474,23 +614,47 @@ export class BackendFacade {
     }
   }
 
-  private async resumeTurn(payload: { taskId: string; mode: "continue" | "retry_phase"; model?: { baseUrl: string; model: string; credentialRef: string; apiKey?: string | undefined; thinkingModeEnabled?: boolean; reasoningEffort?: "low" | "high" | "max"; jsonModeEnabled?: boolean } | undefined; maxModelCalls?: number | undefined; deadlineMs?: number | undefined; maxRetrievalRounds?: number | undefined }): Promise<TaskHandle> {
+  private async resumeTurn(payload: { taskId: string; mode: "continue" | "retry_phase"; resetMetricIds: readonly ("model_calls" | "input_tokens" | "output_tokens" | "wall_time")[]; model?: { baseUrl: string; model: string; credentialRef: string; apiKey?: string | undefined; contextWindowTokens: number; thinkingModeEnabled?: boolean; reasoningEffort?: "low" | "high" | "max"; jsonModeEnabled?: boolean } | undefined; maxModelCalls?: number | undefined; deadlineMs?: number | undefined; maxRetrievalRounds?: number | undefined }): Promise<TaskHandle> {
     const selectedModel = payload.model === undefined
       ? undefined
       : this.container.createModelFromSelection({
         baseUrl: payload.model.baseUrl,
         model: payload.model.model,
         apiKey: requireResolvedApiKey(payload.model.apiKey),
+        contextWindowTokens: payload.model.contextWindowTokens,
         ...(payload.model.thinkingModeEnabled === undefined ? {} : { thinkingModeEnabled: payload.model.thinkingModeEnabled }),
         ...(payload.model.reasoningEffort === undefined ? {} : { reasoningEffort: payload.model.reasoningEffort }),
         ...(payload.model.jsonModeEnabled === undefined ? {} : { jsonModeEnabled: payload.model.jsonModeEnabled }),
       })
-    const record = await this.loadResumableTask(payload.taskId, selectedModel)
+    const loadedRecord = await this.loadResumableTask(payload.taskId, selectedModel)
+    const record = payload.model === undefined
+      ? loadedRecord
+      : { ...loadedRecord, modelSelection: payload.model as ModelSelection }
+    const runtime = this.container.getCurrentRuntime()
+    if (runtime === undefined) throw new Error("No project is open")
+    if (record.turnInput.executionOrigin?.kind === "automatic_evolution") {
+      this.automaticEvolutionTasks.add(payload.taskId)
+      this.activeAutomaticEvolutionByProject.set(record.turnInput.projectId, payload.taskId)
+    }
+    if (payload.resetMetricIds.length > 0) {
+      await runtime.resetRuntimeMetrics(payload.taskId, payload.resetMetricIds, this.container.now())
+    }
+    const storedTask = await runtime.taskScopes.findTask(payload.taskId)
+    const blockedMetrics = readFacadeBlockedMetrics(storedTask?.error)
+    const interruptedAtMs = readFacadeInterruptionTimestamp(storedTask?.error)
+    if (!await runtime.wereRuntimeMetricsResetAfter(payload.taskId, blockedMetrics, interruptedAtMs)) {
+      throw new FacadeOperationError(
+        "budget_exhausted",
+        `Explicit budget reset required before resume: ${blockedMetrics.join(", ")}`,
+        true,
+      )
+    }
     const input: TurnOrchestratorInput = {
       ...record.turnInput,
       ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
       ...(payload.deadlineMs === undefined ? {} : { deadlineMs: payload.deadlineMs }),
       ...(payload.maxRetrievalRounds === undefined ? {} : { maxRetrievalRounds: payload.maxRetrievalRounds }),
+      resetMetricIds: [],
     }
     const handle: TaskHandle = { ...record.handle, status: "running" }
     const abortController = new AbortController()
@@ -505,12 +669,19 @@ export class BackendFacade {
     void record.orchestrator.resume(input, payload.mode, { signal: abortController.signal }).then(
       (result) => {
         const current = this.tasks.get(payload.taskId)
-        if (current?.abortController !== abortController || current.status === "cancelled") return
+        if (current?.abortController !== abortController || current.status === "cancelled" || current.status === "paused") return
         this.tasks.set(payload.taskId, { ...record, handle: { ...handle, status: "completed" }, status: "completed", result, abortController })
+        this.handleWorkflowCompleted(runtime, result, payload.taskId, {
+          workflow: record.turnInput.workflow ?? "turn",
+          projectId: record.turnInput.projectId,
+          workspaceRootRef: record.turnInput.workspaceRootRef,
+          ...(record.modelSelection === undefined ? {} : { model: record.modelSelection }),
+          executionOrigin: record.turnInput.executionOrigin,
+        })
       },
       async (error: unknown) => {
         const current = this.tasks.get(payload.taskId)
-        if (current?.abortController !== abortController || current.status === "cancelled") return
+        if (current?.abortController !== abortController || current.status === "cancelled" || current.status === "paused") return
         const backendError = this.errorFrom(error)
         const runtime = this.container.getCurrentRuntime()
         const stored = await runtime?.taskScopes.findTask(payload.taskId)
@@ -521,9 +692,155 @@ export class BackendFacade {
           error: errorDetails(error),
           backendError,
         })
+        this.handleAutomaticEvolutionStopped(record.turnInput.projectId, payload.taskId, false)
       },
     )
     return handle
+  }
+
+  private handleWorkflowCompleted(
+    runtime: ProjectRuntime,
+    result: WorkflowExecutionResult,
+    taskId: string,
+    input: Readonly<{
+      workflow: "turn" | "query" | "evolution"
+      projectId: ProjectId
+      workspaceRootRef: string
+      model?: ModelSelection
+      executionOrigin?: TurnOrchestratorInput["executionOrigin"]
+    }>,
+  ): void {
+    if (result.kind === "evolution" && input.executionOrigin?.kind === "automatic_evolution") {
+      this.handleAutomaticEvolutionStopped(input.projectId, taskId, true)
+      return
+    }
+    if (result.kind !== "turn") return
+    void this.finalizeTurnAndScheduleEvolution(runtime, result, input)
+  }
+
+  private async finalizeTurnAndScheduleEvolution(
+    runtime: ProjectRuntime,
+    result: Extract<WorkflowExecutionResult, { kind: "turn" }>,
+    input: Readonly<{
+      projectId: ProjectId
+      workspaceRootRef: string
+      model?: ModelSelection
+    }>,
+  ): Promise<void> {
+    try {
+      const entry = await runtime.saveAutomaticHistory({
+        operationId: result.taskId,
+        name: result.chapterHeading,
+        taskId: result.taskId,
+        createdAtMs: this.container.now(),
+      })
+      runtimeLog("info", "backend-facade", "history.automatic.completed", {
+        taskId: result.taskId,
+        entryId: entry.entryId,
+      })
+    } catch (historyError) {
+      runtimeLog("error", "backend-facade", "history.automatic.failed", {
+        taskId: result.taskId,
+        error: errorDetails(historyError),
+        message: "The turn remains completed; automatic evolution is not started before history finalization succeeds",
+      })
+      return
+    }
+    if (this.closed || !defaultWorldEvolutionProfile.enabled) return
+    const queue = this.pendingAutomaticEvolutionByProject.get(input.projectId) ?? []
+    queue.push({
+      projectId: input.projectId,
+      workspaceRootRef: input.workspaceRootRef,
+      triggerTaskId: result.taskId,
+      ...(input.model === undefined ? {} : { model: input.model }),
+    })
+    this.pendingAutomaticEvolutionByProject.set(input.projectId, queue)
+    await this.drainAutomaticEvolution(input.projectId)
+  }
+
+  private async drainAutomaticEvolution(projectId: ProjectId): Promise<void> {
+    if (this.closed || this.hasActiveForegroundWriter(projectId)) return
+    if (this.activeAutomaticEvolutionByProject.has(projectId)) return
+    const paused = this.pausedAutomaticEvolutionByProject.get(projectId)
+    const pausedTaskId = paused?.shift()
+    if (paused !== undefined && paused.length === 0) this.pausedAutomaticEvolutionByProject.delete(projectId)
+    if (pausedTaskId !== undefined) {
+      this.activeAutomaticEvolutionByProject.set(projectId, pausedTaskId)
+      try {
+        await this.resumeTurn({ taskId: pausedTaskId, mode: "continue", resetMetricIds: [] })
+      } catch (error) {
+        this.activeAutomaticEvolutionByProject.delete(projectId)
+        runtimeLog("error", "backend-facade", "world.evolve.automatic.resume_failed", {
+          projectId,
+          taskId: pausedTaskId,
+          error: errorDetails(error),
+        })
+      }
+      return
+    }
+    const queue = this.pendingAutomaticEvolutionByProject.get(projectId)
+    const trigger = queue?.shift()
+    if (queue !== undefined && queue.length === 0) this.pendingAutomaticEvolutionByProject.delete(projectId)
+    if (trigger === undefined) return
+    const limits = calculateEffectiveWorldEvolutionLimits(defaultWorldEvolutionProfile, defaultTurnExecutionProfile)
+    try {
+      const handle = await this.startWorkflow({
+        workflow: "evolution",
+        projectId: trigger.projectId,
+        workspaceRootRef: trigger.workspaceRootRef,
+        userInput: buildAutomaticEvolutionInstruction(trigger.triggerTaskId),
+        chapterSequence: 1,
+        allowWorkspaceChapterReads: false,
+        ...(trigger.model === undefined ? {} : { model: trigger.model }),
+        maxModelCalls: limits.backgroundModelCalls,
+        deadlineMs: limits.backgroundWallTimeMs,
+        executionOrigin: { kind: "automatic_evolution", triggerTaskId: trigger.triggerTaskId },
+      })
+      runtimeLog("info", "backend-facade", "world.evolve.automatic.started", {
+        projectId,
+        taskId: handle.taskId,
+        triggerTaskId: trigger.triggerTaskId,
+        maxModelCalls: limits.backgroundModelCalls,
+        deadlineMs: limits.backgroundWallTimeMs,
+      })
+    } catch (error) {
+      runtimeLog("error", "backend-facade", "world.evolve.automatic.start_failed", {
+        projectId,
+        triggerTaskId: trigger.triggerTaskId,
+        error: errorDetails(error),
+      })
+    }
+  }
+
+  private async preemptAutomaticEvolution(projectId: ProjectId): Promise<void> {
+    const taskId = this.activeAutomaticEvolutionByProject.get(projectId)
+    if (taskId === undefined) return
+    const task = this.tasks.get(taskId)
+    if (task?.status !== "created" && task?.status !== "running" && task?.status !== "committing") return
+    await this.pauseTurn(taskId)
+    this.activeAutomaticEvolutionByProject.delete(projectId)
+    const paused = this.pausedAutomaticEvolutionByProject.get(projectId) ?? []
+    paused.unshift(taskId)
+    this.pausedAutomaticEvolutionByProject.set(projectId, paused)
+    runtimeLog("info", "backend-facade", "world.evolve.automatic.preempted", { projectId, taskId })
+  }
+
+  private handleAutomaticEvolutionStopped(projectId: ProjectId, taskId: string, completed: boolean): void {
+    if (!this.automaticEvolutionTasks.has(taskId)) return
+    if (this.activeAutomaticEvolutionByProject.get(projectId) === taskId) {
+      this.activeAutomaticEvolutionByProject.delete(projectId)
+    }
+    if (completed) this.automaticEvolutionTasks.delete(taskId)
+    if (completed) void this.drainAutomaticEvolution(projectId)
+  }
+
+  private hasActiveForegroundWriter(projectId: ProjectId): boolean {
+    return [...this.tasks.values()].some((task) => (
+      task.handle.projectId === projectId
+      && task.handle.kind !== "query"
+      && !this.automaticEvolutionTasks.has(task.handle.taskId)
+      && (task.status === "created" || task.status === "running" || task.status === "committing")
+    ))
   }
 
   private async loadResumableTask(taskId: string, model?: import("../application/index.js").AIModelPort): Promise<TaskRecord & { orchestrator: import("../application/index.js").TurnOrchestrator; turnInput: TurnOrchestratorInput }> {
@@ -565,10 +882,8 @@ export class BackendFacade {
       maxOutputTokens: config.maxOutputTokens,
       deadlineMs: Math.max(1, config.deadlineAtMs - stored.createdAtMs),
       maxRetrievalRounds: projectSettings.execution.maxRetrievalRounds,
-      maxContextTokens: Math.floor(
-        projectSettings.execution.contextWindowTokens * projectSettings.execution.contextCompactionThresholdRatio,
-      ),
       projectSettings,
+      ...(config.executionOrigin === undefined ? {} : { executionOrigin: config.executionOrigin }),
     }
     const orchestrator = runtime.createTurnOrchestrator(model ?? this.container.model, this.container.createId, this.container.now)
     const handle: TaskHandle = {
@@ -592,12 +907,17 @@ export class BackendFacade {
     const runtime = this.container.getCurrentRuntime()
     const stored = await runtime?.taskScopes.findTask(taskId)
     if (stored === undefined && record === undefined) throw new Error(`Task is not loaded: ${taskId}`)
-    if (stored?.status !== "awaiting_user_decision" && record?.status !== "awaiting_user_decision") {
-      throw new Error("Only a task waiting for a decision can be paused")
+    const pausableStatuses: readonly TaskStatus[] = ["created", "running", "committing", "awaiting_user_decision"]
+    if (!(stored !== undefined && pausableStatuses.includes(stored.status))
+      && !(record !== undefined && pausableStatuses.includes(record.status))) {
+      throw new FacadeOperationError("validation_error", "The task is not in a pausable state")
     }
     await runtime?.taskScopes.findTask(taskId)
     const next = { ...(record?.handle ?? { taskId, projectId: stored?.projectId ?? "", kind: stored?.kind ?? "turn", status: "paused" as const }), status: "paused" as const }
-    if (record !== undefined) this.tasks.set(taskId, { ...record, handle: next, status: "paused" })
+    if (record !== undefined) {
+      this.tasks.set(taskId, { ...record, handle: next, status: "paused" })
+      record.abortController?.abort(new TurnPauseRequestedError())
+    }
     if (runtime !== undefined) await runtime.persistenceUpdateTask(taskId, "paused")
     return next
   }
@@ -620,23 +940,32 @@ export class BackendFacade {
     return { protocolVersion: PROTOCOL_VERSION, requestId, ok: false, error }
   }
 
+  private async ensureHistoryCheckoutAvailable(projectId: string): Promise<void> {
+    await this.preemptAutomaticEvolution(projectId)
+    const activeTask = [...this.tasks.values()].find((task) => (
+      task.handle.projectId === projectId
+      && (task.status === "created" || task.status === "running" || task.status === "committing")
+    ))
+    if (activeTask !== undefined) {
+      throw new FacadeOperationError("history_busy", "History checkout is busy while a task is running")
+    }
+  }
+
   private errorFrom(error: unknown): BackendError {
     const message = error instanceof Error ? error.message : String(error)
     let code: BackendError["code"] = "storage_failure"
     let recoverable = true
     if (isZodError(error)) {
       code = "validation_error"
-    } else if (message.includes("model") || message.includes("DeepSeek")) {
-      code = "model_failure"
-    } else if (message.includes("budget") || message.includes("deadline")) {
+    } else if (error instanceof FacadeOperationError) {
+      code = error.code
+      recoverable = error.recoverable
+    } else if (error instanceof TurnBudgetExceededError) {
       code = "budget_exhausted"
-    } else if (message.includes("workspace") || message.includes("Markdown")) {
+    } else if (error instanceof DeepSeekModelError) {
+      code = "model_failure"
+    } else if (error instanceof ProjectLifecycleError) {
       code = "workspace_failure"
-    } else if (message.includes("different project") || message.includes("scope")) {
-      code = "scope_violation"
-    } else if (message.includes("not implemented")) {
-      code = "validation_error"
-      recoverable = false
     }
     return this.createError(code, message, recoverable)
   }
@@ -649,6 +978,17 @@ export class BackendFacade {
       diagnosticId: this.container.createId(),
       details: { errorDigest: digest(message) },
     })
+  }
+}
+
+class FacadeOperationError extends Error {
+  public constructor(
+    public readonly code: BackendError["code"],
+    message: string,
+    public readonly recoverable = true,
+  ) {
+    super(message)
+    this.name = "FacadeOperationError"
   }
 }
 
@@ -679,6 +1019,15 @@ function requireResolvedApiKey(apiKey: string | undefined): string {
   return apiKey
 }
 
+function buildAutomaticEvolutionInstruction(triggerTaskId: string): string {
+  return [
+    `正式章节任务 ${triggerTaskId} 已提交，执行一次由产品自动触发的无正文世界演化。`,
+    "从已提交演化前沿中选择需要推进的局部，并先读取其规则、时空锚点、当前状态和可达影响。",
+    "只依据当前单一上下文链、实际读取资料和本轮新形成内容推进；未知处可以保留未知或作最小一致补全。",
+    "更新普通世界图、时空结算和演化前沿，但不得生成章节正文，也不得围绕固定领域类型机械扩展。",
+  ].join("\n")
+}
+
 function isZodError(error: unknown): boolean {
   return typeof error === "object"
     && error !== null
@@ -690,6 +1039,19 @@ function readStringProperty(value: unknown, property: string): string | undefine
   if (typeof value !== "object" || value === null || !(property in value)) return undefined
   const propertyValue = (value as Record<string, unknown>)[property]
   return typeof propertyValue === "string" ? propertyValue : undefined
+}
+
+function readFacadeBlockedMetrics(error: unknown): readonly ("model_calls" | "input_tokens" | "output_tokens" | "wall_time")[] {
+  if (typeof error !== "object" || error === null || !("blockedMetrics" in error) || !Array.isArray(error.blockedMetrics)) return []
+  return error.blockedMetrics.filter((metric): metric is "model_calls" | "input_tokens" | "output_tokens" | "wall_time" => (
+    metric === "model_calls" || metric === "input_tokens" || metric === "output_tokens" || metric === "wall_time"
+  ))
+}
+
+function readFacadeInterruptionTimestamp(error: unknown): number {
+  if (typeof error !== "object" || error === null || !("interruptedAtMs" in error)) return Number.MAX_SAFE_INTEGER
+  const value = error.interruptedAtMs
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : Number.MAX_SAFE_INTEGER
 }
 
 function readRecoverablePhaseInput(value: unknown): {
@@ -716,6 +1078,7 @@ function readRecoverableTaskConfig(value: unknown): {
   maxInputTokens: number
   maxOutputTokens: number
   deadlineAtMs: number
+  executionOrigin?: TurnOrchestratorInput["executionOrigin"]
 } {
   if (typeof value !== "object" || value === null || !("budget" in value)) {
     throw new Error("The task checkpoint is missing execution budget")
@@ -732,6 +1095,24 @@ function readRecoverableTaskConfig(value: unknown): {
     maxInputTokens,
     maxOutputTokens,
     deadlineAtMs,
+    ...readExecutionOrigin(value),
+  }
+}
+
+function readExecutionOrigin(value: object): Readonly<{ executionOrigin?: TurnOrchestratorInput["executionOrigin"] }> {
+  if (!("executionOrigin" in value)) return {}
+  const origin = value.executionOrigin
+  if (typeof origin !== "object" || origin === null || !("kind" in origin)) return {}
+  if (origin.kind === "user") return { executionOrigin: { kind: "user" } }
+  if (origin.kind !== "automatic_evolution") return {}
+  const triggerTaskId = "triggerTaskId" in origin && typeof origin.triggerTaskId === "string"
+    ? origin.triggerTaskId
+    : undefined
+  return {
+    executionOrigin: {
+      kind: "automatic_evolution",
+      ...(triggerTaskId === undefined ? {} : { triggerTaskId }),
+    },
   }
 }
 

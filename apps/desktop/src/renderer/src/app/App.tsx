@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels"
 import { ChevronDown, Cloud, Cpu, FolderOpen, Menu, PanelLeftClose, PanelRightClose, Save, Settings2, Sprout } from "lucide-react"
-import type { ProjectSettings } from "@worldseed/contracts"
+import type {
+  HistoryCheckoutResult,
+  HistoryOverview,
+  HistoryRetentionPreview,
+  ProjectSettings,
+  ResettableRuntimeMetricId,
+} from "@worldseed/contracts"
 
 import {
   browserDemoProject,
@@ -48,6 +54,8 @@ export function App(): React.JSX.Element {
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
   const [projectSettingsOpen, setProjectSettingsOpen] = useState(false)
   const [projectSettings, setProjectSettings] = useState<ProjectSettings>()
+  const [history, setHistory] = useState<HistoryOverview>()
+  const [historyLoading, setHistoryLoading] = useState(false)
   const [modelProfiles, setModelProfiles] = useState<readonly ModelProfile[]>([])
   const [activeModelProfileId, setActiveModelProfileId] = useState("")
   const activeModelProfile = modelProfiles.find((profile) => profile.id === activeModelProfileId)
@@ -63,13 +71,52 @@ export function App(): React.JSX.Element {
     setReport(next)
   }, [project])
 
+  const loadHistoryGraph = useCallback(async (anchorIds: readonly string[]): Promise<void> => {
+    if (project === undefined || anchorIds.length === 0) {
+      setGraphSlice(undefined)
+      return
+    }
+    const slice = await invokeBackend<GraphSlice>("graph.neighborhood", {
+      projectId: project.projectId,
+      workspaceRootRef: project.workspaceRootRef,
+      anchorIds,
+      anchorOffset: 0,
+      direction: "both",
+      maxDepth: Math.max(1, projectSettings?.graph.preferredExpansionDepth ?? 2),
+      maxNodes: projectSettings?.graph.maxVisitedNodes ?? 48,
+      maxLinks: projectSettings?.graph.maxVisitedLinks ?? 96,
+    })
+    setGraphSlice(slice)
+    if (slice.anchorWindow?.remainingCount !== undefined && slice.anchorWindow.remainingCount > 0) {
+      setPostCommitNotice(`历史状态已恢复。世界图入口较多，当前显示首批 ${String(slice.anchorWindow.processedCount)} 个入口。`)
+    }
+  }, [project, projectSettings])
+
+  const refreshHistory = useCallback(async (): Promise<HistoryOverview | undefined> => {
+    if (project === undefined) return undefined
+    setHistoryLoading(true)
+    try {
+      const overview = await invokeBackend<HistoryOverview>("history.list", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+      })
+      setHistory(overview)
+      await loadHistoryGraph(overview.graphAnchorIds)
+      return overview
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [loadHistoryGraph, project])
+
   useEffect(() => { void refreshWorkspace() }, [refreshWorkspace])
+  useEffect(() => { void refreshHistory() }, [refreshHistory])
 
   useEffect(() => {
     if (project === undefined) {
       setProjectSettings(undefined)
       setTask(undefined)
       setGraphSlice(undefined)
+      setHistory(undefined)
       setPostCommitNotice(undefined)
       return
     }
@@ -156,7 +203,7 @@ export function App(): React.JSX.Element {
           reason: "continue",
         })
         const loadedCount = slice.anchorWindow.requestedCount - slice.anchorWindow.remainingCount
-        setPostCommitNotice(`本轮正文与图数据已提交。世界图共有 ${slice.anchorWindow.requestedCount} 个查询入口，已按配置加载 ${loadedCount} 个；是否继续加载下一批？`)
+        setPostCommitNotice(`本轮正文与图数据已提交。世界图共有 ${String(slice.anchorWindow.requestedCount)} 个查询入口，已按配置加载 ${String(loadedCount)} 个；是否继续加载下一批？`)
       } else {
         setPendingGraphLoad(undefined)
         setPostCommitNotice(undefined)
@@ -203,6 +250,11 @@ export function App(): React.JSX.Element {
           await loadCommittedGraph(snapshot.result)
           await openFile(snapshot.result.chapterPath)
         }
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 100))
+          const overview = await refreshHistory()
+          if (overview?.entries.some((entry) => entry.taskId === taskId && entry.status === "ready") === true) break
+        }
         return
       }
       if (["awaiting_user_decision", "paused", "cancelled", "failed"].includes(snapshot.status)) return
@@ -231,16 +283,15 @@ export function App(): React.JSX.Element {
           minimumWordCount: parsedMinimumWordCount,
           maximumWordCount: parsedMaximumWordCount,
         },
-        ...(activeModelProfile === undefined ? {} : {
-          model: {
-            baseUrl: activeModelProfile.baseUrl,
-            model: activeModelProfile.model,
-            credentialRef: activeModelProfile.credentialRef,
-            thinkingModeEnabled: activeModelProfile.thinkingModeEnabled,
-            reasoningEffort: activeModelProfile.reasoningEffort,
-            jsonModeEnabled: activeModelProfile.jsonModeEnabled,
-          },
-        }),
+        model: {
+          baseUrl: activeModelProfile.baseUrl,
+          model: activeModelProfile.model,
+          credentialRef: activeModelProfile.credentialRef,
+          contextWindowTokens: activeModelProfile.contextWindowTokens,
+          thinkingModeEnabled: activeModelProfile.thinkingModeEnabled,
+          reasoningEffort: activeModelProfile.reasoningEffort,
+          jsonModeEnabled: activeModelProfile.jsonModeEnabled,
+        },
       })
       setTask({ handle: { taskId: started.taskId, status: "running" }, status: "running" })
       await monitorTask(started.taskId)
@@ -252,7 +303,7 @@ export function App(): React.JSX.Element {
     }
   }
 
-  const resumeTask = async (mode: "continue" | "retry_phase", _resetMetricIds: readonly string[]): Promise<void> => {
+  const resumeTask = async (mode: "continue" | "retry_phase"): Promise<void> => {
     const taskId = task?.handle?.taskId
     if (taskId === undefined || projectSettings === undefined) throw new Error("当前任务没有可恢复标识")
     const handle = await invokeBackend<{ taskId: string; status: string }>("turn.resume", {
@@ -263,6 +314,7 @@ export function App(): React.JSX.Element {
           baseUrl: activeModelProfile.baseUrl,
           model: activeModelProfile.model,
           credentialRef: activeModelProfile.credentialRef,
+          contextWindowTokens: activeModelProfile.contextWindowTokens,
           thinkingModeEnabled: activeModelProfile.thinkingModeEnabled,
           reasoningEffort: activeModelProfile.reasoningEffort,
           jsonModeEnabled: activeModelProfile.jsonModeEnabled,
@@ -274,6 +326,7 @@ export function App(): React.JSX.Element {
     })
     setTask((current) => {
       const { interruption: _interruption, ...rest } = current ?? { status: "running" }
+      void _interruption
       return { ...rest, handle, status: "running" }
     })
     void monitorTask(taskId).catch((cause: unknown) => {
@@ -281,11 +334,72 @@ export function App(): React.JSX.Element {
     })
   }
 
+  const resetTaskMetrics = async (metricIds: readonly ResettableRuntimeMetricId[]): Promise<void> => {
+    const taskId = task?.handle?.taskId
+    if (taskId === undefined) throw new Error("当前任务没有可重置标识")
+    const runtimeMetrics = await invokeBackend<NonNullable<TaskSnapshot["runtimeMetrics"]>>("turn.metrics.reset", {
+      taskId,
+      metricIds,
+    })
+    setTask((current) => current === undefined ? current : { ...current, runtimeMetrics })
+  }
+
   const pauseTask = async (): Promise<void> => {
     const taskId = task?.handle?.taskId
     if (taskId === undefined) throw new Error("当前任务没有可暂停标识")
     const handle = await invokeBackend<{ taskId: string; status: string }>("turn.pause", { taskId })
     setTask((current) => ({ ...current, handle, status: "paused" }))
+  }
+
+  const applyHistoryCheckout = async (method: "history.restore" | "history.continueFrom", entryId: string): Promise<void> => {
+    if (project === undefined) return
+    const result = await invokeBackend<HistoryCheckoutResult>(method, {
+      projectId: project.projectId,
+      workspaceRootRef: project.workspaceRootRef,
+      operationId: crypto.randomUUID(),
+      entryId,
+    })
+    setSelectedPath(undefined)
+    setContent("")
+    setSavedContent("")
+    await Promise.all([refreshWorkspace(), refreshHistory(), loadHistoryGraph(result.graphAnchorIds)])
+    const recoverable = await invokeBackend<RecoverableTaskList>("turn.recoverable.list", {
+      projectId: project.projectId,
+      workspaceRootRef: project.workspaceRootRef,
+    })
+    setTask(result.restoredTaskId === undefined
+      ? undefined
+      : recoverable.find((candidate) => candidate.handle?.taskId === result.restoredTaskId))
+    setPostCommitNotice(method === "history.continueFrom"
+      ? `已从“${result.entry.name}”创建并切换到 ${result.branch.name}。`
+      : `已加载“${result.entry.name}”，章节、世界图、Markdown 与上下文链已恢复。`)
+  }
+
+  const saveHistory = async (): Promise<void> => {
+    if (project === undefined) return
+    const now = new Date()
+    await invokeBackend("history.saveManual", {
+      projectId: project.projectId,
+      workspaceRootRef: project.workspaceRootRef,
+      operationId: crypto.randomUUID(),
+      name: `手动保存 · ${now.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}`,
+    })
+    await refreshHistory()
+  }
+
+  const returnPreviousRound = async (): Promise<void> => {
+    if (project === undefined) return
+    const result = await invokeBackend<HistoryCheckoutResult>("history.returnPreviousRound", {
+      projectId: project.projectId,
+      workspaceRootRef: project.workspaceRootRef,
+      operationId: crypto.randomUUID(),
+    })
+    setSelectedPath(undefined)
+    setContent("")
+    setSavedContent("")
+    setTask(undefined)
+    await Promise.all([refreshWorkspace(), refreshHistory(), loadHistoryGraph(result.graphAnchorIds)])
+    setPostCommitNotice(`已返回上一轮“${result.entry.name}”；再次开始推演或编辑时会自动创建新世界线。`)
   }
 
   const continueGraphLoad = async (): Promise<void> => {
@@ -309,12 +423,21 @@ export function App(): React.JSX.Element {
 
   const saveProjectSettings = async (settings: ProjectSettings): Promise<void> => {
     if (project === undefined) return
+    if (settings.history.retentionLimit !== projectSettings?.history.retentionLimit) {
+      const preview = await invokeBackend<HistoryRetentionPreview>("history.retention.preview", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        retentionLimit: settings.history.retentionLimit,
+      })
+      if (preview.deleteCount > 0 && !window.confirm(`新的历史上限会删除最旧的 ${String(preview.deleteCount)} 个保存点，且无法从历史列表恢复。是否继续？`)) return
+    }
     const saved = await invokeBackend<ProjectSettings>("project.settings.save", {
       projectId: project.projectId,
       workspaceRootRef: project.workspaceRootRef,
       settings,
     })
     setProjectSettings(saved)
+    await refreshHistory()
     setProjectSettingsOpen(false)
   }
 
@@ -383,11 +506,17 @@ export function App(): React.JSX.Element {
           task={task}
           graphSlice={graphSlice}
           graphSettings={projectSettings?.graph}
-          executionSettings={projectSettings?.execution}
           historyRetentionLimit={projectSettings?.history.retentionLimit}
+          history={history}
+          historyLoading={historyLoading}
           onOpenProjectSettings={() => { setProjectSettingsOpen(true); }}
           onResumeTask={resumeTask}
+          onResetTaskMetrics={resetTaskMetrics}
           onPauseTask={pauseTask}
+          onSaveHistory={saveHistory}
+          onRestoreHistory={(entryId) => applyHistoryCheckout("history.restore", entryId)}
+          onContinueFromHistory={(entryId) => applyHistoryCheckout("history.continueFrom", entryId)}
+          onReturnPreviousRound={returnPreviousRound}
         />
       </Panel>
     </PanelGroup>
@@ -401,7 +530,7 @@ export function App(): React.JSX.Element {
       projectName={project.displayName}
       settings={projectSettings}
       activeModelName={activeModelProfile?.name ?? "未配置模型"}
-      historyEntryCount={8}
+      historyEntryCount={history?.entries.length ?? 0}
       onClose={() => { setProjectSettingsOpen(false); }}
       onSave={saveProjectSettings}
       onOpenModelSettings={() => { setProjectSettingsOpen(false); setModelDialogOpen(true); }}

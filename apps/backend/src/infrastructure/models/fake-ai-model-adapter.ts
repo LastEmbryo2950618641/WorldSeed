@@ -1,3 +1,12 @@
+import { randomUUID } from "node:crypto"
+
+import {
+  ModelContextAppender,
+  type AIModelPort,
+  type ModelExecutionOptions,
+  type PhaseModelExecution,
+  type TurnPhaseInput,
+} from "../../application/index.js"
 import type {
   AIPhase,
   PhaseRequestEnvelope,
@@ -5,17 +14,9 @@ import type {
 } from "@worldseed/contracts"
 
 import {
-  emergencePlanningArtifactSchema,
   graphGovernanceArtifactSchema,
   type GraphGovernanceArtifact,
 } from "@worldseed/prompt-contracts"
-
-import type {
-  AIModelPort,
-  ModelExecutionOptions,
-  PhaseModelExecution,
-  TurnPhaseInput,
-} from "../../application/index.js"
 
 export class FakeAiModelAdapter implements AIModelPort {
   public readonly info = {
@@ -24,20 +25,27 @@ export class FakeAiModelAdapter implements AIModelPort {
     available: true,
     contextWindowTokens: 64_000,
   } as const
+  private readonly contextAppender = new ModelContextAppender()
+
+  public constructor(private readonly createId: () => string = randomUUID) {}
 
   public execute(request: PhaseRequestEnvelope, options?: ModelExecutionOptions): Promise<PhaseModelExecution> {
     if (options?.signal?.aborted) return Promise.reject(executionCancellationReason(options.signal))
     const startedAt = Date.now()
     const input = request.input as TurnPhaseInput
     const artifact = this.createArtifact(request.phase, input)
+    const requestedReads = (request.phase === "semantic_review" || request.phase === "graph_governance_review")
+      && (input.verificationProbeExecutions?.length ?? 0) === 0
+      ? this.createVerificationProbeReads(input)
+      : []
     const result: PhaseResultEnvelope = {
       schemaVersion: 1,
       envelopeId: request.envelopeId,
       contextId: request.contextId,
       phase: request.phase,
-      outcome: request.phase === "commit_review" ? "approve" : "continue",
+      outcome: requestedReads.length > 0 ? "request_read" : request.phase === "commit_review" ? "approve" : "continue",
       artifact,
-      requestedReads: [],
+      requestedReads,
       citedReadIds: [...request.committedReadIds],
       producedArtifactIds: [],
       decisionRecordIds: [],
@@ -47,8 +55,27 @@ export class FakeAiModelAdapter implements AIModelPort {
     }
     const inputTokens = estimateTokens(request)
     const outputTokens = estimateTokens(result)
+    const modelRequest = this.contextAppender.createDelta(request, request, options?.contextMessages ?? [])
     return Promise.resolve({
       result,
+      contextExchange: {
+        requestMessages: [{
+          role: "user",
+          kind: "phase_request",
+          taskId: request.taskId,
+          turnId: request.turnId,
+          phase: request.phase,
+          content: this.contextAppender.formatDelta(modelRequest),
+        }],
+        responseMessage: {
+          role: "assistant",
+          kind: "phase_response",
+          taskId: request.taskId,
+          turnId: request.turnId,
+          phase: request.phase,
+          content: JSON.stringify(result),
+        },
+      },
       usage: {
         inputTokens,
         outputTokens,
@@ -158,9 +185,98 @@ export class FakeAiModelAdapter implements AIModelPort {
         }
       case "graph_governance":
         return this.createGraphGovernanceArtifact(input)
+      case "graph_structure_plan": {
+        const governance = this.createGraphGovernanceArtifact(input)
+        return {
+          proposals: governance.mutations.map((mutation, index) => ({
+            proposalRef: `proposal:mutation:${String(index + 1)}`,
+            mutation,
+            reason: "The deterministic fixture proposes one minimal graph change",
+            selfReview: "The proposal introduces no fixed domain schema",
+          })),
+          affectedFrontierRefs: governance.affectedFrontierRefs,
+          archiveOutletRefs: governance.archiveOutletRefs,
+          decisionRecords: [{
+            decisionKind: "initial_graph_structure",
+            proposalRefs: governance.mutations.map((_, index) => `proposal:mutation:${String(index + 1)}`),
+            reason: "Create the minimum connected structure for the generated world",
+            payload: {},
+            selfReview: "Every proposal remains reusable by later staged phases",
+          }],
+        }
+      }
+      case "graph_capacity_rewrite":
+        return {
+          hotspotRefs: input.graphCapacity?.candidateAssessment?.violations.map((violation) => violation.nodeId) ?? ["local:occurrence"],
+          affectedProposalRefs: ["proposal:mutation:1"],
+          removeProposalRefs: [],
+          upsertProposals: [],
+          reason: "The deterministic fixture requires no semantic capacity rewrite",
+          selfReview: "No proposal is changed outside the declared local scope",
+        }
+      case "graph_spacetime_settlement": {
+        const governance = this.createGraphGovernanceArtifact(input)
+        return {
+          sceneSpacetimeBindings: governance.sceneSpacetimeBindings,
+          proposalSettlements: governance.mutationSpacetimeSettlements.map((settlement) => ({
+            effectDisposition: settlement.effectDisposition,
+            effectiveSceneBindingIndexes: settlement.effectiveSceneBindingIndexes,
+            effectiveExistingSceneAnchorRefs: settlement.effectiveExistingSceneAnchorRefs,
+            currentEntryRefs: settlement.currentEntryRefs,
+            predecessorRevisionRequired: settlement.predecessorRevisionRequired,
+            predecessorRevisionReadRefs: settlement.predecessorRevisionReadRefs,
+            historicalReturnRefs: settlement.historicalReturnRefs,
+            reason: settlement.reason,
+            selfReview: settlement.selfReview,
+            proposalRefs: settlement.mutationIndexes.map((index) => `proposal:mutation:${String(index + 1)}`),
+          })),
+        }
+      }
+      case "graph_retrieval_design": {
+        const governance = this.createGraphGovernanceArtifact(input)
+        return {
+          projections: governance.retrievalProjections.map((projection) => ({
+            ...(projection.ownerMutationIndex === undefined
+              ? {}
+              : { ownerProposalRef: `proposal:mutation:${String(projection.ownerMutationIndex + 1)}` }),
+            ...(projection.ownerRef === undefined ? {} : { ownerRef: projection.ownerRef }),
+            exactKeys: projection.exactKeys,
+            semanticText: projection.semanticText,
+          })),
+          sourceSettlements: governance.settlementRecords.map((record) => ({
+            ...record,
+            graphRefs: record.graphRefs.map((reference) => ({
+              targetKind: reference.targetKind,
+              targetRef: reference.targetRef,
+              ...(reference.mutationIndex === undefined
+                ? {}
+                : { proposalRef: `proposal:mutation:${String(reference.mutationIndex + 1)}` }),
+            })),
+          })),
+        }
+      }
+      case "graph_governance_review":
+        return {
+          recommendation: "pass",
+          issues: [],
+          graphStillDiscoverable: true,
+          graphStillConcise: true,
+          continuityPreserved: true,
+          spacetimeContinuityPreserved: true,
+          sourceReturnComplete: true,
+          verificationProbeAssessments: (input.verificationProbeExecutions ?? []).map((execution) => ({
+            probeIndex: execution.probeIndex,
+            verdict: execution.returnedReadRefs.length > 0
+              || execution.returnedGraphRefs.length > 0
+              || execution.returnedProposalRefs.length > 0
+              ? "pass" as const
+              : "uncertain" as const,
+            reason: "The application-executed staged governance probe was assessed",
+          })),
+          selfReview: "The staged deterministic graph is complete and selectively discoverable",
+        }
       case "semantic_review": {
         const governance = graphGovernanceArtifactSchema.parse(input.artifacts.graph_governance)
-        const observedReadRefs = input.readEvidence.slice(0, 1).map((evidence) => evidence.readId)
         return {
           approvedMutationIndexes: governance.mutations.map((_, index) => index),
           rejectedMutationIndexes: [],
@@ -170,48 +286,19 @@ export class FakeAiModelAdapter implements AIModelPort {
           rejectedMutationSpacetimeSettlementIndexes: [],
           approvedAffectedFrontierRefs: governance.affectedFrontierRefs,
           rejectedAffectedFrontierRefs: [],
-          verificationProbes: [
-            {
-              purpose: "scene_restore",
-              sceneBindingIndexes: [0],
-              mutationSpacetimeSettlementIndexes: [],
-              query: "Restore the current scene from its local spacetime anchors",
-              observedReadRefs,
-              observedGraphRefs: ["local:occurrence"],
-              verdict: "pass",
-              reason: "The occurrence reaches both its time and location anchors",
-            },
-            {
-              purpose: "source_return",
-              sceneBindingIndexes: [0],
-              mutationSpacetimeSettlementIndexes: [],
-              query: "Return from the scene to its chapter source units",
-              observedReadRefs,
-              observedGraphRefs: ["local:occurrence"],
-              verdict: "pass",
-              reason: "Every source unit settles through the occurrence anchor",
-            },
-            {
-              purpose: "current_state",
-              sceneBindingIndexes: [],
-              mutationSpacetimeSettlementIndexes: [0],
-              query: "Recover the current result of the initial graph changes",
-              observedReadRefs,
-              observedGraphRefs: ["local:occurrence"],
-              verdict: "pass",
-              reason: "The initial occurrence is the current entry for each change",
-            },
-            {
-              purpose: "history_return",
-              sceneBindingIndexes: [],
-              mutationSpacetimeSettlementIndexes: [0],
-              query: "Return from each graph revision to the originating occurrence",
-              observedReadRefs,
-              observedGraphRefs: ["local:occurrence"],
-              verdict: "pass",
-              reason: "The initial occurrence preserves the historical return path",
-            },
-          ],
+          verificationProbeAssessments: (input.verificationProbeExecutions ?? []).map((execution) => ({
+            probeIndex: execution.probeIndex,
+            verdict: execution.returnedReadRefs.length > 0
+              || execution.returnedGraphRefs.length > 0
+              || execution.returnedProposalRefs.length > 0
+              ? "pass" as const
+              : "uncertain" as const,
+            reason: execution.returnedReadRefs.length > 0
+              || execution.returnedGraphRefs.length > 0
+              || execution.returnedProposalRefs.length > 0
+              ? "The application-executed query returned evidence"
+              : "The application-executed query returned no existing evidence for this new world structure",
+          })),
           sceneInventoryComplete: true,
           graphStillDiscoverable: true,
           graphStillConcise: true,
@@ -250,10 +337,32 @@ export class FakeAiModelAdapter implements AIModelPort {
     }
   }
 
+  private createVerificationProbeReads(input: TurnPhaseInput): PhaseResultEnvelope["requestedReads"] {
+    const probes = [
+      { purpose: "scene_restore" as const, sceneBindingIndexes: [0], mutationSpacetimeSettlementIndexes: [] },
+      { purpose: "source_return" as const, sceneBindingIndexes: [0], mutationSpacetimeSettlementIndexes: [] },
+      { purpose: "current_state" as const, sceneBindingIndexes: [], mutationSpacetimeSettlementIndexes: [0] },
+      { purpose: "history_return" as const, sceneBindingIndexes: [], mutationSpacetimeSettlementIndexes: [0] },
+    ]
+    return probes.map((verificationProbe) => ({
+      requestId: this.createId(),
+      reason: `Execute ${verificationProbe.purpose} against the persisted local world view`,
+      expectedEvidence: `Evidence for ${verificationProbe.purpose}`,
+      query: {
+        exactKeys: [input.userInput],
+        semanticTexts: [input.userInput],
+        anchorIds: verificationProbe.purpose === "source_return" ? [] : ["local:occurrence"],
+        directions: ["both"],
+        maxCandidates: 8,
+        maxDepth: 2,
+        sourceKinds: ["graph", "revision", "source"],
+      },
+      verificationProbe,
+    }))
+  }
+
   private createGraphGovernanceArtifact(input: TurnPhaseInput): GraphGovernanceArtifact {
     if (input.sourceId === undefined) throw new Error("Graph governance requires a persisted source")
-    const planning = emergencePlanningArtifactSchema.parse(input.artifacts.emergence_planning)
-    if (planning.decisions[0] === undefined) throw new Error("Graph governance requires an emergence decision")
     const mutations: GraphGovernanceArtifact["mutations"] = [
       {
         operation: "create_node",

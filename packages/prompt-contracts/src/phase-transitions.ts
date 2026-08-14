@@ -19,15 +19,18 @@ export const phaseTransitions: Record<AIPhase, PhaseTransition> = {
   dependency_audit: { next: ["graph_governance", "response_review"], returnsTo: ["source_retrieval", "emergence_planning", "draft"] },
   response_review: { next: [], returnsTo: ["source_retrieval", "draft"] },
   graph_governance: { next: ["semantic_review"], returnsTo: ["source_retrieval"] },
+  graph_structure_plan: { next: ["graph_capacity_rewrite", "graph_spacetime_settlement"], returnsTo: ["source_retrieval"] },
+  graph_capacity_rewrite: { next: ["graph_capacity_rewrite", "graph_spacetime_settlement"], returnsTo: ["graph_structure_plan"] },
+  graph_spacetime_settlement: { next: ["graph_retrieval_design"], returnsTo: ["graph_structure_plan", "graph_capacity_rewrite"] },
+  graph_retrieval_design: { next: ["graph_governance_review"], returnsTo: ["graph_structure_plan", "graph_spacetime_settlement"] },
+  graph_governance_review: {
+    next: ["semantic_review"],
+    returnsTo: ["graph_structure_plan", "graph_capacity_rewrite", "graph_spacetime_settlement", "graph_retrieval_design"],
+  },
   semantic_review: { next: ["settlement_review", "frontier_settlement"], returnsTo: ["source_retrieval", "graph_governance"] },
   settlement_review: { next: ["frontier_settlement"], returnsTo: ["graph_governance"] },
   frontier_settlement: { next: ["commit_review"], returnsTo: ["graph_governance"] },
   commit_review: { next: [], returnsTo: ["source_retrieval", "graph_governance", "settlement_review", "frontier_settlement"] },
-  context_compaction: { next: ["context_compaction_review"], returnsTo: [] },
-  context_compaction_review: {
-    next: ["source_retrieval", "emergence_planning", "draft", "dependency_audit", "graph_governance"],
-    returnsTo: ["context_compaction"],
-  },
 }
 
 export function isAllowedPhaseTransition(from: AIPhase, to: AIPhase): boolean {

@@ -10,6 +10,11 @@ import {
   evidenceSchema,
   workspaceCatalogSnapshotSchema,
   graphNeighborhoodPayloadSchema,
+  backendPayloadSchemas,
+  backendMethodSchema,
+  historyManifestSchema,
+  runtimeMetricSchema,
+  turnStartPayloadSchema,
 } from "../src/index.js"
 
 const ids = {
@@ -20,6 +25,18 @@ const ids = {
 }
 
 describe("shared contracts", () => {
+  it("allows a turn acceptance run to disable workspace chapter reads", () => {
+    const payload = turnStartPayloadSchema.parse({
+      projectId: ids.context,
+      workspaceRootRef: "C:\\Worldseed\\Acceptance",
+      userInput: "Continue from persisted world state",
+      chapterSequence: 21,
+      allowWorkspaceChapterReads: false,
+    })
+
+    expect(payload.allowWorkspaceChapterReads).toBe(false)
+  })
+
   it("uses model aliases instead of UUIDs in the model-facing result contract", () => {
     const valid = modelPhaseResultSchema.safeParse({
       outcome: "request_read",
@@ -57,6 +74,43 @@ describe("shared contracts", () => {
     expect(valid.success).toBe(true)
     expect(invalid.success).toBe(false)
     expect(invalidFallbackAlias.success).toBe(false)
+  })
+
+  it("accepts project-level permanent IDs without weakening technical UUID contracts", () => {
+    expect(modelPhaseResultSchema.safeParse({
+      outcome: "request_read",
+      requestedReads: [{
+        reason: "Follow the persisted graph identity",
+        expectedEvidence: "The current node neighborhood",
+        query: { anchorIds: ["node_12"] },
+      }],
+      citedReadIds: ["evidence_9"],
+      unresolvedDependencies: [],
+      reason: "Permanent IDs are stable across requests",
+      selfReview: "The supplied IDs were reused unchanged",
+    }).success).toBe(true)
+
+    expect(graphMutationSchema.safeParse({
+      operation: "create_link",
+      link: {
+        id: "link_4",
+        fromNodeId: "node_12",
+        toNodeId: "node_13",
+        sourceRefs: [{ sourceId: "source_3" }],
+      },
+    }).success).toBe(true)
+    expect(evidenceSchema.safeParse({
+      evidenceId: "evidence_9",
+      projectId: ids.context,
+      sourceKind: "graph",
+      ownerId: "node_12",
+      version: "revision_7",
+      digest: "digest",
+      locator: "projection",
+      contentRef: "content",
+      readReason: "test",
+      createdAtMs: 1,
+    }).success).toBe(true)
   })
 
   it("requires reads when a phase requests more evidence", () => {
@@ -192,8 +246,8 @@ describe("shared contracts", () => {
       version: 2,
       execution: {
         maxModelCalls: 128,
-        contextWindowTokens: 1_000_000,
-        contextCompactionThresholdRatio: 0.95,
+        contextCompactionThresholdRatio: 0.97,
+        contextCompressionTargetRatio: 0.5,
         outputTokenLimitMode: "model",
         maxWallTimeMs: 3_600_000,
         maxRetrievalRounds: 4,
@@ -224,8 +278,8 @@ describe("shared contracts", () => {
       version: 2,
       execution: {
         maxModelCalls: 400,
-        contextWindowTokens: 1_000_000,
-        contextCompactionThresholdRatio: 0.95,
+        contextCompactionThresholdRatio: 0.97,
+        contextCompressionTargetRatio: 0.5,
         outputTokenLimitMode: "model",
         maxWallTimeMs: 7_200_000,
         maxRetrievalRounds: 10,
@@ -280,5 +334,79 @@ describe("shared contracts", () => {
     }
 
     expect(projectSettingsSchema.safeParse(obsoleteSettings).success).toBe(false)
+  })
+
+  it("requires idempotency IDs for history mutations", () => {
+    const base = { projectId: ids.context, workspaceRootRef: "C:\\Worldseed\\Test" }
+    expect(backendPayloadSchemas["history.saveManual"].safeParse({ ...base, name: "保存点" }).success).toBe(false)
+    expect(backendPayloadSchemas["history.restore"].safeParse({ ...base, entryId: ids.envelope }).success).toBe(false)
+    expect(backendPayloadSchemas["history.saveManual"].safeParse({
+      ...base,
+      operationId: ids.outlet,
+      name: "保存点",
+    }).success).toBe(true)
+  })
+
+  it("accepts explicit runtime metric resets as a separate backend command", () => {
+    expect(backendMethodSchema.safeParse("turn.metrics.reset").success).toBe(true)
+    expect(backendPayloadSchemas["turn.metrics.reset"].safeParse({
+      taskId: ids.context,
+      metricIds: ["model_calls", "wall_time"],
+    }).success).toBe(true)
+  })
+
+  it("keeps automatic context compression outside user-resettable runtime metrics", () => {
+    const metric = {
+      metricId: "context_tokens",
+      label: "活动上下文",
+      scope: "context_window",
+      unit: "tokens",
+      current: 970_000,
+      limit: 970_000,
+      cumulative: 970_000,
+      state: "exhausted",
+      blocking: false,
+      resettable: false,
+      resetGeneration: 0,
+      lastResetAt: null,
+      description: "发送前自动机械压缩",
+    }
+    expect(runtimeMetricSchema.safeParse({ ...metric, resetMode: "provider_fixed" }).success).toBe(true)
+    expect(runtimeMetricSchema.safeParse({ ...metric, resetMode: "compact_context" }).success).toBe(false)
+  })
+
+  it("captures the active model context in a history manifest", () => {
+    expect(historyManifestSchema.safeParse({
+      schemaVersion: 1,
+      projectId: ids.context,
+      entryId: ids.envelope,
+      branchId: ids.node,
+      createdAtMs: 10,
+      committedSequence: 1,
+      activeGeneration: 0,
+      activeScopeIds: [ids.outlet],
+      nodeHeads: [],
+      linkHeads: [],
+      documentHeads: [],
+      canonicalChapters: [],
+      modelContext: {
+        chainId: ids.envelope,
+        messages: [{
+          messageId: ids.node,
+          chainId: ids.envelope,
+          projectId: ids.context,
+          sequence: 0,
+          role: "system",
+          kind: "system_rules",
+          content: "rules",
+          contentDigest: "digest",
+          tokenEstimate: 1,
+          createdAtMs: 1,
+        }],
+      },
+      workspace: [],
+      baseRulesDigest: "base-digest",
+      digest: "manifest-digest",
+    }).success).toBe(true)
   })
 })

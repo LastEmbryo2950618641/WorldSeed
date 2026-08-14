@@ -12,16 +12,24 @@ import {
 } from "@worldseed/contracts"
 import {
   assertFrontierSettlementCoversReview,
+  assertGraphSpacetimeSettlementCoverage,
   assertPhaseReferenceContract,
   assertSemanticReviewCoversGovernance,
   assertSpacetimeGovernanceCoverage,
   graphGovernanceArtifactSchema,
+  graphStructurePlanArtifactSchema,
   semanticReviewArtifactSchema,
   phaseArtifactJsonSchema,
   parsePhaseArtifact,
 } from "@worldseed/prompt-contracts"
 
-import type { TurnPhaseInput } from "../../../application/index.js"
+import {
+  completeGraphSettlementRecords,
+  VerificationProbeCoordinator,
+  type TurnPhaseInput,
+} from "../../../application/index.js"
+
+const verificationProbeCoordinator = new VerificationProbeCoordinator()
 
 export function phaseModelResultJsonSchema(phase: AIPhase): unknown {
   const resultSchema = asRecord(modelPhaseResultJsonSchema())
@@ -67,9 +75,6 @@ export function assembleModelPhaseResult(
           semantic.selfReview,
         ),
       )
-  assertCrossPhaseArtifactContract(request, artifact)
-  assertArtifactReferences(request, artifact)
-
   const requestedReads = semantic.requestedReads.map((read) => {
     const query = read.query
     const exactKeys = query?.exactKeys ?? []
@@ -88,9 +93,14 @@ export function assembleModelPhaseResult(
         maxCandidates: query?.maxCandidates ?? 24,
         maxDepth: query?.maxDepth ?? 2,
         sourceKinds: normalizeRequestedSourceKinds(exactKeys, query?.sourceKinds),
+        ...(query?.sourceIds === undefined ? {} : { sourceIds: query.sourceIds }),
+        ...(query?.sourceBoundary === undefined ? {} : { sourceBoundary: query.sourceBoundary }),
       },
+      ...(read.verificationProbe === undefined ? {} : { verificationProbe: read.verificationProbe }),
     }
   })
+  assertCrossPhaseArtifactContract(request, artifact, requestedReads.length === 0)
+  assertArtifactReferences(request, artifact)
 
   return phaseResultEnvelopeSchema.parse({
     schemaVersion: request.schemaVersion,
@@ -223,65 +233,40 @@ function completeAdvisoryDefaults(
           selfReview,
         },
       ]
-  const settlementRecords = completeSettlementRecords(
+  const completedGovernance = completeGraphSettlementRecords(
     governance,
     input.sourceUnitIds.length,
     reason,
   )
-  if (decisionRecords === governance.decisionRecords && settlementRecords === governance.settlementRecords) return governance
+  if (decisionRecords === governance.decisionRecords && completedGovernance === governance) return governance
   return {
-    ...governance,
+    ...completedGovernance,
     decisionRecords,
-    settlementRecords,
   }
-}
-
-function completeSettlementRecords(
-  governance: ReturnType<typeof graphGovernanceArtifactSchema.parse>,
-  sourceUnitCount: number,
-  reason: string,
-): ReturnType<typeof graphGovernanceArtifactSchema.parse>["settlementRecords"] {
-  if (sourceUnitCount === 0) return governance.settlementRecords
-  const existing = new Map(governance.settlementRecords.map((record) => [record.sourceUnitIndex, record]))
-  if (existing.size === sourceUnitCount && Array.from({ length: sourceUnitCount }, (_, index) => existing.has(index)).every(Boolean)) {
-    return governance.settlementRecords
-  }
-  const mutationRefs = governance.mutations.map((mutation, mutationIndex) => ({
-    mutationIndex,
-    targetKind: mutation.operation.endsWith("_link") ? "link" as const : "node" as const,
-    targetRef: mutation.operation === "create_node" || mutation.operation === "create_link"
-      ? mutation.ref
-      : mutation.operation === "edit_node" || mutation.operation === "retire_node"
-        ? mutation.nodeRef
-        : mutation.linkRef,
-  }))
-  const derived = Array.from({ length: sourceUnitCount }, (_, sourceUnitIndex) => {
-    const sceneIndexes = new Set(governance.sceneSpacetimeBindings
-      .filter((binding) => binding.sourceUnitIndexes.includes(sourceUnitIndex))
-      .map((binding) => binding.sceneIndex))
-    const mutationIndexes = new Set(governance.mutationSpacetimeSettlements
-      .filter((settlement) => settlement.effectiveSceneBindingIndexes.some((index) => sceneIndexes.has(index)))
-      .flatMap((settlement) => settlement.mutationIndexes))
-    const graphRefs = mutationRefs
-      .filter((mutation) => mutationIndexes.has(mutation.mutationIndex))
-      .map((mutation) => ({
-        targetKind: mutation.targetKind,
-        targetRef: mutation.targetRef,
-        mutationIndex: mutation.mutationIndex,
-      }))
-    return {
-      sourceUnitIndex,
-      graphRefs,
-      reason: `${reason}（由场景绑定与修改时空结算生成原文返回投影）`,
-      status: "derived",
-    }
-  })
-  return Array.from({ length: sourceUnitCount }, (_, index) => existing.get(index) ?? derived[index]!)
 }
 
 function normalizeArtifactReferences(request: PhaseRequestEnvelope, artifact: unknown): unknown {
   if (request.phase === "semantic_review") {
     return completeApprovedAffectedFrontiers(request, artifact)
+  }
+  if (request.phase === "graph_structure_plan") {
+    const structure = graphStructurePlanArtifactSchema.parse(artifact)
+    const input = request.input as TurnPhaseInput
+    const evidenceOwnerByReadId = new Map(input.readEvidence.flatMap((evidence) => (
+      evidence.ownerKind === "node" || evidence.ownerKind === "link"
+        ? [[evidence.readId, evidence.ownerId] as const]
+        : []
+    )))
+    const graphRef = (reference: string): string => evidenceOwnerByReadId.get(reference) ?? reference
+    return {
+      ...structure,
+      proposals: structure.proposals.map((proposal) => ({
+        ...proposal,
+        mutation: normalizeGraphMutationReferences(proposal.mutation, graphRef),
+      })),
+      affectedFrontierRefs: structure.affectedFrontierRefs.map(graphRef),
+      archiveOutletRefs: structure.archiveOutletRefs.map(graphRef),
+    }
   }
   if (request.phase !== "graph_governance") return artifact
   const governance = graphGovernanceArtifactSchema.parse(artifact)
@@ -304,35 +289,7 @@ function normalizeArtifactReferences(request: PhaseRequestEnvelope, artifact: un
   const allSourceUnitIndexes = Array.from({ length: input.sourceUnitIds.length }, (_, index) => index)
   return {
     ...governance,
-    mutations: governance.mutations.map((mutation) => {
-      switch (mutation.operation) {
-        case "create_node":
-          return mutation
-        case "edit_node":
-          return { ...mutation, nodeRef: graphRef(mutation.nodeRef) }
-        case "retire_node":
-          return {
-            ...mutation,
-            nodeRef: graphRef(mutation.nodeRef),
-            archiveOutletRefs: mutation.archiveOutletRefs.map(graphRef),
-          }
-        case "create_link":
-          return { ...mutation, fromRef: graphRef(mutation.fromRef), toRef: graphRef(mutation.toRef) }
-        case "edit_link":
-          return {
-            ...mutation,
-            linkRef: graphRef(mutation.linkRef),
-            fromRef: graphRef(mutation.fromRef),
-            toRef: graphRef(mutation.toRef),
-          }
-        case "retire_link":
-          return {
-            ...mutation,
-            linkRef: graphRef(mutation.linkRef),
-            archiveOutletRefs: mutation.archiveOutletRefs.map(graphRef),
-          }
-      }
-    }),
+    mutations: governance.mutations.map((mutation) => normalizeGraphMutationReferences(mutation, graphRef)),
     retrievalProjections: governance.retrievalProjections.map((projection) => ({
       ...projection,
       ...(projection.ownerRef === undefined ? {} : { ownerRef: graphRef(projection.ownerRef) }),
@@ -376,6 +333,20 @@ function normalizeArtifactReferences(request: PhaseRequestEnvelope, artifact: un
   }
 }
 
+function normalizeGraphMutationReferences(
+  mutation: ReturnType<typeof graphGovernanceArtifactSchema.parse>["mutations"][number],
+  graphRef: (reference: string) => string,
+): ReturnType<typeof graphGovernanceArtifactSchema.parse>["mutations"][number] {
+  switch (mutation.operation) {
+    case "create_node": return mutation
+    case "edit_node": return { ...mutation, nodeRef: graphRef(mutation.nodeRef) }
+    case "retire_node": return { ...mutation, nodeRef: graphRef(mutation.nodeRef), archiveOutletRefs: mutation.archiveOutletRefs.map(graphRef) }
+    case "create_link": return { ...mutation, fromRef: graphRef(mutation.fromRef), toRef: graphRef(mutation.toRef) }
+    case "edit_link": return { ...mutation, linkRef: graphRef(mutation.linkRef), fromRef: graphRef(mutation.fromRef), toRef: graphRef(mutation.toRef) }
+    case "retire_link": return { ...mutation, linkRef: graphRef(mutation.linkRef), archiveOutletRefs: mutation.archiveOutletRefs.map(graphRef) }
+  }
+}
+
 function completeApprovedAffectedFrontiers(request: PhaseRequestEnvelope, artifact: unknown): unknown {
   const review = semanticReviewArtifactSchema.parse(artifact)
   const input = request.input as TurnPhaseInput
@@ -411,16 +382,38 @@ function isCompleteApproval(approved: readonly number[], rejected: readonly numb
     && Array.from({ length: expectedLength }, (_, index) => index).every((index) => approved.includes(index))
 }
 
-function assertCrossPhaseArtifactContract(request: PhaseRequestEnvelope, artifact: unknown): void {
+function assertCrossPhaseArtifactContract(
+  request: PhaseRequestEnvelope,
+  artifact: unknown,
+  finalArtifact: boolean,
+): void {
   const input = request.input as TurnPhaseInput
+  if (request.phase === "graph_spacetime_settlement"
+    && finalArtifact
+    && input.artifacts.dependency_audit !== undefined
+    && input.artifacts.graph_structure_plan !== undefined) {
+    assertGraphSpacetimeSettlementCoverage(
+      input.artifacts.dependency_audit,
+      input.artifacts.graph_structure_plan,
+      artifact,
+      input.sourceUnitIds.length,
+    )
+  }
   if (request.phase === "graph_governance" && input.artifacts.dependency_audit !== undefined) {
     assertSpacetimeGovernanceCoverage(input.artifacts.dependency_audit, artifact, input.sourceUnitIds.length)
   }
   if (request.phase === "semantic_review") {
     assertSemanticReviewCoversGovernance(input.artifacts.graph_governance, artifact)
   }
+  if ((request.phase === "semantic_review" || request.phase === "graph_governance_review") && finalArtifact) {
+    verificationProbeCoordinator.assertAssessments(artifact, input.verificationProbeExecutions ?? [])
+  }
   if (request.phase === "frontier_settlement") {
-    assertFrontierSettlementCoversReview(input.artifacts.semantic_review, artifact)
+    assertFrontierSettlementCoversReview(
+      input.artifacts.semantic_review,
+      artifact,
+      input.artifacts.graph_governance,
+    )
   }
 }
 
@@ -430,6 +423,9 @@ function assertArtifactReferences(request: PhaseRequestEnvelope, artifact: unkno
   const governance = input.artifacts.graph_governance === undefined
     ? undefined
     : graphGovernanceArtifactSchema.parse(input.artifacts.graph_governance)
+  const structure = input.artifacts.graph_structure_plan === undefined
+    ? undefined
+    : graphStructurePlanArtifactSchema.parse(input.artifacts.graph_structure_plan)
   assertPhaseReferenceContract(request.phase, artifact, {
     readableEvidenceIds: new Set(input.readEvidence.map((evidence) => evidence.readId)),
     readableGraphIds: new Set(input.readEvidence
@@ -438,7 +434,7 @@ function assertArtifactReferences(request: PhaseRequestEnvelope, artifact: unkno
     readableWorkspacePaths: new Set(input.readEvidence
       .filter((evidence) => evidence.ownerKind.startsWith("workspace:"))
       .map((evidence) => evidence.ownerId)),
-    declaredLocalGraphRefs: new Set(governance?.mutations.flatMap((mutation) => (
+    declaredLocalGraphRefs: new Set((governance?.mutations ?? structure?.proposals.map((proposal) => proposal.mutation) ?? []).flatMap((mutation) => (
       mutation.operation === "create_node" || mutation.operation === "create_link" ? [mutation.ref] : []
     )) ?? []),
   })

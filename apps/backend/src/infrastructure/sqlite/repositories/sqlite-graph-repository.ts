@@ -13,8 +13,10 @@ import {
   type GraphRepository,
   type GraphRevision,
   type GraphSlice,
+  type GraphDegreeProfile,
   type NeighborhoodRead,
   type PersistedGraphRevision,
+  type CurrentGraphOwnerRevision,
 } from "../../../index.js"
 import type {
   GraphRevisionRow,
@@ -138,21 +140,132 @@ export class SqliteGraphRepository implements GraphRepository {
     }
   }
 
+  public async getCurrentOwnerRevisions(
+    scope: GraphReadScope,
+    ownerIds: readonly string[],
+  ): Promise<readonly CurrentGraphOwnerRevision[]> {
+    const normalizedOwnerIds = [...new Set(ownerIds)]
+    if (normalizedOwnerIds.length === 0) return []
+    const committedNodes = await this.database.selectFrom("node_heads").selectAll()
+      .where("project_id", "=", scope.projectId)
+      .where("scope_key", "=", "committed")
+      .where("node_id", "in", normalizedOwnerIds)
+      .execute()
+    const committedLinks = await this.database.selectFrom("link_heads").selectAll()
+      .where("project_id", "=", scope.projectId)
+      .where("scope_key", "=", "committed")
+      .where("link_id", "in", normalizedOwnerIds)
+      .execute()
+    const revisions = new Map<string, CurrentGraphOwnerRevision>()
+    for (const head of committedNodes) {
+      revisions.set(`node:${head.node_id}`, {
+        ownerKind: "node",
+        ownerId: head.node_id,
+        revisionId: head.revision_id,
+        status: head.visibility === "retired" ? "retired" : "active",
+      })
+    }
+    for (const head of committedLinks) {
+      revisions.set(`link:${head.link_id}`, {
+        ownerKind: "link",
+        ownerId: head.link_id,
+        revisionId: head.revision_id,
+        status: head.visibility === "retired" ? "retired" : "active",
+      })
+    }
+    if (scope.pendingScopeId !== undefined && await pendingScopeIsVisible(this.database, scope.pendingScopeId)) {
+      const pendingNodes = await this.database.selectFrom("node_heads").selectAll()
+        .where("project_id", "=", scope.projectId)
+        .where("scope_key", "=", scope.pendingScopeId)
+        .where("node_id", "in", normalizedOwnerIds)
+        .execute()
+      const pendingLinks = await this.database.selectFrom("link_heads").selectAll()
+        .where("project_id", "=", scope.projectId)
+        .where("scope_key", "=", scope.pendingScopeId)
+        .where("link_id", "in", normalizedOwnerIds)
+        .execute()
+      for (const head of pendingNodes) {
+        const key = `node:${head.node_id}`
+        if (head.visibility === "retired") revisions.delete(key)
+        else revisions.set(key, { ownerKind: "node", ownerId: head.node_id, revisionId: head.revision_id, status: "active" })
+      }
+      for (const head of pendingLinks) {
+        const key = `link:${head.link_id}`
+        if (head.visibility === "retired") revisions.delete(key)
+        else revisions.set(key, { ownerKind: "link", ownerId: head.link_id, revisionId: head.revision_id, status: "active" })
+      }
+    }
+    return [...revisions.values()]
+  }
+
+  public async getDegreeProfile(scope: GraphReadScope): Promise<GraphDegreeProfile> {
+    const nodes = await listVisibleNodes(this.database, scope)
+    const links = await listVisibleLinks(this.database, scope)
+    const degrees = new Map(nodes.map((node) => [node.id, { inDegree: 0, outDegree: 0 }]))
+    for (const link of links) {
+      const from = degrees.get(link.fromNodeId) ?? { inDegree: 0, outDegree: 0 }
+      from.outDegree += 1
+      degrees.set(link.fromNodeId, from)
+      const to = degrees.get(link.toNodeId) ?? { inDegree: 0, outDegree: 0 }
+      to.inDegree += 1
+      degrees.set(link.toNodeId, to)
+    }
+    return {
+      nodeCount: nodes.length,
+      linkCount: links.length,
+      entries: [...degrees.entries()]
+        .map(([nodeId, degree]) => ({ nodeId, ...degree }))
+        .sort((left, right) => Math.max(right.inDegree, right.outDegree) - Math.max(left.inDegree, left.outDegree)
+          || left.nodeId.localeCompare(right.nodeId)),
+    }
+  }
+
   public async listRevisions(
     projectId: ProjectId,
     targetKind: "node" | "link",
     targetId: string,
   ): Promise<readonly PersistedGraphRevision[]> {
     const rows = await this.database.selectFrom("graph_revisions")
-      .selectAll()
-      .where("project_id", "=", projectId)
-      .where("target_kind", "=", targetKind)
-      .where("target_id", "=", targetId)
-      .orderBy("created_at")
-      .orderBy("id")
+      .innerJoin("active_scope_refs", (join) => join
+        .onRef("active_scope_refs.scope_id", "=", "graph_revisions.scope_id")
+        .onRef("active_scope_refs.project_id", "=", "graph_revisions.project_id"))
+      .selectAll("graph_revisions")
+      .where("graph_revisions.project_id", "=", projectId)
+      .where("graph_revisions.target_kind", "=", targetKind)
+      .where("graph_revisions.target_id", "=", targetId)
+      .orderBy("graph_revisions.created_at")
+      .orderBy("graph_revisions.id")
       .execute()
     return rows.map(mapRevision)
   }
+}
+
+async function listVisibleNodes(database: Kysely<ProjectDatabase>, scope: GraphReadScope): Promise<readonly GraphNode[]> {
+  const committedHeads = await database.selectFrom("node_heads").selectAll()
+    .where("project_id", "=", scope.projectId)
+    .where("scope_key", "=", "committed")
+    .execute()
+  const heads = new Map(committedHeads.map((head) => [head.node_id, head]))
+
+  if (scope.pendingScopeId !== undefined && await pendingScopeIsVisible(database, scope.pendingScopeId)) {
+    const pendingHeads = await database.selectFrom("node_heads").selectAll()
+      .where("project_id", "=", scope.projectId)
+      .where("scope_key", "=", scope.pendingScopeId)
+      .execute()
+    for (const head of pendingHeads) heads.set(head.node_id, head)
+  }
+
+  const activeHeads = [...heads.values()].filter((head) => head.visibility !== "retired")
+  if (activeHeads.length === 0) return []
+  const rows = await database.selectFrom("nodes").selectAll()
+    .where("project_id", "=", scope.projectId)
+    .where("revision_id", "in", activeHeads.map((head) => head.revision_id))
+    .execute()
+  const rowsByRevision = new Map(rows.map((row) => [row.revision_id, row]))
+  return activeHeads.flatMap((head) => {
+    const row = rowsByRevision.get(head.revision_id)
+    return row === undefined ? [] : [mapNode(row)]
+  })
 }
 
 async function assertPendingScope(database: ProjectTransaction, projectId: ProjectId, scopeId: ScopeId): Promise<void> {

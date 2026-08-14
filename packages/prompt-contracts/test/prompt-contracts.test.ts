@@ -10,6 +10,8 @@ import {
   assertGraphGovernanceReferenceContract,
   assertPhaseReferenceContract,
   assertSpacetimeGovernanceCoverage,
+  graphStructurePlanArtifactSchema,
+  graphSpacetimeSettlementArtifactSchema,
   isAllowedPhaseTransition,
   parsePhaseResult,
   phaseArtifactJsonSchema,
@@ -20,11 +22,39 @@ const envelopeId = "00000000-0000-4000-8000-000000000001"
 const contextId = "00000000-0000-4000-8000-000000000002"
 
 describe("prompt contracts", () => {
+  it("rejects graph structure plans whose AI decisions do not cover every proposal", () => {
+    expect(() => graphStructurePlanArtifactSchema.parse({
+      proposals: [
+        {
+          proposalRef: "proposal:first",
+          mutation: { operation: "create_node", ref: "local:first", data: { content: "first" } },
+          reason: "Create the first node",
+          selfReview: "The first node is needed",
+        },
+        {
+          proposalRef: "proposal:second",
+          mutation: { operation: "create_node", ref: "local:second", data: { content: "second" } },
+          reason: "Create the second node",
+          selfReview: "The second node is needed",
+        },
+      ],
+      affectedFrontierRefs: [],
+      archiveOutletRefs: [],
+      decisionRecords: [{
+        decisionKind: "create",
+        proposalRefs: ["proposal:first"],
+        reason: "Only the first proposal has an AI decision",
+        payload: {},
+        selfReview: "The second proposal is intentionally left uncovered for this regression test",
+      }],
+    })).toThrow(/decision records must cover every proposal/u)
+  })
+
   it("ships one immutable resource for every phase", () => {
     const packageRoot = resolve(process.cwd(), "packages/prompt-contracts")
     const resources = [BASE_RULES_RESOURCE, ...aiPhaseValues.map((phase) => promptDefinitions[phase].resourcePath)]
 
-    expect(new Set(resources).size).toBe(17)
+    expect(new Set(resources).size).toBe(aiPhaseValues.length + 1)
     for (const resource of resources) {
       const path = resolve(packageRoot, resource)
       expect(existsSync(path), resource).toBe(true)
@@ -38,6 +68,11 @@ describe("prompt contracts", () => {
     const baseRules = readResource(BASE_RULES_RESOURCE)
     const sourceRetrieval = readResource(promptDefinitions.source_retrieval.resourcePath)
     const graphGovernance = readResource(promptDefinitions.graph_governance.resourcePath)
+    const graphStructurePlan = readResource(promptDefinitions.graph_structure_plan.resourcePath)
+    const graphSpacetimeSettlement = readResource(promptDefinitions.graph_spacetime_settlement.resourcePath)
+    const graphRetrievalDesign = readResource(promptDefinitions.graph_retrieval_design.resourcePath)
+    const graphGovernanceReview = readResource(promptDefinitions.graph_governance_review.resourcePath)
+    const frontierSettlement = readResource(promptDefinitions.frontier_settlement.resourcePath)
     const semanticReview = readResource(promptDefinitions.semantic_review.resourcePath)
     const settlementReview = readResource(promptDefinitions.settlement_review.resourcePath)
     const commitReview = readResource(promptDefinitions.commit_review.resourcePath)
@@ -60,6 +95,12 @@ describe("prompt contracts", () => {
     expect(graphGovernance).toContain("自主定义和重构局部图的组织与查询语义")
     expect(graphGovernance).toContain("retrievalProjections[].exactKeys")
     expect(graphGovernance).toContain("不是 `mutations` 数组、节点或连接的逐项清单")
+    expect(graphStructurePlan).toContain("自包含的最新当前投影")
+    expect(graphSpacetimeSettlement).toContain("仅仅可读、相关或出现在场景中不构成锚点用途")
+    expect(graphRetrievalDesign).toContain("每个 Source 单元必须具有非空图返回路径")
+    expect(graphGovernanceReview).toContain("自包含的最新当前投影")
+    expect(graphGovernanceReview).toContain("仅因节点可读、相关或在场景中出现而充当锚点")
+    expect(frontierSettlement).toContain("不能因为某个节点可读")
     expect(semanticReview).toContain("不是修改项、节点或连接的逐项清单")
     expect(draft).toContain("不得输出“等待读取资料")
     expect(semanticReview).toContain("有限预算内")
@@ -100,8 +141,8 @@ describe("prompt contracts", () => {
     expect(isAllowedPhaseTransition("draft", "chapter_naming")).toBe(true)
     expect(isAllowedPhaseTransition("dependency_audit", "source_retrieval")).toBe(true)
     expect(isAllowedPhaseTransition("interpret", "commit_review")).toBe(false)
-    expect(isAllowedPhaseTransition("context_compaction", "context_compaction_review")).toBe(true)
-    expect(isAllowedPhaseTransition("context_compaction_review", "source_retrieval")).toBe(true)
+    expect(aiPhaseValues).not.toContain("context_compaction")
+    expect(aiPhaseValues).not.toContain("context_compaction_review")
   })
 
   it("uses one semantic artifact contract without backend-owned UUID fields", () => {
@@ -165,6 +206,54 @@ describe("prompt contracts", () => {
       .toThrow("readable graph owners or declared local handles")
   })
 
+  it("rejects undeclared local handles in graph retrieval design", () => {
+    expect(() => assertPhaseReferenceContract(
+      "graph_retrieval_design",
+      {
+        projections: [],
+        sourceSettlements: [{
+          sourceUnitIndex: 0,
+          graphRefs: [{ targetKind: "node", targetRef: "local:stale_handle" }],
+          reason: "Return through the referenced graph owner",
+          status: "bound",
+        }],
+      },
+      {
+        readableGraphIds: new Set(["node_1"]),
+        readableEvidenceIds: new Set(),
+        readableWorkspacePaths: new Set(),
+        declaredLocalGraphRefs: new Set(["local:current_handle"]),
+      },
+    )).toThrow("readable graph owners or declared local handles")
+  })
+
+  it("accepts readable owners and current local handles in graph retrieval design", () => {
+    expect(() => assertPhaseReferenceContract(
+      "graph_retrieval_design",
+      {
+        projections: [
+          { ownerRef: "node_1", exactKeys: ["existing"], semanticText: "Existing owner" },
+          { ownerRef: "local:current_handle", exactKeys: ["current"], semanticText: "Current owner" },
+        ],
+        sourceSettlements: [{
+          sourceUnitIndex: 0,
+          graphRefs: [
+            { targetKind: "node", targetRef: "node_1" },
+            { targetKind: "node", targetRef: "local:current_handle", proposalRef: "proposal:current" },
+          ],
+          reason: "Return through both graph owners",
+          status: "bound",
+        }],
+      },
+      {
+        readableGraphIds: new Set(["node_1"]),
+        readableEvidenceIds: new Set(),
+        readableWorkspacePaths: new Set(),
+        declaredLocalGraphRefs: new Set(["local:current_handle"]),
+      },
+    )).not.toThrow()
+  })
+
   it("does not impose a code-owned graph creation count", () => {
     const governance = {
       mutations: [
@@ -193,7 +282,7 @@ describe("prompt contracts", () => {
       rejectedMutationSpacetimeSettlementIndexes: [],
       approvedAffectedFrontierRefs: ["local:frontier"],
       rejectedAffectedFrontierRefs: [],
-      verificationProbes: [],
+      verificationProbeAssessments: [],
       sceneInventoryComplete: true,
       graphStillDiscoverable: true,
       graphStillConcise: true,
@@ -215,6 +304,64 @@ describe("prompt contracts", () => {
 
     expect(() => assertFrontierSettlementCoversReview(review, settlement))
       .toThrow("must contain every approved reference exactly once")
+  })
+
+  it("rejects a frontier time anchor that was not established by spacetime governance", () => {
+    const review = {
+      approvedMutationIndexes: [],
+      rejectedMutationIndexes: [],
+      approvedSpacetimeBindingIndexes: [0],
+      rejectedSpacetimeBindingIndexes: [],
+      approvedMutationSpacetimeSettlementIndexes: [],
+      rejectedMutationSpacetimeSettlementIndexes: [],
+      approvedAffectedFrontierRefs: ["local:frontier"],
+      rejectedAffectedFrontierRefs: [],
+      verificationProbeAssessments: [],
+      sceneInventoryComplete: true,
+      graphStillDiscoverable: true,
+      graphStillConcise: true,
+      continuityPreserved: true,
+      spacetimeContinuityPreserved: true,
+    }
+    const governance = {
+      mutations: [],
+      retrievalProjections: [],
+      settlementRecords: [],
+      mutationSpacetimeSettlements: [],
+      sceneSpacetimeBindings: [{
+        sceneIndex: 0,
+        sceneAnchorRef: "local:scene",
+        sourceUnitIndexes: [],
+        temporalReferenceRefs: ["local:time"],
+        timeAnchorRefs: ["local:time"],
+        spatialReferenceRefs: ["local:place"],
+        locationAnchorRefs: ["local:place"],
+        predecessorSceneIndexes: [],
+        predecessorSceneAnchorRefs: [],
+        transitionPathRefs: [],
+        correspondenceRefs: [],
+        explanation: "Established scene anchors",
+        selfReview: "Each anchor has one governed role",
+      }],
+      affectedFrontierRefs: ["local:frontier"],
+      archiveOutletRefs: [],
+      decisionRecords: [],
+    }
+    const settlement = {
+      frontiers: [{
+        frontierAnchorRef: "local:frontier",
+        disposition: "active",
+        lastSceneAnchorRefs: ["local:scene"],
+        lastTimeAnchorRefs: ["local:object"],
+        lastLocationAnchorRefs: ["local:place"],
+        correspondenceRefs: [],
+        reason: "continue later",
+        revisitCondition: "when local pressure changes",
+      }],
+    }
+
+    expect(() => assertFrontierSettlementCoversReview(review, settlement, governance))
+      .toThrow("time anchors must come from approved spacetime bindings")
   })
 
   it("rejects duplicate narrative source coverage across scene bindings", () => {
@@ -267,5 +414,23 @@ describe("prompt contracts", () => {
 
     expect(() => assertSpacetimeGovernanceCoverage(dependency, governance, 2))
       .toThrow("Scene source coverage must contain every index exactly once")
+  })
+
+  it("rejects staged world effects without an effective scene", () => {
+    expect(() => graphSpacetimeSettlementArtifactSchema.parse({
+      sceneSpacetimeBindings: [],
+      proposalSettlements: [{
+        proposalRefs: ["proposal:world-effect"],
+        effectDisposition: "world_effect",
+        effectiveSceneBindingIndexes: [],
+        effectiveExistingSceneAnchorRefs: [],
+        currentEntryRefs: ["local:world-effect"],
+        predecessorRevisionRequired: false,
+        predecessorRevisionReadRefs: [],
+        historicalReturnRefs: ["local:world-effect"],
+        reason: "The proposal changes the persistent world",
+        selfReview: "No effective scene was established",
+      }],
+    })).toThrow("world_effect requires an effective scene")
   })
 })

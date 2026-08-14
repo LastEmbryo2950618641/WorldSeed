@@ -20,7 +20,7 @@ const graphDataSchema = z.object({
   content: z.unknown(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 })
-const graphMutationSchema = z.discriminatedUnion("operation", [
+export const graphMutationSchema = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("create_node"), ref: localReferenceSchema, data: graphDataSchema }),
   z.object({ operation: z.literal("edit_node"), nodeRef: referenceSchema, next: graphDataSchema }),
   z.object({ operation: z.literal("retire_node"), nodeRef: referenceSchema, archiveOutletRefs: z.array(referenceSchema).min(1) }),
@@ -28,6 +28,14 @@ const graphMutationSchema = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("edit_link"), linkRef: referenceSchema, fromRef: referenceSchema, toRef: referenceSchema, content: z.unknown().optional(), metadata: z.record(z.string(), z.unknown()).optional() }),
   z.object({ operation: z.literal("retire_link"), linkRef: referenceSchema, archiveOutletRefs: z.array(referenceSchema).min(1) }),
 ])
+
+const proposalReferenceSchema = z.string().regex(/^proposal:[a-zA-Z0-9_.:-]+$/u)
+const graphStructureProposalSchema = z.object({
+  proposalRef: proposalReferenceSchema,
+  mutation: graphMutationSchema,
+  reason: z.string().min(1),
+  selfReview: z.string().min(1),
+})
 
 export const interpretArtifactSchema = z.object({
   workflow: z.enum(["turn", "query", "evolution", "revision"]),
@@ -162,8 +170,7 @@ const sceneSpacetimeBindingSchema = z.object({
   selfReview: z.string().min(1),
 })
 
-const mutationSpacetimeSettlementSchema = z.object({
-  mutationIndexes: z.array(indexSchema).min(1),
+const spacetimeSettlementBaseSchema = z.object({
   effectDisposition: z.enum(["world_effect", "representation_only"]),
   effectiveSceneBindingIndexes: z.array(indexSchema),
   effectiveExistingSceneAnchorRefs: z.array(referenceSchema),
@@ -173,7 +180,12 @@ const mutationSpacetimeSettlementSchema = z.object({
   historicalReturnRefs: z.array(referenceSchema).min(1),
   reason: z.string().min(1),
   selfReview: z.string().min(1),
-}).superRefine((settlement, context) => {
+})
+
+function assertSpacetimeSettlementRules(
+  settlement: z.infer<typeof spacetimeSettlementBaseSchema>,
+  context: z.RefinementCtx,
+): void {
   if (settlement.effectDisposition === "world_effect") {
     if (settlement.effectiveSceneBindingIndexes.length === 0 && settlement.effectiveExistingSceneAnchorRefs.length === 0) {
       context.addIssue({ code: "custom", message: "world_effect requires an effective scene" })
@@ -185,6 +197,105 @@ const mutationSpacetimeSettlementSchema = z.object({
   if (settlement.predecessorRevisionRequired && settlement.predecessorRevisionReadRefs.length === 0) {
     context.addIssue({ code: "custom", message: "required predecessor revisions must use read evidence references" })
   }
+}
+
+const mutationSpacetimeSettlementSchema = spacetimeSettlementBaseSchema.extend({
+  mutationIndexes: z.array(indexSchema).min(1),
+}).superRefine(assertSpacetimeSettlementRules)
+
+export const graphStructurePlanArtifactSchema = z.object({
+  proposals: z.array(graphStructureProposalSchema),
+  affectedFrontierRefs: z.array(referenceSchema),
+  archiveOutletRefs: z.array(referenceSchema),
+  decisionRecords: z.array(z.object({
+    decisionKind: z.string().min(1),
+    proposalRefs: z.array(proposalReferenceSchema),
+    reason: z.string().min(1),
+    payload: z.unknown(),
+    selfReview: z.string().min(1),
+  })),
+}).superRefine((artifact, context) => {
+  const proposalRefs = artifact.proposals.map((proposal) => proposal.proposalRef)
+  if (new Set(proposalRefs).size !== proposalRefs.length) {
+    context.addIssue({ code: "custom", path: ["proposals"], message: "proposalRef values must be unique" })
+  }
+  const proposalRefSet = new Set(proposalRefs)
+  const decidedProposalRefs = artifact.decisionRecords.flatMap((decision) => decision.proposalRefs)
+  const unknownProposalRefs = [...new Set(decidedProposalRefs.filter((proposalRef) => !proposalRefSet.has(proposalRef)))]
+  if (unknownProposalRefs.length > 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["decisionRecords"],
+      message: `decision records reference unknown proposals: ${unknownProposalRefs.join(", ")}`,
+    })
+  }
+  const decidedProposalRefSet = new Set(decidedProposalRefs)
+  const uncoveredProposalRefs = proposalRefs.filter((proposalRef) => !decidedProposalRefSet.has(proposalRef))
+  if (uncoveredProposalRefs.length > 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["decisionRecords"],
+      message: `decision records must cover every proposal; uncovered: ${uncoveredProposalRefs.join(", ")}`,
+    })
+  }
+})
+
+export const graphCapacityRewriteArtifactSchema = z.object({
+  hotspotRefs: z.array(referenceSchema).min(1),
+  affectedProposalRefs: z.array(proposalReferenceSchema).min(1),
+  removeProposalRefs: z.array(proposalReferenceSchema),
+  upsertProposals: z.array(graphStructureProposalSchema),
+  reason: z.string().min(1),
+  selfReview: z.string().min(1),
+})
+
+export const graphSpacetimeSettlementArtifactSchema = z.object({
+  sceneSpacetimeBindings: z.array(sceneSpacetimeBindingSchema),
+  proposalSettlements: z.array(spacetimeSettlementBaseSchema.extend({
+    proposalRefs: z.array(proposalReferenceSchema).min(1),
+  }).superRefine(assertSpacetimeSettlementRules)),
+})
+
+export const graphRetrievalDesignArtifactSchema = z.object({
+  projections: z.array(z.object({
+    ownerProposalRef: proposalReferenceSchema.optional(),
+    ownerRef: referenceSchema.optional(),
+    exactKeys: z.array(z.string().min(1)),
+    semanticText: z.string().min(1),
+  }).refine(
+    (projection) => projection.ownerProposalRef !== undefined || projection.ownerRef !== undefined,
+    { message: "projection must reference a proposal or an existing graph owner" },
+  )),
+  sourceSettlements: z.array(z.object({
+    sourceUnitIndex: indexSchema,
+    graphRefs: z.array(z.object({
+      targetKind: z.enum(["node", "link"]),
+      targetRef: referenceSchema,
+      proposalRef: proposalReferenceSchema.optional(),
+    })),
+    reason: z.string().min(1),
+    status: z.string().min(1),
+  })).default([]),
+})
+
+export const graphGovernanceReviewArtifactSchema = z.object({
+  recommendation: z.enum(["pass", "revise"]),
+  issues: z.array(z.object({
+    responsibility: z.enum(["structure", "capacity", "spacetime", "retrieval"]),
+    summary: z.string().min(1),
+    affectedRefs: z.array(referenceSchema),
+  })),
+  graphStillDiscoverable: z.boolean(),
+  graphStillConcise: z.boolean(),
+  continuityPreserved: z.boolean(),
+  spacetimeContinuityPreserved: z.boolean(),
+  sourceReturnComplete: z.boolean(),
+  verificationProbeAssessments: z.array(z.object({
+    probeIndex: indexSchema,
+    verdict: z.enum(["pass", "uncertain", "fail"]),
+    reason: z.string().min(1),
+  })),
+  selfReview: z.string().min(1),
 })
 
 export const graphGovernanceArtifactSchema = z.object({
@@ -232,13 +343,8 @@ export const semanticReviewArtifactSchema = z.object({
   rejectedMutationSpacetimeSettlementIndexes: z.array(indexSchema),
   approvedAffectedFrontierRefs: z.array(referenceSchema),
   rejectedAffectedFrontierRefs: z.array(referenceSchema),
-  verificationProbes: z.array(z.object({
-    purpose: z.enum(["scene_restore", "current_state", "history_return", "source_return"]),
-    sceneBindingIndexes: z.array(indexSchema),
-    mutationSpacetimeSettlementIndexes: z.array(indexSchema),
-    query: z.string().min(1),
-    observedReadRefs: z.array(referenceSchema),
-    observedGraphRefs: z.array(referenceSchema),
+  verificationProbeAssessments: z.array(z.object({
+    probeIndex: indexSchema,
     verdict: z.enum(["pass", "uncertain", "fail"]),
     reason: z.string().min(1),
   })),
@@ -289,25 +395,6 @@ export const commitReviewArtifactSchema = z.object({
   finalSelfReview: z.string().min(1),
 })
 
-export const contextCompactionArtifactSchema = z.object({
-  coveredSegmentIndexes: z.array(z.number().int().nonnegative()),
-  summary: z.string().min(1),
-  retainedFactDigests: z.array(z.string().min(1)),
-  retainedAnchorRefs: z.array(referenceSchema),
-  unresolvedDependencyRefs: z.array(referenceSchema),
-  sourceRefs: z.array(referenceSchema),
-  reason: z.string().min(1),
-  selfReview: z.string().min(1),
-})
-
-export const contextCompactionReviewArtifactSchema = z.object({
-  decision: z.enum(["approve", "revise", "block"]),
-  missingFactDigests: z.array(z.string().min(1)),
-  missingAnchorRefs: z.array(referenceSchema),
-  missingSourceRefs: z.array(referenceSchema),
-  reason: z.string().min(1),
-})
-
 export const phaseArtifactSchemas: Record<AIPhase, z.ZodType> = {
   interpret: interpretArtifactSchema,
   rule_assembly: ruleAssemblyArtifactSchema,
@@ -319,12 +406,15 @@ export const phaseArtifactSchemas: Record<AIPhase, z.ZodType> = {
   dependency_audit: dependencyAuditArtifactSchema,
   response_review: responseReviewArtifactSchema,
   graph_governance: graphGovernanceArtifactSchema,
+  graph_structure_plan: graphStructurePlanArtifactSchema,
+  graph_capacity_rewrite: graphCapacityRewriteArtifactSchema,
+  graph_spacetime_settlement: graphSpacetimeSettlementArtifactSchema,
+  graph_retrieval_design: graphRetrievalDesignArtifactSchema,
+  graph_governance_review: graphGovernanceReviewArtifactSchema,
   semantic_review: semanticReviewArtifactSchema,
   settlement_review: settlementReviewArtifactSchema,
   frontier_settlement: frontierSettlementArtifactSchema,
   commit_review: commitReviewArtifactSchema,
-  context_compaction: contextCompactionArtifactSchema,
-  context_compaction_review: contextCompactionReviewArtifactSchema,
 }
 
 export function phaseArtifactJsonSchema(phase: AIPhase): unknown {
@@ -341,9 +431,12 @@ export type ChapterNamingArtifact = z.infer<typeof chapterNamingArtifactSchema>
 export type DependencyAuditArtifact = z.infer<typeof dependencyAuditArtifactSchema>
 export type ResponseReviewArtifact = z.infer<typeof responseReviewArtifactSchema>
 export type GraphGovernanceArtifact = z.infer<typeof graphGovernanceArtifactSchema>
+export type GraphStructurePlanArtifact = z.infer<typeof graphStructurePlanArtifactSchema>
+export type GraphCapacityRewriteArtifact = z.infer<typeof graphCapacityRewriteArtifactSchema>
+export type GraphSpacetimeSettlementArtifact = z.infer<typeof graphSpacetimeSettlementArtifactSchema>
+export type GraphRetrievalDesignArtifact = z.infer<typeof graphRetrievalDesignArtifactSchema>
+export type GraphGovernanceReviewArtifact = z.infer<typeof graphGovernanceReviewArtifactSchema>
 export type SemanticReviewArtifact = z.infer<typeof semanticReviewArtifactSchema>
 export type SettlementReviewArtifact = z.infer<typeof settlementReviewArtifactSchema>
 export type FrontierSettlementArtifact = z.infer<typeof frontierSettlementArtifactSchema>
 export type CommitReviewArtifact = z.infer<typeof commitReviewArtifactSchema>
-export type ContextCompactionArtifact = z.infer<typeof contextCompactionArtifactSchema>
-export type ContextCompactionReviewArtifact = z.infer<typeof contextCompactionReviewArtifactSchema>

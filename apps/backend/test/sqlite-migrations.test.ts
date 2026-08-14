@@ -35,15 +35,15 @@ describe("SQLite migrations", () => {
     const migrations = await first.selectFrom("schema_migrations").selectAll().execute()
 
     expect(tables.rows.map((row) => row.name)).toEqual(["model_profiles", "registered_projects", "schema_migrations"])
-    expect(migrations).toHaveLength(3)
+    expect(migrations).toHaveLength(4)
     await first.destroy()
 
     const reopened = await openRegistryDatabase(path)
-    expect(await reopened.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(3)
+    expect(await reopened.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(4)
     await reopened.destroy()
   })
 
-  it("applies project migrations 001 through 012 with required SQLite pragmas", async () => {
+  it("applies project migrations 001 through 023 with required SQLite pragmas", async () => {
     const path = temporaryDatabasePath("project.sqlite")
     const database = await openProjectDatabase(path)
     const migrations = await database.selectFrom("schema_migrations").selectAll().orderBy("version").execute()
@@ -55,19 +55,37 @@ describe("SQLite migrations", () => {
     const foreignKeys = await sql<{ foreign_keys: number }>`PRAGMA foreign_keys`.execute(database)
     const busyTimeout = await sql<{ timeout: number }>`PRAGMA busy_timeout`.execute(database)
     const frontierColumns = await sql<{ name: string }>`PRAGMA table_info(frontier_refs)`.execute(database)
+    const sourceUnitColumns = await sql<{ name: string }>`PRAGMA table_info(source_units)`.execute(database)
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23])
     expect(tableNames).toEqual(expect.objectContaining(new Set([
       "projects",
       "project_manifests",
       "project_settings",
       "workspace_operations",
       "artifact_scopes",
+      "turn_finalizations",
+      "canonical_chapter_messages",
+      "model_context_chains",
+      "id_counters",
+      "model_context_messages",
+      "active_scope_refs",
+      "active_document_heads",
+      "world_branches",
+      "history_entries",
+      "project_history_state",
+      "history_finalizations",
+      "history_retention_events",
       "tasks",
+      "turn_budget_windows",
+      "turn_budget_resets",
+      "task_checkpoints",
+      "task_checkpoint_heads",
       "operation_events",
       "turn_contexts",
       "context_segments",
       "phase_runs",
+      "verification_probe_executions",
       "kv_usage",
       "nodes",
       "links",
@@ -106,6 +124,7 @@ describe("SQLite migrations", () => {
       "reason",
       "revisit_condition",
     ])
+    expect(sourceUnitColumns.rows.map((column) => column.name)).not.toContain("settlement_status")
 
     await sql`INSERT INTO retrieval_fts(projection_id, project_id, scope_id, visibility, semantic_text)
       VALUES ('projection', 'project', 'scope', 'committed', 'old bridge hidden key')`.execute(database)

@@ -2,9 +2,12 @@ import {
   PROTOCOL_VERSION,
   type BackendMethod,
   type ClientRequest,
+  type HistoryCheckoutResult,
+  type HistoryOverview,
   type ModelListResult,
   type ModelProfileDraft,
   type ProjectSettings,
+  type RuntimeMetricsSnapshot,
 } from "@worldseed/contracts"
 import { defaultProjectSettings } from "@worldseed/config"
 
@@ -43,6 +46,15 @@ export type TaskSnapshot = Readonly<{
   result?: TurnResult
   error?: { message?: string }
   phaseRuns?: readonly PhaseRunSnapshot[]
+  finalization?: Readonly<{
+    finalizationId: string
+    status: "prepared" | "scope_committed" | "chapter_published" | "chapter_registered" | "completed"
+    chapterPath: string
+    chapterHeading: string
+    sourceId: string
+    contentDigest: string
+    committedSequence?: number
+  }>
   interruption?: Readonly<{
     kind?: string
     message?: string
@@ -51,6 +63,7 @@ export type TaskSnapshot = Readonly<{
     phaseRunId?: string
     interruptedAtMs?: number
   }>
+  runtimeMetrics?: RuntimeMetricsSnapshot
 }>
 
 export type RecoverableTaskList = readonly TaskSnapshot[]
@@ -152,6 +165,35 @@ const demoNodeIds = [
   "51111111-1111-4111-8111-111111111111",
 ]
 
+const demoMainBranchId = "71111111-1111-4111-8111-111111111111"
+let demoHistory: HistoryOverview = {
+  entries: [{
+    entryId: "81111111-1111-4111-8111-111111111111",
+    projectId: browserDemoProject?.projectId ?? "11111111-1111-4111-8111-111111111111",
+    branchId: demoMainBranchId,
+    kind: "automatic",
+    state: "complete_world",
+    status: "ready",
+    name: "第一章 雨夜来信",
+    committedSequence: 1,
+    createdAtMs: Date.now() - 3_600_000,
+    completedAtMs: Date.now() - 3_590_000,
+  }],
+  branches: [{
+    branchId: demoMainBranchId,
+    projectId: browserDemoProject?.projectId ?? "11111111-1111-4111-8111-111111111111",
+    name: "主世界线",
+    status: "active",
+    worldHeadEntryId: "81111111-1111-4111-8111-111111111111",
+    historyHeadEntryId: "81111111-1111-4111-8111-111111111111",
+    createdAtMs: Date.now() - 3_600_000,
+    updatedAtMs: Date.now() - 3_590_000,
+  }],
+  activeBranchId: demoMainBranchId,
+  selectedEntryId: "81111111-1111-4111-8111-111111111111",
+  graphAnchorIds: [],
+}
+
 const demoMarkdownByPath: Readonly<Record<string, string>> = {
   "世界推演规则/基础规则/base-rules.md": "# Worldseed V1 基础规则\n\n本文件是平台锁定的只读基础规则投影，用于让用户查看底层推演约束。\n\n## 底层原则\n\n- 每轮推演只能依赖本轮实际读取的旧图、资料和本轮新产生的内容。\n- 用户输入是意图、行动或假设；若与已读事实冲突，不能直接当作世界真相提交。\n- 正式场景变化必须具有时间锚点和空间锚点，保证时间与空间连续。\n- 任何出现在正文中的对象、关系、状态和事件都应进入动态图，并优先复用已有节点。\n- 图治理以归档和重构为主，不物理删除仍有历史追溯价值的资料。\n",
   "世界推演规则/用户规则/人物出场节奏.md": "# 人物出场节奏\n\n- 优先复用已出现人物，让关系随行动和共同事件自然变化。\n- 新人物出现前，应说明其与当前场景、地点、势力或事件的连接理由。\n",
@@ -182,13 +224,89 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
       return { inventory: demoInventory, issues: [] }
     case "project.settings.read":
       return structuredClone(defaultProjectSettings)
-    case "project.settings.save":
-      return typeof payload === "object" && payload !== null && "settings" in payload
+    case "project.settings.save": {
+      const settings = typeof payload === "object" && payload !== null && "settings" in payload
         ? (payload as { settings: ProjectSettings }).settings
         : structuredClone(defaultProjectSettings)
+      if (settings.history.retentionLimit !== null) {
+        demoHistory = { ...demoHistory, entries: demoHistory.entries.slice(0, settings.history.retentionLimit) }
+      }
+      return settings
+    }
+    case "history.list":
+      return structuredClone(demoHistory)
+    case "history.branches":
+      return structuredClone(demoHistory.branches)
+    case "history.retention.preview": {
+      const retentionLimit = typeof payload === "object" && payload !== null && "retentionLimit" in payload
+        ? payload.retentionLimit as number | null
+        : null
+      const deleteCount = retentionLimit === null ? 0 : Math.max(0, demoHistory.entries.length - retentionLimit)
+      const deleted = [...demoHistory.entries].sort((left, right) => left.createdAtMs - right.createdAtMs).slice(0, deleteCount)
+      return {
+        retentionLimit,
+        currentCount: demoHistory.entries.length,
+        deleteCount,
+        ...(deleted[0] === undefined ? {} : { oldestDeletedAtMs: deleted[0].createdAtMs }),
+        ...(deleted.at(-1) === undefined ? {} : { newestDeletedAtMs: deleted.at(-1)?.createdAtMs }),
+        affectedBranchIds: [...new Set(deleted.map((entry) => entry.branchId))],
+      }
+    }
+    case "history.saveManual": {
+      const entryId = crypto.randomUUID()
+      const projectId = browserDemoProject?.projectId ?? "11111111-1111-4111-8111-111111111111"
+      const name = typeof payload === "object" && payload !== null && "name" in payload ? String(payload.name) : "手动保存"
+      const entry = {
+        entryId,
+        projectId,
+        branchId: demoHistory.activeBranchId ?? demoMainBranchId,
+        kind: "manual" as const,
+        state: "complete_world" as const,
+        status: "ready" as const,
+        name,
+        committedSequence: demoHistory.entries[0]?.committedSequence ?? 1,
+        createdAtMs: Date.now(),
+        completedAtMs: Date.now(),
+      }
+      demoHistory = { ...demoHistory, entries: [entry, ...demoHistory.entries], selectedEntryId: entryId }
+      return entry
+    }
+    case "history.restore":
+    case "history.continueFrom":
+    case "history.returnPreviousRound": {
+      const requestedEntryId = typeof payload === "object" && payload !== null && "entryId" in payload
+        ? String(payload.entryId)
+        : demoHistory.entries.find((entry) => entry.kind === "automatic")?.entryId
+      const entry = demoHistory.entries.find((candidate) => candidate.entryId === requestedEntryId) ?? demoHistory.entries[0]
+      if (entry === undefined) throw new Error("Browser demo has no history entry")
+      let branch = demoHistory.branches.find((candidate) => candidate.branchId === entry.branchId) ?? demoHistory.branches[0]
+      if (method === "history.continueFrom") {
+        branch = {
+          branchId: crypto.randomUUID(),
+          projectId: entry.projectId,
+          parentBranchId: entry.branchId,
+          forkEntryId: entry.entryId,
+          name: `世界线 ${String(demoHistory.branches.length + 1)}`,
+          status: "active",
+          worldHeadEntryId: entry.entryId,
+          historyHeadEntryId: entry.entryId,
+          createdAtMs: Date.now(),
+          updatedAtMs: Date.now(),
+        }
+        demoHistory = { ...demoHistory, branches: [...demoHistory.branches, branch] }
+      }
+      if (branch === undefined) throw new Error("Browser demo has no history branch")
+      demoHistory = { ...demoHistory, activeBranchId: branch.branchId, selectedEntryId: entry.entryId }
+      return {
+        entry,
+        branch,
+        activeGeneration: 1,
+        graphAnchorIds: demoNodeIds,
+      } satisfies HistoryCheckoutResult
+    }
     case "workspace.read": {
       const relativePath = typeof payload === "object" && payload !== null && "relativePath" in payload
-        ? String((payload as { relativePath: unknown }).relativePath)
+        ? String(payload.relativePath)
         : ""
       if (relativePath.startsWith("章节正文/")) {
         const heading = relativePath.split("/").at(-1)?.replace(/\.md$/u, "") ?? "未命名章节"
@@ -212,8 +330,8 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
     case "model.profiles.read":
       return {
         profiles: [
-          { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", credentialRef: "model-profile:deepseek-v4-flash", apiKey: "", hasApiKey: false, thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false },
-          { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-pro", credentialRef: "model-profile:deepseek-v4-pro", apiKey: "", hasApiKey: false, thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false },
+          { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", credentialRef: "model-profile:deepseek-v4-flash", contextWindowTokens: 1_000_000, apiKey: "", hasApiKey: false, thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false },
+          { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-pro", credentialRef: "model-profile:deepseek-v4-pro", contextWindowTokens: 1_000_000, apiKey: "", hasApiKey: false, thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false },
         ],
         activeProfileId: "deepseek-v4-flash",
       }
@@ -256,11 +374,11 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
     }
     case "graph.neighborhood": {
       const anchorIds = typeof payload === "object" && payload !== null && "anchorIds" in payload
-        && Array.isArray((payload as { anchorIds: unknown }).anchorIds)
-        ? (payload as { anchorIds: unknown[] }).anchorIds
+        && Array.isArray(payload.anchorIds)
+        ? payload.anchorIds
         : demoNodeIds
       const offset = typeof payload === "object" && payload !== null && "anchorOffset" in payload
-        ? Number((payload as { anchorOffset: unknown }).anchorOffset)
+        ? Number(payload.anchorOffset)
         : 0
       const limit = defaultProjectSettings.graph.maxNeighborhoodAnchors
       const nextOffset = Math.min(offset + limit, anchorIds.length)

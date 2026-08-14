@@ -12,6 +12,10 @@ export const backendErrorCodeValues = [
   "workspace_failure",
   "storage_failure",
   "protocol_mismatch",
+  "history_busy",
+  "history_corrupt",
+  "history_not_found",
+  "checkpoint_unavailable",
 ] as const
 export const backendErrorCodeSchema = z.enum(backendErrorCodeValues)
 export type BackendErrorCode = z.infer<typeof backendErrorCodeSchema>

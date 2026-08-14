@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { Activity, Check, Circle, GitBranch, History, LoaderCircle, Network, Orbit } from "lucide-react"
-import { aiPhaseValues, type ProjectSettings } from "@worldseed/contracts"
+import { aiPhaseValues, type HistoryOverview, type ProjectSettings, type ResettableRuntimeMetricId } from "@worldseed/contracts"
 
 import type { GraphSlice, TaskSnapshot } from "../../api/client.js"
 import { useWorkbenchStore, type RightTab } from "../../state/workbench-store.js"
@@ -12,11 +12,17 @@ type Props = Readonly<{
   task: TaskSnapshot | undefined
   graphSlice: GraphSlice | undefined
   graphSettings?: ProjectSettings["graph"] | undefined
-  executionSettings?: ProjectSettings["execution"] | undefined
   historyRetentionLimit?: number | null | undefined
+  history?: HistoryOverview | undefined
+  historyLoading?: boolean | undefined
   onOpenProjectSettings?(): void
-  onResumeTask?(mode: "continue" | "retry_phase", resetMetricIds: readonly string[]): Promise<void>
+  onResumeTask?(mode: "continue" | "retry_phase"): Promise<void>
+  onResetTaskMetrics?(metricIds: readonly ResettableRuntimeMetricId[]): Promise<void>
   onPauseTask?(): Promise<void>
+  onSaveHistory?(): Promise<void>
+  onRestoreHistory?(entryId: string): Promise<void>
+  onContinueFromHistory?(entryId: string): Promise<void>
+  onReturnPreviousRound?(): Promise<void>
 }>
 
 const labels: Record<string, string> = {
@@ -30,15 +36,32 @@ const labels: Record<string, string> = {
   dependency_audit: "检查依赖闭合",
   response_review: "审查正文响应",
   graph_governance: "治理世界图",
+  graph_structure_plan: "候选结构规划",
+  graph_capacity_rewrite: "热点局部重构",
+  graph_spacetime_settlement: "时空与历史结算",
+  graph_retrieval_design: "查询投影设计",
+  graph_governance_review: "整体治理审核",
   semantic_review: "语义一致性复核",
   settlement_review: "结算资料返回路径",
   frontier_settlement: "结算演化前沿",
   commit_review: "最终提交审查",
-  context_compaction: "压缩动态上下文",
-  context_compaction_review: "复核压缩结果",
 }
 
-export function RightRail({ task, graphSlice, graphSettings, executionSettings, historyRetentionLimit = null, onOpenProjectSettings, onResumeTask, onPauseTask }: Props): React.JSX.Element {
+const stagedGraphPhases = [
+  "graph_structure_plan",
+  "graph_capacity_rewrite",
+  "graph_spacetime_settlement",
+  "graph_retrieval_design",
+  "graph_governance_review",
+] as const
+
+const visibleTopLevelPhases = aiPhaseValues.filter((phase) => (
+  phase !== "graph_governance"
+  && phase !== "semantic_review"
+  && !stagedGraphPhases.includes(phase as typeof stagedGraphPhases[number])
+))
+
+export function RightRail({ task, graphSlice, graphSettings, historyRetentionLimit = null, history, historyLoading, onOpenProjectSettings, onResumeTask, onResetTaskMetrics, onPauseTask, onSaveHistory, onRestoreHistory, onContinueFromHistory, onReturnPreviousRound }: Props): React.JSX.Element {
   const [checkpointOpen, setCheckpointOpen] = useState(false)
   const tab = useWorkbenchStore((state) => state.rightTab)
   const setTab = useWorkbenchStore((state) => state.setRightTab)
@@ -53,17 +76,31 @@ export function RightRail({ task, graphSlice, graphSettings, executionSettings, 
       <Tab id="history" tab={tab} onChange={setTab} icon={<History size={15} />} label="历史" />
     </div>
     <div className="right-content">
-      {tab === "process" ? <ProcessPanel task={task} executionSettings={executionSettings} onOpenCheckpoint={() => { setCheckpointOpen(true); }} /> : null}
+      {tab === "process" ? <ProcessPanel task={task} onOpenCheckpoint={() => { setCheckpointOpen(true); }} onResetMetrics={onResetTaskMetrics} /> : null}
       {tab === "graph" ? <WorldGraph slice={graphSlice} settings={graphSettings} /> : null}
       {tab === "evolution" ? <EvolutionPanel /> : null}
-      {tab === "history" ? <HistoryPanel retentionLimit={historyRetentionLimit} taskRunning={task?.status === "running"} onOpenSettings={onOpenProjectSettings ?? (() => undefined)} onOpenCheckpoint={() => { setCheckpointOpen(true); }} /> : null}
+      {tab === "history" ? <HistoryPanel
+        entries={history?.entries ?? []}
+        branches={history?.branches ?? []}
+        {...(history?.activeBranchId === undefined ? {} : { activeBranchId: history.activeBranchId })}
+        {...(history?.selectedEntryId === undefined ? {} : { selectedEntryId: history.selectedEntryId })}
+        retentionLimit={historyRetentionLimit}
+        taskRunning={task?.status === "running"}
+        {...(historyLoading === undefined ? {} : { loading: historyLoading })}
+        onOpenSettings={onOpenProjectSettings ?? (() => undefined)}
+        onOpenCheckpoint={() => { setCheckpointOpen(true); }}
+        onSave={onSaveHistory ?? (() => Promise.reject(new Error("历史保存接口尚未连接")))}
+        onRestore={onRestoreHistory ?? (() => Promise.reject(new Error("历史恢复接口尚未连接")))}
+        onContinueFrom={onContinueFromHistory ?? (() => Promise.reject(new Error("历史分叉接口尚未连接")))}
+        onReturnPreviousRound={onReturnPreviousRound ?? (() => Promise.reject(new Error("返回上一轮接口尚未连接")))}
+      /> : null}
     </div>
     <div className="world-summary"><span>世界时间 <strong>当前章节锚点</strong></span><span>图局部 <strong>{graphSlice === undefined ? "未读取" : `${String(graphSlice.nodes.length)} 节点 / ${String(graphSlice.links.length)} 连接`}</strong></span><span>任务状态 <strong>{task?.status ?? "未运行"}</strong></span></div>
   </aside>{checkpointOpen && task !== undefined ? <TaskCheckpointDialog
     task={task}
-    {...(executionSettings === undefined ? {} : { executionLimits: executionSettings })}
     onClose={() => { setCheckpointOpen(false); }}
     onResume={onResumeTask ?? (() => Promise.reject(new Error("恢复接口尚未连接")))}
+    onResetMetrics={onResetTaskMetrics ?? (() => Promise.reject(new Error("指标重置接口尚未连接")))}
     onPause={onPauseTask ?? (() => Promise.reject(new Error("暂停接口尚未连接")))}
   /> : null}</>
 }
@@ -72,24 +109,81 @@ function Tab({ id, tab, onChange, icon, label }: { id: RightTab; tab: RightTab; 
   return <button className={tab === id ? "active" : ""} onClick={() => { onChange(id); }}>{icon}{label}</button>
 }
 
-function ProcessPanel({ task, executionSettings, onOpenCheckpoint }: { task: TaskSnapshot | undefined; executionSettings?: ProjectSettings["execution"] | undefined; onOpenCheckpoint: () => void }): React.JSX.Element {
+function ProcessPanel({ task, onOpenCheckpoint, onResetMetrics }: { task: TaskSnapshot | undefined; onOpenCheckpoint: () => void; onResetMetrics?: ((metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>) | undefined }): React.JSX.Element {
   return <div className="process-panel">
-    <RuntimeMonitor task={task} {...(executionSettings === undefined ? {} : { executionLimits: executionSettings })} onOpenCheckpoint={onOpenCheckpoint} />
-    <div className="phase-list">{aiPhaseValues.map((phase) => {
+    <RuntimeMonitor task={task} onOpenCheckpoint={onOpenCheckpoint} onResetMetrics={onResetMetrics} />
+    {task?.finalization === undefined || task.finalization.status === "completed" ? null : <p className="phase-empty">正式章节收尾：{task.finalization.status} · {task.finalization.chapterHeading}</p>}
+    <div className="phase-list">{visibleTopLevelPhases.flatMap((phase) => {
+      const rows: React.ReactNode[] = []
+      if (phase === "settlement_review") rows.push(<GraphGovernanceGroup task={task} key="staged-graph-governance" />)
       const runs = task?.phaseRuns?.filter((run) => run.phase === phase) ?? []
       const latest = runs.at(-1)
       const isDone = latest?.status === "completed"
       const isCurrent = latest?.status === "running" || latest?.status === "failed"
-      return <details className={`phase-detail ${isDone ? "done" : isCurrent ? "current" : ""}`} key={phase}>
+      rows.push(<details className={`phase-detail ${isDone ? "done" : isCurrent ? "current" : ""}`} key={phase}>
         <summary className={`phase-row ${isDone ? "done" : isCurrent ? "current" : ""}`}>
           <span className="phase-icon">{isDone ? <Check size={13} /> : isCurrent ? <LoaderCircle size={13} /> : <Circle size={10} />}</span>
           <span><strong>{phase}</strong><small>{labels[phase]}</small></span>
           <em>{latest?.status === "failed" ? "失败" : isDone ? "已完成" : isCurrent ? "进行中" : "等待"}</em>
         </summary>
         {latest?.result === undefined ? <PhasePending latestStatus={latest?.status} /> : <PhaseDetails result={latest.result} />}
-      </details>
+      </details>)
+      return rows
     })}</div>
     {task?.error?.message === undefined ? null : <p className="task-error">{task.error.message}</p>}
+  </div>
+}
+
+function GraphGovernanceGroup({ task }: { task: TaskSnapshot | undefined }): React.JSX.Element {
+  const runs = task?.phaseRuns?.filter((run) => stagedGraphPhases.includes(run.phase as typeof stagedGraphPhases[number])) ?? []
+  const completed = new Set(runs.filter((run) => run.status === "completed").map((run) => run.phase))
+  const active = runs.findLast((run) => run.status === "running" || run.status === "failed")
+  const done = completed.has("graph_governance_review")
+  const capacityRuns = runs.filter((run) => run.phase === "graph_capacity_rewrite")
+  const steps = [
+    { id: "graph_structure_plan", label: "候选结构规划", kind: "ai" as const },
+    { id: "graph_capacity_assessment", label: "容量检查", kind: "mechanical" as const },
+    { id: "graph_capacity_rewrite", label: "热点局部重构", kind: "ai" as const },
+    { id: "graph_capacity_reassessment", label: "容量复检", kind: "mechanical" as const },
+    { id: "graph_spacetime_settlement", label: "时空与历史结算", kind: "ai" as const },
+    { id: "graph_retrieval_design", label: "查询投影设计", kind: "ai" as const },
+    { id: "graph_governance_review", label: "整体治理审核", kind: "ai" as const },
+  ]
+  return <details className={`phase-detail graph-governance-group ${done ? "done" : active === undefined ? "" : "current"}`}>
+    <summary className={`phase-row ${done ? "done" : active === undefined ? "" : "current"}`}>
+      <span className="phase-icon">{done ? <Check size={13} /> : active === undefined ? <Circle size={10} /> : <LoaderCircle size={13} />}</span>
+      <span><strong>graph_governance</strong><small>分步治理世界图</small></span>
+      <em>{done ? "已完成" : runs.length === 0 ? "等待" : "进行中"}</em>
+    </summary>
+    <div className="governance-step-list">{steps.map((step) => {
+      const phaseRuns = step.kind === "ai" ? runs.filter((run) => run.phase === step.id) : []
+      const latest = phaseRuns.at(-1)
+      const mechanicalComplete = step.id === "graph_capacity_assessment"
+        ? completed.has("graph_structure_plan")
+        : completed.has("graph_structure_plan") && (capacityRuns.length === 0 || completed.has("graph_capacity_rewrite"))
+      const stepDone = step.kind === "mechanical" ? mechanicalComplete : latest?.status === "completed"
+      const stepCurrent = latest?.status === "running" || latest?.status === "failed"
+      const skipped = step.id === "graph_capacity_rewrite" && completed.has("graph_spacetime_settlement") && capacityRuns.length === 0
+      return <details className={`governance-step ${stepDone ? "done" : stepCurrent ? "current" : ""}`} key={step.id}>
+        <summary>
+          <span>{stepDone ? <Check size={12} /> : stepCurrent ? <LoaderCircle size={12} /> : <Circle size={9} />}</span>
+          <strong>{step.label}</strong>
+          <em>{skipped ? "未触发" : stepDone ? "已完成" : stepCurrent ? "进行中" : "等待"}</em>
+        </summary>
+        {step.kind === "mechanical"
+          ? <CapacityRunDetails rewriteCount={capacityRuns.length} complete={mechanicalComplete} />
+          : latest?.result === undefined ? <PhasePending latestStatus={latest?.status} /> : <PhaseDetails result={latest.result} />}
+      </details>
+    })}</div>
+  </details>
+}
+
+function CapacityRunDetails({ rewriteCount, complete }: { rewriteCount: number; complete: boolean }): React.JSX.Element {
+  return <div className="phase-details capacity-run-details">
+    <details>
+      <summary className="sub-panel-summary">运行检查</summary>
+      <p>{complete ? `机械容量检查已完成，局部重构 ${String(rewriteCount)} 轮。` : "等待候选结构后执行机械入度、出度检查。"}</p>
+    </details>
   </div>
 }
 

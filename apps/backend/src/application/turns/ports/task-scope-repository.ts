@@ -46,6 +46,7 @@ export type RecoverStaleRunningTasksInput = Readonly<{
 export interface TaskScopeRepository {
   create(input: CreateTaskScopeInput): Promise<ArtifactScope>
   findScope(scopeId: ScopeId): Promise<ArtifactScope | undefined>
+  assertCurrentGeneration(scopeId: ScopeId): Promise<void>
   findTask(taskId: string): Promise<StoredTask | undefined>
   listRecoverableTasks(projectId: ProjectId): Promise<readonly StoredTask[]>
   recoverStaleRunningTasks(input: RecoverStaleRunningTasksInput): Promise<readonly StoredTask[]>

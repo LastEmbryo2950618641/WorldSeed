@@ -11,6 +11,7 @@ export type ModelProfile = Readonly<{
   baseUrl: string
   model: string
   credentialRef: string
+  contextWindowTokens: number
   apiKey: string
   hasApiKey: boolean
   thinkingModeEnabled: boolean
@@ -124,6 +125,7 @@ export function ModelConfigurationDialog({ profiles, activeProfileId, onClose, o
       return "请输入有效的 Base URL"
     }
     if (requireModel && profile.model.trim().length === 0) return "请选择模型"
+    if (!Number.isInteger(profile.contextWindowTokens) || profile.contextWindowTokens <= 0 || profile.contextWindowTokens > 2_000_000) return "最大上下文必须是 1 到 2,000,000 之间的整数"
     if (profile.apiKey.trim().length === 0 && !profile.hasApiKey) return "请输入 API Key"
     return undefined
   }
@@ -135,6 +137,7 @@ export function ModelConfigurationDialog({ profiles, activeProfileId, onClose, o
       baseUrl: "https://api.deepseek.com",
       model: "",
       credentialRef: `model-profile:${crypto.randomUUID()}`,
+      contextWindowTokens: 1_000_000,
       apiKey: "",
       hasApiKey: false,
       thinkingModeEnabled: true,
@@ -249,6 +252,10 @@ export function ModelConfigurationDialog({ profiles, activeProfileId, onClose, o
                 </select>
                 <button type="button" title="重新获取 DeepSeek 模型列表" disabled={(!selectedProfile.hasApiKey && selectedProfile.apiKey.trim().length === 0) || selectedCatalog?.status === "loading"} onClick={() => { void loadDeepSeekModels(selectedProfile) }}><RefreshCw size={14} /></button>
               </div> : <input value={selectedProfile.model} onChange={(event) => { updateSelected({ model: event.target.value }); }} placeholder="输入模型名称" spellCheck={false} />}
+            </label>
+            <label className="model-field">
+              <span>最大上下文<small>该模型单次请求支持的上下文容量，是压缩计算的唯一来源</small></span>
+              <input type="number" value={selectedProfile.contextWindowTokens} min={1} max={2_000_000} step={1000} onChange={(event) => { updateSelected({ contextWindowTokens: Number(event.target.value) }); }} />
             </label>
             <div className="model-field">
               <span>深度思考<small>控制 DeepSeek 是否返回原生 reasoning_content</small></span>

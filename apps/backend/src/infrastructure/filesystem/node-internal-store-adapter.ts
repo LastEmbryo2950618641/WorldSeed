@@ -1,7 +1,11 @@
 import { access, mkdir, readFile, realpath, writeFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 
-import { idSchema, type ProjectId } from "@worldseed/contracts"
+import {
+  idSchema,
+  storedObjectReferenceIdSchema,
+  type ProjectId,
+} from "@worldseed/contracts"
 
 import type {
   InternalProjectStore,
@@ -29,6 +33,9 @@ export class NodeInternalStoreAdapter implements InternalStorePort {
       mkdir(store.indexesRef, { recursive: true }),
       mkdir(store.modelCacheRef, { recursive: true }),
       mkdir(store.recoveryRef, { recursive: true }),
+      mkdir(store.historyGitRef, { recursive: true }),
+      mkdir(store.historyCheckoutRef, { recursive: true }),
+      mkdir(store.historyRecoveryRef, { recursive: true }),
     ])
     return { ...store, internalStoreRef: await realpath(store.internalStoreRef) }
   }
@@ -54,6 +61,9 @@ export class NodeInternalStoreAdapter implements InternalStorePort {
       access(expected.indexesRef),
       access(expected.modelCacheRef),
       access(expected.recoveryRef),
+      access(expected.historyGitRef),
+      access(expected.historyCheckoutRef),
+      access(expected.historyRecoveryRef),
     ])
     return { ...expected, internalStoreRef: internalRoot }
   }
@@ -63,7 +73,7 @@ export class NodeInternalStoreAdapter implements InternalStorePort {
     sourceId: string,
     content: string,
   ): Promise<string> {
-    idSchema.parse(sourceId)
+    storedObjectReferenceIdSchema.parse(sourceId)
     const path = join(store.documentsRef, `${sourceId}.md`)
     assertContained(store.documentsRef, path)
     try {
@@ -103,6 +113,9 @@ function buildStore(applicationDataRoot: string, projectId: ProjectId): Internal
     indexesRef: join(internalStoreRef, "indexes"),
     modelCacheRef: join(internalStoreRef, "model-cache"),
     recoveryRef: join(internalStoreRef, "recovery"),
+    historyGitRef: join(internalStoreRef, "history.git"),
+    historyCheckoutRef: join(internalStoreRef, "history-checkout"),
+    historyRecoveryRef: join(internalStoreRef, "emergency-recovery"),
   }
 }
 

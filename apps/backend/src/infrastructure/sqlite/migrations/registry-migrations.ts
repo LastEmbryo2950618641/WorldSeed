@@ -35,4 +35,7 @@ export const registryMigrations = Object.freeze([
     `ALTER TABLE model_profiles ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'high'`,
     `ALTER TABLE model_profiles ADD COLUMN json_mode_enabled INTEGER NOT NULL DEFAULT 0`,
   ]),
+  defineSqlMigration<RegistryDatabase>(4, "r004_model_context_window", [
+    `ALTER TABLE model_profiles ADD COLUMN context_window_tokens INTEGER NOT NULL DEFAULT 1000000`,
+  ]),
 ])

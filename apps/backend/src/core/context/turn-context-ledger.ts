@@ -32,6 +32,12 @@ export type RecordContextReadInput = Readonly<{
   rejectedReadIds: readonly Id[]
 }>
 
+export type InheritedContextRead = Readonly<{
+  readId: Id
+  visibility: "committed" | "pending"
+  reason: string
+}>
+
 export class TurnContextLedgerError extends Error {
   public constructor(
     public readonly code: "duplicate_segment" | "invalid_sequence" | "budget_exhausted" | "unread_citation" | "invalid_read_segment",
@@ -135,6 +141,27 @@ export function recordContextRead(context: TurnContext, input: RecordContextRead
       ),
       rejectedReadIds: appendUnique(withSegments.readLedger.rejectedReadIds, input.rejectedReadIds),
       readReasons: { ...withSegments.readLedger.readReasons, ...reasons },
+    },
+  }
+}
+
+export function inheritContextReads(
+  context: TurnContext,
+  reads: readonly InheritedContextRead[],
+): TurnContext {
+  const committedReadIds = reads.filter((read) => read.visibility === "committed").map((read) => read.readId)
+  const visiblePendingIds = reads.filter((read) => read.visibility === "pending").map((read) => read.readId)
+  return {
+    ...context,
+    readLedger: {
+      ...context.readLedger,
+      committedReadIds: appendUnique(context.readLedger.committedReadIds, committedReadIds),
+      visiblePendingIds: appendUnique(context.readLedger.visiblePendingIds, visiblePendingIds),
+      returnedReadIds: appendUnique(context.readLedger.returnedReadIds, reads.map((read) => read.readId)),
+      readReasons: {
+        ...context.readLedger.readReasons,
+        ...Object.fromEntries(reads.map((read) => [read.readId, read.reason])),
+      },
     },
   }
 }

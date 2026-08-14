@@ -1,7 +1,10 @@
 import { z } from "zod"
 
-const modelReadEvidenceReferenceSchema = z.string().regex(/^read-[1-9][0-9]*$/u)
-const modelGraphReferenceSchema = z.string().regex(/^(?:node|link)-[1-9][0-9]*$/u)
+import { verificationProbeDescriptorSchema } from "./reads.js"
+
+const modelReadEvidenceReferenceSchema = z.string().regex(/^(?:(?:read-[1-9][0-9]*)|(?:evidence_[1-9][0-9]*))$/u)
+const modelGraphReferenceSchema = z.string().regex(/^(?:(?:node|link)(?:-|_)[1-9][0-9]*|local:[a-zA-Z0-9_.-]+)$/u)
+const modelSourceReferenceSchema = z.string().regex(/^source(?:-|_)[1-9][0-9]*$/u)
 
 const modelReadQuerySchema = z.object({
   exactKeys: z.array(z.string().min(1)).optional(),
@@ -11,12 +14,15 @@ const modelReadQuerySchema = z.object({
   maxCandidates: z.number().int().positive().optional(),
   maxDepth: z.number().int().nonnegative().optional(),
   sourceKinds: z.array(z.enum(["graph", "revision", "source", "rule", "reference"])).optional(),
+  sourceIds: z.array(modelSourceReferenceSchema).optional(),
+  sourceBoundary: z.enum(["start", "end"]).optional(),
 }).strict()
 
 export const modelReadRequestSchema = z.object({
   reason: z.string().min(1),
   expectedEvidence: z.string().min(1),
   query: modelReadQuerySchema.optional(),
+  verificationProbe: verificationProbeDescriptorSchema.optional(),
 }).strict()
 
 export const modelDependencySchema = z.object({

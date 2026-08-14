@@ -16,6 +16,7 @@ export type DeepSeekModelSelection = Readonly<{
   baseUrl: string
   model: string
   apiKey: string
+  contextWindowTokens: number
   thinkingModeEnabled?: boolean
   reasoningEffort?: "low" | "high" | "max"
   jsonModeEnabled?: boolean
@@ -46,6 +47,7 @@ export function createModelFromSelection(
     baseUrl: selection.baseUrl.trim(),
     model: selection.model.trim(),
     apiKeyRef: "turn-api-key",
+    contextWindowTokens: selection.contextWindowTokens,
     thinkingModeEnabled: selection.thinkingModeEnabled ?? defaultDeepSeekRuntimeConfig.thinkingModeEnabled,
     reasoningEffort: selection.reasoningEffort ?? defaultDeepSeekRuntimeConfig.reasoningEffort,
     jsonModeEnabled: selection.jsonModeEnabled ?? defaultDeepSeekRuntimeConfig.jsonModeEnabled,

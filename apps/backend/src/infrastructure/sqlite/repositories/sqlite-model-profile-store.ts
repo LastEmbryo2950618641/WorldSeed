@@ -7,8 +7,8 @@ import type { RegistryDatabase } from "../database-types.js"
 import { runtimeLog } from "../../diagnostics/index.js"
 
 const defaultProfiles = Object.freeze([
-  { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", credentialRef: "model-profile:deepseek-v4-flash", thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false },
-  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-pro", credentialRef: "model-profile:deepseek-v4-pro", thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false },
+  { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", credentialRef: "model-profile:deepseek-v4-flash", contextWindowTokens: 1_000_000, thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false },
+  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-pro", credentialRef: "model-profile:deepseek-v4-pro", contextWindowTokens: 1_000_000, thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false },
 ] satisfies readonly ModelProfile[])
 
 export class SqliteModelProfileStore implements ModelProfileStorePort {
@@ -39,6 +39,7 @@ export class SqliteModelProfileStore implements ModelProfileStorePort {
         base_url: profile.baseUrl,
         model: profile.model,
         credential_ref: profile.credentialRef,
+        context_window_tokens: profile.contextWindowTokens,
         is_active: profile.id === input.activeProfileId ? 1 : 0,
         position,
         created_at: timestamp,
@@ -63,6 +64,7 @@ function mapProfile(row: RegistryDatabase["model_profiles"]): ModelProfile {
     baseUrl: row.base_url,
     model: row.model,
     credentialRef: row.credential_ref,
+    contextWindowTokens: row.context_window_tokens,
     thinkingModeEnabled: row.thinking_mode_enabled === 1,
     reasoningEffort: row.reasoning_effort === "max" ? "max" : row.reasoning_effort === "low" ? "low" : "high",
     jsonModeEnabled: row.json_mode_enabled === 1,

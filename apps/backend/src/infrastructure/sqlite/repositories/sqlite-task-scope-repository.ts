@@ -1,4 +1,4 @@
-import type { Kysely } from "kysely"
+import type { Kysely, Selectable } from "kysely"
 
 import {
   aiPhaseSchema,
@@ -23,7 +23,7 @@ export class SqliteTaskScopeRepository implements TaskScopeRepository {
 
   public async create(input: CreateTaskScopeInput): Promise<ArtifactScope> {
     const project = await this.database.selectFrom("projects")
-      .select("committed_sequence")
+      .select(["committed_sequence", "active_generation"])
       .where("id", "=", input.projectId)
       .executeTakeFirstOrThrow()
 
@@ -35,6 +35,8 @@ export class SqliteTaskScopeRepository implements TaskScopeRepository {
         turn_id: input.turnId,
         visibility: "pending",
         base_committed_sequence: project.committed_sequence,
+        base_generation: project.active_generation,
+        committed_sequence: null,
         reason: input.reason,
         created_at: input.createdAtMs,
         retired_at: null,
@@ -71,6 +73,20 @@ export class SqliteTaskScopeRepository implements TaskScopeRepository {
     return row === undefined ? undefined : mapScope(row)
   }
 
+  public async assertCurrentGeneration(scopeId: ScopeId): Promise<void> {
+    const scope = await this.database.selectFrom("artifact_scopes")
+      .innerJoin("projects", "projects.id", "artifact_scopes.project_id")
+      .select([
+        "artifact_scopes.base_generation as baseGeneration",
+        "projects.active_generation as activeGeneration",
+      ])
+      .where("artifact_scopes.id", "=", scopeId)
+      .executeTakeFirstOrThrow()
+    if (scope.baseGeneration !== scope.activeGeneration) {
+      throw new Error(`Task belongs to an inactive history generation and must be restored from its history checkpoint: ${scopeId}`)
+    }
+  }
+
   public async findTask(taskId: string): Promise<StoredTask | undefined> {
     const row = await this.database.selectFrom("tasks").selectAll().where("id", "=", taskId).executeTakeFirst()
     return row === undefined ? undefined : mapTask(row)
@@ -89,7 +105,7 @@ export class SqliteTaskScopeRepository implements TaskScopeRepository {
   public async recoverStaleRunningTasks(input: RecoverStaleRunningTasksInput): Promise<readonly StoredTask[]> {
     const runningQuery = this.database.selectFrom("tasks").selectAll()
       .where("project_id", "=", input.projectId)
-      .where("status", "=", "running")
+      .where("status", "in", ["running", "committing"])
     const rows = input.activeTaskIds.length === 0
       ? await runningQuery.execute()
       : await runningQuery.where("id", "not in", [...input.activeTaskIds]).execute()
@@ -114,7 +130,7 @@ export class SqliteTaskScopeRepository implements TaskScopeRepository {
   }
 }
 
-function mapScope(row: ArtifactScopeRow): ArtifactScope {
+function mapScope(row: Selectable<ArtifactScopeRow>): ArtifactScope {
   return {
     scopeId: row.id,
     projectId: row.project_id,

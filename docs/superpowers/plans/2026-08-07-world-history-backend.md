@@ -1,5 +1,7 @@
 # World History Backend Implementation Plan
 
+> **历史实施计划快照：** 本文保留制定当时的代码判断，其中部分“未实现”结论已经过时。当前功能状态只以 [设计与实施状态](../../implementation-status.md) 为准；不得依据本文的任务勾选或历史描述宣称功能已经完成。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在不改变现有 AI 阶段顺序、scope 提交语义和章节发布结果的前提下，实现推演历史、自动与手动保存、返回上一轮、世界线分叉、历史恢复和保留上限。

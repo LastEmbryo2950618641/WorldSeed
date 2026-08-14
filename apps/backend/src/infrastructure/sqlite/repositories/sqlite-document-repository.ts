@@ -7,7 +7,7 @@ import type {
   DocumentVersion,
   SourceUnit,
 } from "../../../application/index.js"
-import type { DocumentVersionRow, ProjectDatabase } from "../database-types.js"
+import type { DocumentVersionRow, ProjectDatabase, SourceUnitRow } from "../database-types.js"
 
 export class SqliteDocumentRepository implements DocumentRepository {
   public constructor(private readonly database: Kysely<ProjectDatabase>) {}
@@ -42,9 +42,15 @@ export class SqliteDocumentRepository implements DocumentRepository {
       sequence_no: unit.sequence,
       content_ref: unit.contentRef,
       digest: unit.digest,
-      settlement_status: unit.settlementStatus,
       created_at: unit.createdAtMs,
     }))).executeTakeFirstOrThrow()
+  }
+
+  public async listSourceUnits(projectId: ProjectId, sourceId: string): Promise<readonly SourceUnit[]> {
+    const rows = await this.database.selectFrom("source_units").selectAll()
+      .where("project_id", "=", projectId).where("source_id", "=", sourceId)
+      .orderBy("sequence_no").execute()
+    return rows.map(mapSourceUnit)
   }
 
   public async findVersion(
@@ -64,20 +70,22 @@ export class SqliteDocumentRepository implements DocumentRepository {
       }
     }
 
-    const committed = await this.database.selectFrom("document_versions").selectAll()
-      .where("project_id", "=", projectId)
-      .where("source_id", "=", sourceId)
-      .where("visibility", "=", "committed")
+    const committed = await this.database.selectFrom("active_document_heads")
+      .innerJoin("document_versions", "document_versions.id", "active_document_heads.document_version_id")
+      .selectAll("document_versions")
+      .where("active_document_heads.project_id", "=", projectId)
+      .where("document_versions.source_id", "=", sourceId)
       .executeTakeFirst()
     return committed === undefined ? undefined : mapDocumentVersion(committed)
   }
 
   public async listCommittedChapters(projectId: ProjectId): Promise<readonly DocumentVersion[]> {
-    const rows = await this.database.selectFrom("document_versions").selectAll()
-      .where("project_id", "=", projectId)
-      .where("visibility", "=", "committed")
-      .orderBy("created_at")
-      .orderBy("id")
+    const rows = await this.database.selectFrom("active_document_heads")
+      .innerJoin("document_versions", "document_versions.id", "active_document_heads.document_version_id")
+      .selectAll("document_versions")
+      .where("active_document_heads.project_id", "=", projectId)
+      .orderBy("document_versions.created_at")
+      .orderBy("document_versions.id")
       .execute()
     return rows.map(mapDocumentVersion)
   }
@@ -110,6 +118,18 @@ function mapDocumentVersion(row: DocumentVersionRow): DocumentVersion {
     publishPath: row.publish_path,
     digest: row.digest,
     ...(row.predecessor_source_id === null ? {} : { predecessorSourceId: row.predecessor_source_id }),
+    createdAtMs: row.created_at,
+  }
+}
+
+function mapSourceUnit(row: SourceUnitRow): SourceUnit {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    sourceId: row.source_id,
+    sequence: row.sequence_no,
+    contentRef: row.content_ref,
+    digest: row.digest,
     createdAtMs: row.created_at,
   }
 }

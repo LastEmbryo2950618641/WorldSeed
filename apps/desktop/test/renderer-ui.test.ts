@@ -2,11 +2,12 @@ import React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { defaultProjectSettings } from "@worldseed/config"
+import type { RuntimeMetricsSnapshot } from "@worldseed/contracts"
 
 import { invokeBackend } from "../src/renderer/src/api/client.js"
 import { EditorArea } from "../src/renderer/src/features/editor/EditorArea.js"
 import { RightRail } from "../src/renderer/src/features/status/RightRail.js"
-import { buildHistorySwitchingScenario, HistoryPanel } from "../src/renderer/src/features/status/HistoryPanel.js"
+import { HistoryPanel } from "../src/renderer/src/features/status/HistoryPanel.js"
 import { TaskCheckpointDialog } from "../src/renderer/src/features/status/TaskCheckpointPrototype.js"
 import { ProjectSettingsDialog } from "../src/renderer/src/features/settings/ProjectSettingsDialog.js"
 import { ModelConfigurationDialog } from "../src/renderer/src/features/settings/ModelConfigurationDialog.js"
@@ -62,6 +63,19 @@ function editorDefaults(overrides: Partial<React.ComponentProps<typeof EditorAre
     onSave: vi.fn(),
     onRun: vi.fn(),
     ...overrides,
+  }
+}
+
+function runtimeMetricsFixture(modelCalls: number, inputTokens: number, outputTokens: number, kvRate = 0): RuntimeMetricsSnapshot {
+  return {
+    taskId: "task-runtime",
+    capturedAtMs: 10,
+    metrics: [
+      { metricId: "model_calls", label: "模型调用", scope: "turn_window", unit: "count", current: modelCalls, limit: 400, cumulative: modelCalls, state: "normal", blocking: false, resettable: true, resetMode: "new_window", resetGeneration: 0, lastResetAt: null, description: "调用窗口" },
+      { metricId: "input_tokens", label: "输入 Token", scope: "turn_window", unit: "tokens", current: inputTokens, limit: null, cumulative: inputTokens, state: "fixed", blocking: false, resettable: false, resetMode: "provider_fixed", resetGeneration: 0, lastResetAt: null, description: "输入累计" },
+      { metricId: "output_tokens", label: "输出 Token", scope: "turn_window", unit: "tokens", current: outputTokens, limit: null, cumulative: outputTokens, state: "fixed", blocking: false, resettable: false, resetMode: "provider_fixed", resetGeneration: 0, lastResetAt: null, description: "输出累计" },
+      { metricId: "kv_cache_hit_rate", label: "KV 缓存命中率", scope: "task_total", unit: "ratio", current: kvRate, limit: null, cumulative: kvRate, state: "fixed", blocking: false, resettable: false, resetMode: "provider_fixed", resetGeneration: 0, lastResetAt: null, description: "缓存命中" },
+    ],
   }
 }
 
@@ -135,6 +149,40 @@ describe("renderer workbench UI contract", () => {
 })
 
 describe("right rail process UI contract", () => {
+  it("renders backend runtime descriptors instead of front-end default limits", () => {
+    const html = renderToStaticMarkup(React.createElement(RightRail, {
+      graphSlice: undefined,
+      task: {
+        handle: { taskId: "task-metrics", status: "paused" },
+        status: "paused",
+        runtimeMetrics: {
+          taskId: "task-metrics",
+          capturedAtMs: 10,
+          metrics: [{
+            metricId: "model_calls",
+            label: "模型调用",
+            scope: "turn_window",
+            unit: "count",
+            current: 7,
+            limit: 9,
+            cumulative: 17,
+            state: "warning",
+            blocking: false,
+            resettable: true,
+            resetMode: "new_window",
+            resetGeneration: 2,
+            lastResetAt: 9,
+            description: "后端额度窗口",
+          }],
+        },
+      },
+    }))
+
+    expect(html).toContain("7 / 9")
+    expect(html).toContain("累计 17")
+    expect(html).not.toContain("7 / 400")
+  })
+
   it("shows an explicit model-in-flight state before a phase result returns", () => {
     const html = renderToStaticMarkup(React.createElement(RightRail, {
       graphSlice: undefined,
@@ -154,7 +202,7 @@ describe("right rail process UI contract", () => {
 
     expect(html).toContain("已向模型发起请求")
     expect(html).toContain("等待 AI 返回结构化思考与输出")
-    expect(html).toContain("0 / 400")
+    expect(html).toContain("等待后端返回运行指标")
   })
 
   it("shows cost, KV cache hit rate, and collapsible AI panels", () => {
@@ -193,13 +241,14 @@ describe("right rail process UI contract", () => {
           startedAtMs: 1,
           finishedAtMs: 2,
         }],
+        runtimeMetrics: runtimeMetricsFixture(3, 1200, 450, 0.68),
       },
     }))
 
     expect(html).not.toContain("实际运行模型")
     expect(html).toContain("3 / 400")
-    expect(html).toContain("1.2k / 不限制")
-    expect(html).toContain("450 / 模型限制")
+    expect(html).toContain("1.2k / 只读")
+    expect(html).toContain("450 / 只读")
     expect(html).toContain("68%")
     expect(html).toContain("AI 思考")
     expect(html).toContain("AI 输出")
@@ -208,7 +257,6 @@ describe("right rail process UI contract", () => {
     expect(html).toContain("全部重置")
     expect(html).toContain("读取当前场景锚点")
     expect(html).toContain("审查正文响应")
-    expect(html).toContain("压缩动态上下文")
     expect(html).toContain("尚未进入该阶段")
   })
 
@@ -225,6 +273,7 @@ describe("right rail process UI contract", () => {
         startedAtMs: 1,
         finishedAtMs: 2,
       }],
+      runtimeMetrics: runtimeMetricsFixture(1, 100, 40),
     } as const
     const updatedTask = {
       ...baseTask,
@@ -238,16 +287,17 @@ describe("right rail process UI contract", () => {
         startedAtMs: 3,
         finishedAtMs: 4,
       }],
+      runtimeMetrics: runtimeMetricsFixture(3, 350, 100),
     } as const
 
     const initialHtml = renderToStaticMarkup(React.createElement(RightRail, { graphSlice: undefined, task: baseTask }))
     const updatedHtml = renderToStaticMarkup(React.createElement(RightRail, { graphSlice: undefined, task: updatedTask }))
 
     expect(initialHtml).toContain("1 / 400")
-    expect(initialHtml).toContain("100 / 不限制")
+    expect(initialHtml).toContain("100 / 只读")
     expect(updatedHtml).toContain("3 / 400")
-    expect(updatedHtml).toContain("350 / 不限制")
-    expect(updatedHtml).toContain("100 / 模型限制")
+    expect(updatedHtml).toContain("350 / 只读")
+    expect(updatedHtml).toContain("100 / 只读")
   })
 
   it("renders a blocked checkpoint with explicit user-controlled recovery", () => {
@@ -273,8 +323,8 @@ describe("right rail process UI contract", () => {
         }],
       },
       onClose: vi.fn(),
-      onResume: vi.fn(async () => undefined),
-      onPause: vi.fn(async () => undefined),
+      onResume: vi.fn(() => Promise.resolve()),
+      onPause: vi.fn(() => Promise.resolve()),
     }))
 
     expect(html).toContain("推演已暂停")
@@ -287,54 +337,99 @@ describe("right rail process UI contract", () => {
     expect(html).toContain("请先重置 1 项限制")
     expect(html.match(/disabled=""/gu)?.length).toBeGreaterThanOrEqual(2)
   })
+
+  it("renders finalization recovery without implying another AI request", () => {
+    const html = renderToStaticMarkup(React.createElement(TaskCheckpointDialog, {
+      task: {
+        handle: { taskId: "task-finalize", status: "awaiting_user_decision" },
+        status: "awaiting_user_decision",
+        lastPhase: "commit_review",
+        finalization: {
+          finalizationId: "finalization-1",
+          status: "scope_committed",
+          chapterPath: "章节正文/第一章 世界种子.md",
+          chapterHeading: "第一章 世界种子",
+          sourceId: "source-1",
+          contentDigest: "digest-1",
+          committedSequence: 1,
+        },
+        interruption: {
+          kind: "execution_error",
+          message: "Chapter publish failed",
+          blockedMetrics: [],
+          phase: "commit_review",
+        },
+        phaseRuns: [],
+      },
+      onClose: vi.fn(),
+      onResume: vi.fn(() => Promise.resolve()),
+      onPause: vi.fn(() => Promise.resolve()),
+    }))
+
+    expect(html).toContain("正式章节收尾 · 等待发布章节")
+    expect(html).toContain("恢复不会重新调用 AI")
+    expect(html).toContain("重试收尾步骤")
+    expect(html).toContain("committed")
+    expect(html).not.toContain("继续执行会重发当前模型请求")
+  })
 })
 
-describe("history panel prototype contract", () => {
-  it("renders timeline controls, retention status, and branch actions", () => {
+describe("history panel contract", () => {
+  it("renders persisted history controls, retention status, and branch actions", () => {
+    const projectId = "11111111-1111-4111-8111-111111111111"
+    const branchId = "21111111-1111-4111-8111-111111111111"
+    const entryId = "31111111-1111-4111-8111-111111111111"
     const html = renderToStaticMarkup(React.createElement(HistoryPanel, {
+      entries: [{
+        entryId,
+        projectId,
+        branchId,
+        kind: "manual",
+        state: "paused_checkpoint",
+        status: "ready",
+        name: "手动保存 · 码头会面前",
+        committedSequence: 7,
+        checkpointId: "41111111-1111-4111-8111-111111111111",
+        createdAtMs: 1_800_000,
+      }],
+      branches: [{
+        branchId,
+        projectId,
+        name: "主世界线",
+        status: "active",
+        historyHeadEntryId: entryId,
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      }],
+      activeBranchId: branchId,
+      selectedEntryId: entryId,
+      graphAnchorIds: [],
       retentionLimit: null,
       taskRunning: false,
       onOpenSettings: vi.fn(),
+      onOpenCheckpoint: vi.fn(),
+      onSave: vi.fn(() => Promise.resolve()),
+      onRestore: vi.fn(() => Promise.resolve()),
+      onContinueFrom: vi.fn(() => Promise.resolve()),
+      onReturnPreviousRound: vi.fn(() => Promise.resolve()),
     }))
 
     expect(html).toContain("推演历史")
-    expect(html).toContain("8 / 无上限")
+    expect(html).toContain("1 / 无上限")
     expect(html).toContain("返回上一轮")
     expect(html).toContain("手动保存 · 码头会面前")
+    expect(html).toContain("恢复后保持暂停")
+    expect(html).toContain("加载")
     expect(html).toContain("从这里继续")
-    expect(html).toContain("模拟多历史切换与继续")
-    expect(html).toContain("history-simulation-button")
+    expect(html).not.toContain("模拟多历史切换")
   })
 
-  it("keeps two resumed history branches isolated across repeated switching", () => {
-    const scenario = buildHistorySwitchingScenario("历史保存点 A", "历史保存点 B")
-    const finalStep = scenario.steps.at(-1)
-    const branchA = finalStep?.branches.find((branch) => branch.id === "branch-a")
-    const branchB = finalStep?.branches.find((branch) => branch.id === "branch-b")
-
-    expect(scenario.steps.map((step) => step.activeBranchId)).toEqual([
-      "branch-a",
-      "branch-a",
-      "branch-b",
-      "branch-b",
-      "branch-a",
-      "branch-b",
-      "branch-a",
-    ])
-    expect(branchA?.records).toEqual(["模拟 A-1 · 追查旧铜钥匙", "模拟 A-2 · 返回后继续追问"])
-    expect(branchB?.records).toEqual(["模拟 B-1 · 前往旧港"])
-    expect(branchA?.context).not.toContain("林序没有追查钥匙，而是登上前往旧港的渡船。")
-    expect(branchB?.context).not.toContain("苏禾承认她从旧桥取走了铜钥匙。")
-    expect(scenario.checks.every((check) => check.passed)).toBe(true)
-  })
-
-  it("keeps earlier simulation frames immutable after later branch work", () => {
-    const scenario = buildHistorySwitchingScenario("历史保存点 A", "历史保存点 B")
-    const branchAAfterFirstWork = scenario.steps[1]?.branches.find((branch) => branch.id === "branch-a")
-    const branchAAfterReturn = scenario.steps[4]?.branches.find((branch) => branch.id === "branch-a")
-
-    expect(branchAAfterFirstWork?.records).toEqual(["模拟 A-1 · 追查旧铜钥匙"])
-    expect(branchAAfterReturn?.records).toEqual(["模拟 A-1 · 追查旧铜钥匙", "模拟 A-2 · 返回后继续追问"])
+  it("uses the browser backend contract for real history overview and branching", async () => {
+    const overview = await invokeBackend<{ entries: readonly { entryId: string }[] }>("history.list", {})
+    const entryId = overview.entries[0]?.entryId
+    expect(entryId).toBeDefined()
+    const result = await invokeBackend<{ branch: { forkEntryId?: string } }>("history.continueFrom", { entryId })
+    expect(result.branch.forkEntryId).toBe(entryId)
   })
 })
 

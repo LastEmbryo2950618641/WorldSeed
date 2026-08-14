@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worldseed - 分步图治理原型</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      background: #eef1f3;
+      color: #26323a;
+      letter-spacing: 0;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 1120px; min-height: 100vh; background: #eef1f3; }
+    button, input { font: inherit; letter-spacing: 0; }
+    button { cursor: pointer; }
+    .app { display: grid; grid-template-rows: 34px 1fr 24px; min-height: 100vh; }
+    .menu { display: flex; align-items: center; gap: 18px; padding: 0 12px; border-bottom: 1px solid #c8cdd1; background: #f8f9fa; font-size: 12px; color: #37434b; }
+    .brand { display: flex; align-items: center; gap: 8px; margin-right: 12px; font-weight: 650; }
+    .brand-mark { display: grid; place-items: center; width: 19px; height: 19px; border-radius: 4px; background: #236b59; color: white; font-size: 11px; }
+    .menu-spacer { flex: 1; }
+    .run-state { display: flex; align-items: center; gap: 7px; color: #526069; }
+    .dot-live { width: 7px; height: 7px; border-radius: 50%; background: #2d8b70; box-shadow: 0 0 0 3px #d8eee7; }
+    .workspace { display: grid; grid-template-columns: 230px minmax(540px, 1fr) 382px; min-height: 0; }
+    .sidebar, .rail { min-height: 0; background: #f8f9fa; }
+    .sidebar { border-right: 1px solid #cfd4d8; }
+    .rail { border-left: 1px solid #cfd4d8; display: grid; grid-template-rows: 32px auto minmax(0, 1fr); }
+    .tool-title { height: 32px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; border-bottom: 1px solid #d7dbde; background: #f3f5f6; color: #4f5d65; font-size: 11px; font-weight: 650; text-transform: uppercase; }
+    .icon-button { width: 24px; height: 24px; border: 0; border-radius: 4px; background: transparent; color: #69747b; font-size: 15px; }
+    .icon-button:hover { background: #e4e8ea; color: #253138; }
+    .tree { padding: 6px 4px; font-size: 12px; }
+    .tree-row { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 7px; border-radius: 3px; white-space: nowrap; }
+    .tree-row:hover { background: #e9edef; }
+    .tree-row.indent { padding-left: 24px; }
+    .tree-row.active { background: #dce9e5; color: #1c5d4c; }
+    .chev { width: 10px; color: #7a858c; }
+    .folder { color: #b67d27; }
+    .file { color: #4d7c6d; }
+    .editor { min-width: 0; display: grid; grid-template-rows: 33px 1fr; background: white; }
+    .tabs { display: flex; align-items: end; border-bottom: 1px solid #d5d9dc; background: #f5f6f7; }
+    .tab { height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 12px; border-right: 1px solid #d5d9dc; color: #667078; font-size: 11px; }
+    .tab.active { background: white; color: #27343c; border-top: 2px solid #2c7b66; }
+    .document { overflow: auto; padding: 24px clamp(28px, 5vw, 72px); }
+    .chapter { max-width: 760px; margin: 0 auto; }
+    .chapter-kicker { color: #7a858c; font-size: 11px; }
+    h1 { margin: 9px 0 20px; color: #202d34; font-size: 24px; font-weight: 650; }
+    .chapter p { margin: 0 0 14px; color: #3f4a51; font-family: "Microsoft YaHei UI", sans-serif; font-size: 14px; line-height: 1.85; }
+    .pending-bar { display: flex; align-items: center; gap: 10px; margin: 24px 0 18px; padding: 9px 11px; border-left: 3px solid #c48928; background: #fff7e8; color: #665334; font-size: 12px; }
+    .rail-tabs { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid #d5dade; background: #f5f6f7; }
+    .rail-tab { height: 32px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #6a757c; font-size: 10.5px; }
+    .rail-tab.active { border-bottom-color: #27725f; color: #245e50; font-weight: 650; }
+    .usage { padding: 9px 11px; border-bottom: 1px solid #d9dddf; background: white; }
+    .usage-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; font-size: 11px; }
+    .usage-head strong { color: #334149; }
+    .usage-head span { color: #758088; }
+    .usage-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+    .metric { min-width: 0; padding: 6px 7px; border: 1px solid #dde1e3; border-radius: 4px; background: #fafbfb; }
+    .metric span { display: block; overflow: hidden; color: #7a858c; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+    .metric strong { display: block; margin-top: 2px; color: #2d3a41; font-family: Consolas, monospace; font-size: 11px; font-weight: 600; }
+    .progress { height: 3px; margin-top: 8px; overflow: hidden; background: #e6eaec; }
+    .progress > i { display: block; width: 61%; height: 100%; background: #2d806a; }
+    .timeline { overflow: auto; background: #fbfcfc; }
+    .stage { border-bottom: 1px solid #e0e3e5; }
+    .stage-button { width: 100%; min-height: 39px; display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 0 10px; border: 0; background: transparent; color: #3d4950; text-align: left; }
+    .stage-button:hover { background: #f0f3f4; }
+    .stage-icon { display: grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; font-size: 9px; font-weight: 700; }
+    .done { background: #d8ece5; color: #21634f; }
+    .running { background: #dbe9f3; color: #23658c; }
+    .waiting { border: 1px solid #b8c0c5; color: transparent; }
+    .warn { background: #fae8c7; color: #8d5a0d; }
+    .stage-name { min-width: 0; font-size: 11px; }
+    .stage-name strong { font-weight: 620; }
+    .stage-name small { display: block; margin-top: 2px; overflow: hidden; color: #818b91; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+    .stage-time { color: #839098; font-family: Consolas, monospace; font-size: 9.5px; }
+    .governance { background: #fff; }
+    .governance-head { min-height: 46px; border-left: 3px solid #2c806a; background: #f4f8f7; }
+    .governance-head .stage-name strong { color: #225f50; font-size: 11.5px; }
+    .step-list { padding: 2px 0 4px 20px; border-top: 1px solid #e0e6e3; background: #fcfdfd; }
+    .step { position: relative; }
+    .step::before { position: absolute; top: 0; bottom: 0; left: 6px; width: 1px; background: #d7ddda; content: ""; }
+    .step:last-child::before { bottom: 19px; }
+    .step .stage-button { min-height: 38px; padding-left: 0; grid-template-columns: 14px minmax(0, 1fr) auto; }
+    .step .stage-icon { z-index: 1; width: 13px; height: 13px; border: 2px solid #fcfdfd; }
+    .step.active .stage-button { background: #eaf3f0; }
+    .step-detail { margin: 0 9px 9px 20px; border: 1px solid #cdd8d4; border-radius: 4px; background: white; }
+    .detail-summary { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid #e0e5e3; }
+    .detail-summary div { padding: 7px 8px; border-right: 1px solid #e0e5e3; }
+    .detail-summary div:last-child { border-right: 0; }
+    .detail-summary span { display: block; color: #818b91; font-size: 9px; }
+    .detail-summary strong { display: block; margin-top: 2px; font-family: Consolas, monospace; font-size: 10.5px; font-weight: 600; }
+    details { border-bottom: 1px solid #e5e8e9; }
+    details:last-child { border-bottom: 0; }
+    summary { display: flex; align-items: center; gap: 6px; padding: 7px 8px; color: #4d5960; font-size: 10px; cursor: pointer; list-style: none; }
+    summary::before { color: #7c878d; content: "›"; transform: rotate(0); }
+    details[open] summary::before { transform: rotate(90deg); }
+    .detail-body { max-height: 128px; overflow: auto; padding: 0 8px 8px 20px; color: #647078; font-family: Consolas, "Microsoft YaHei UI", monospace; font-size: 9.5px; line-height: 1.55; }
+    .capacity-card { margin: 0 9px 9px 20px; border: 1px solid #e0d3bb; border-radius: 4px; background: #fffaf1; }
+    .capacity-title { display: flex; align-items: center; justify-content: space-between; padding: 7px 8px; border-bottom: 1px solid #eadfc9; color: #66563b; font-size: 10px; }
+    .capacity-row { display: grid; grid-template-columns: 62px 1fr auto; align-items: center; gap: 7px; padding: 6px 8px; font-size: 9.5px; }
+    .capacity-row + .capacity-row { border-top: 1px solid #efe6d7; }
+    .capacity-row code { color: #39474e; }
+    .before { color: #a15e28; }
+    .after { color: #27705c; }
+    .link-button { padding: 0; border: 0; background: transparent; color: #276d92; font-size: 9.5px; }
+    .rail-footer { padding: 7px 10px; border-top: 1px solid #d7dcdf; background: #f5f7f7; color: #667279; font-size: 9.5px; }
+    .statusbar { display: flex; align-items: center; gap: 16px; padding: 0 10px; border-top: 1px solid #c8cdd1; background: #f4f6f7; color: #69757c; font-size: 10px; }
+    .statusbar .right { margin-left: auto; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="menu">
+      <div class="brand"><span class="brand-mark">W</span>Worldseed 创作台</div>
+      <span>文件</span><span>编辑</span><span>推演</span><span>视图</span><span>帮助</span>
+      <div class="menu-spacer"></div>
+      <div class="run-state"><span class="dot-live"></span>第 21 轮推演中</div>
+    </header>
+
+    <main class="workspace">
+      <aside class="sidebar">
+        <div class="tool-title"><span>项目</span><button class="icon-button" title="更多操作">⋯</button></div>
+        <div class="tree">
+          <div class="tree-row"><span class="chev">⌄</span><span class="folder">▰</span>世界推演规则</div>
+          <div class="tree-row indent"><span class="chev">›</span><span class="folder">▰</span>基础规则</div>
+          <div class="tree-row indent"><span class="chev">›</span><span class="folder">▰</span>用户规则</div>
+          <div class="tree-row"><span class="chev">›</span><span class="folder">▰</span>设定集</div>
+          <div class="tree-row"><span class="chev">›</span><span class="folder">▰</span>参考文件</div>
+          <div class="tree-row"><span class="chev">›</span><span class="folder">▰</span>表现输出</div>
+          <div class="tree-row"><span class="chev">⌄</span><span class="folder">▰</span>章节正文</div>
+          <div class="tree-row indent"><span class="file">M↓</span>第二十章 灰船靠岸.md</div>
+          <div class="tree-row indent active"><span class="file">M↓</span>第二十一章 醒来的路线.md</div>
+        </div>
+      </aside>
+
+      <section class="editor">
+        <div class="tabs">
+          <div class="tab">第二十章 灰船靠岸.md</div>
+          <div class="tab active">第二十一章 醒来的路线.md <span>×</span></div>
+        </div>
+        <div class="document">
+          <article class="chapter">
+            <div class="chapter-kicker">章节正文 / pending 预览</div>
+            <h1>第二十一章 醒来的路线</h1>
+            <div class="pending-bar"><strong>正在治理世界图</strong><span>正文已生成，完成图治理与提交复核后发布。</span></div>
+            <p>天蒙蒙亮的时候，旅人在柳渡旅社二楼205房间的床上醒过来。窗户正对着镇外的田野，雾还没有散尽，远处的田埂像一条条浸了水的灰线。</p>
+            <p>他坐起来，伸手拿过放在椅子上的背包。那本深绿色的簿子、空信封和三张车票都还在。昨晚没有关闭的圆圈，也仍留在柳渡镇口的石桥上。</p>
+            <p>走到镇口时，太阳还没完全升起来。他在站牌下发现一张被露水打湿的纸条，上面写着四个字：老渡口见。</p>
+            <p>他没有立即出发，而是先把纸条夹进簿子里，重新确认自己已经走过的路线。今天的下一步，去老渡口。</p>
+          </article>
+        </div>
+      </section>
+
+      <aside class="rail">
+        <div class="rail-tabs">
+          <button class="rail-tab active">推演流程</button>
+          <button class="rail-tab">世界图</button>
+          <button class="rail-tab">自洽演化</button>
+          <button class="rail-tab">推演历史</button>
+        </div>
+
+        <section class="usage">
+          <div class="usage-head"><strong>本轮消耗</strong><span>9 / 16 阶段</span></div>
+          <div class="usage-grid">
+            <div class="metric"><span>输入 Token</span><strong>281.4k</strong></div>
+            <div class="metric"><span>输出 Token</span><strong>38.7k</strong></div>
+            <div class="metric"><span>KV 命中率</span><strong>91.8%</strong></div>
+            <div class="metric"><span>已用时间</span><strong>06:42</strong></div>
+          </div>
+          <div class="progress"><i></i></div>
+        </section>
+
+        <div class="timeline">
+          <div class="stage"><button class="stage-button"><span class="stage-icon done">✓</span><span class="stage-name"><strong>理解用户输入</strong><small>行动、场景和表现要求已识别</small></span><span class="stage-time">21s</span></button></div>
+          <div class="stage"><button class="stage-button"><span class="stage-icon done">✓</span><span class="stage-name"><strong>加载规则与资料</strong><small>图 96 / Source 28</small></span><span class="stage-time">2m 14s</span></button></div>
+          <div class="stage"><button class="stage-button"><span class="stage-icon done">✓</span><span class="stage-name"><strong>撰写正文</strong><small>2,438 字 · pending</small></span><span class="stage-time">1m 09s</span></button></div>
+          <div class="stage"><button class="stage-button"><span class="stage-icon done">✓</span><span class="stage-name"><strong>连续性依赖审计</strong><small>2 个场景 · 当前地点连续</small></span><span class="stage-time">37s</span></button></div>
+
+          <section class="stage governance">
+            <button class="stage-button governance-head" id="governanceToggle">
+              <span class="stage-icon running">●</span>
+              <span class="stage-name"><strong>图治理</strong><small>结构已收敛，正在结算时空与历史</small></span>
+              <span class="stage-time">4 / 6⌃</span>
+            </button>
+            <div class="step-list" id="governanceSteps">
+              <div class="step">
+                <button class="stage-button step-toggle" data-target="structureDetail"><span class="stage-icon done">✓</span><span class="stage-name"><strong>候选结构规划</strong><small>复用 8 · 创建 5 · 编辑 4 · 归档 0</small></span><span class="stage-time">38s</span></button>
+                <div class="step-detail hidden" id="structureDetail">
+                  <div class="detail-summary"><div><span>输入</span><strong>63.4k</strong></div><div><span>输出</span><strong>4.8k</strong></div><div><span>KV</span><strong>92.1%</strong></div></div>
+                  <details><summary>AI 思考</summary><div class="detail-body">需要复用旅人、柳渡旅社、镇口石桥与圆圈线索；为新出现的纸条和“前往老渡口”当前行动建立最小局部表达，同时保留灰船已归还这一既有状态。</div></details>
+                  <details><summary>AI 输出</summary><div class="detail-body">候选修改 17 项。影响 2 个现有局部和 1 个新前沿。所有新对象使用稳定 proposalRef，尚未提交到正式图。</div></details>
+                </div>
+              </div>
+
+              <div class="step">
+                <button class="stage-button step-toggle" data-target="capacityDetail"><span class="stage-icon done">✓</span><span class="stage-name"><strong>容量检查</strong><small>发现 2 个超限热点</small></span><span class="stage-time">0.1s</span></button>
+                <div class="capacity-card hidden" id="capacityDetail">
+                  <div class="capacity-title"><strong>运行检查 · 第 1 轮</strong><span>入/出上限 12</span></div>
+                  <div class="capacity-row"><code>node_26</code><span><span class="before">12 入 / 17 出</span> → <span class="after">12 入 / 12 出</span></span><button class="link-button">在图中查看</button></div>
+                  <div class="capacity-row"><code>node_59</code><span><span class="before">14 入 / 2 出</span> → <span class="after">12 入 / 2 出</span></span><button class="link-button">在图中查看</button></div>
+                </div>
+              </div>
+
+              <div class="step">
+                <button class="stage-button step-toggle" data-target="rewriteDetail"><span class="stage-icon done">✓</span><span class="stage-name"><strong>热点局部重构</strong><small>只修改 2 个热点邻域 · 7 项补丁</small></span><span class="stage-time">42s</span></button>
+                <div class="step-detail hidden" id="rewriteDetail">
+                  <div class="detail-summary"><div><span>输入</span><strong>71.2k</strong></div><div><span>输出</span><strong>3.1k</strong></div><div><span>证据</span><strong>19</strong></div></div>
+                  <details><summary>AI 思考</summary><div class="detail-body">将主角连续行程的多条直接连接收束到既有行程聚合局部，并保留下一层章节和原文返回路径；旅社局部合并重复经营入口。</div></details>
+                  <details><summary>AI 输出</summary><div class="detail-body">返回 7 项局部补丁，没有重新生成其余候选结构。补丁应用后由代码重新计算容量。</div></details>
+                </div>
+              </div>
+
+              <div class="step">
+                <button class="stage-button step-toggle" data-target="recheckDetail"><span class="stage-icon done">✓</span><span class="stage-name"><strong>容量复检</strong><small>223 节点 · 319 连接 · 0 超限</small></span><span class="stage-time">0.1s</span></button>
+                <div class="capacity-card hidden" id="recheckDetail"><div class="capacity-title"><strong>运行检查 · 已通过</strong><span>无超限节点</span></div><div class="capacity-row"><code>候选图</code><span><span class="after">最大 12 入 / 12 出</span></span><button class="link-button">查看热点</button></div></div>
+              </div>
+
+              <div class="step active">
+                <button class="stage-button step-toggle" data-target="spacetimeDetail"><span class="stage-icon running">●</span><span class="stage-name"><strong>时空与历史结算</strong><small>场景 1 / 2 · 修改 11 / 17</small></span><span class="stage-time">18s</span></button>
+                <div class="step-detail" id="spacetimeDetail">
+                  <div class="detail-summary"><div><span>输入</span><strong>76.8k</strong></div><div><span>输出</span><strong>流式</strong></div><div><span>KV</span><strong>93.4%</strong></div></div>
+                  <details open><summary>AI 思考</summary><div class="detail-body">当前场景承接柳渡旅社 205 房间的清晨状态；移动到镇口石桥必须保存地点过渡，纸条出现于镇口候车亭，不能覆盖圆圈仍未关闭的当前事实。</div></details>
+                  <details><summary>AI 输出</summary><div class="detail-body">正在形成场景锚点、前置路径、当前入口与历史返回引用。该阶段不会重新生成图结构。</div></details>
+                </div>
+              </div>
+
+              <div class="step"><button class="stage-button"><span class="stage-icon waiting">○</span><span class="stage-name"><strong>查询投影设计</strong><small>等待稳定的时空结算</small></span><span class="stage-time">--</span></button></div>
+              <div class="step"><button class="stage-button"><span class="stage-icon waiting">○</span><span class="stage-name"><strong>整体治理审核</strong><small>连续性、可发现性、简洁性与原文返回</small></span><span class="stage-time">--</span></button></div>
+            </div>
+          </section>
+
+          <div class="stage"><button class="stage-button"><span class="stage-icon waiting">○</span><span class="stage-name"><strong>正文结算复核</strong><small>等待图治理审核</small></span><span class="stage-time">--</span></button></div>
+          <div class="stage"><button class="stage-button"><span class="stage-icon waiting">○</span><span class="stage-name"><strong>前沿结算</strong><small>等待</small></span><span class="stage-time">--</span></button></div>
+          <div class="stage"><button class="stage-button"><span class="stage-icon waiting">○</span><span class="stage-name"><strong>提交复核</strong><small>正文与图统一提交</small></span><span class="stage-time">--</span></button></div>
+          <div class="rail-footer">当前检查点：时空与历史结算 · pending scope 保持可恢复</div>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="statusbar"><span>WorldseedAcceptance-20260811</span><span>UTF-8</span><span>LF</span><span>Markdown</span><span class="right">图治理 · pending · DeepSeek Flash</span></footer>
+  </div>
+
+  <script>
+    document.querySelectorAll('.step-toggle').forEach((button) => {
+      button.addEventListener('click', () => {
+        const target = document.getElementById(button.dataset.target)
+        if (target) target.classList.toggle('hidden')
+      })
+    })
+    document.getElementById('governanceToggle').addEventListener('click', () => {
+      document.getElementById('governanceSteps').classList.toggle('hidden')
+    })
+  </script>
+</body>
+</html>

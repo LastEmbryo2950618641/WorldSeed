@@ -1,5 +1,7 @@
 # Worldseed V1 编码前冻结基线
 
+> 本文冻结的是 V1 的目标契约和参数基线，不表示 V1 已经实现或验收完成。当前代码与测试状态以 [设计与实施状态](implementation-status.md) 为准。
+
 ## 1. 文档状态
 
 本文是进入 V1 编码前的冻结基线，冻结前面六项实现前置决策：
@@ -165,7 +167,7 @@ type PhaseRequestEnvelope = {
 
 阶段结果必须通过对应 Zod Schema；`request_read` 不增加事实权限，只有检索真实返回后才能追加到 `TurnContext`。修复 JSON 结构最多两次，超过后任务进入 `model_failure` 并保留 pending 状态。
 
-模型引用只允许本次请求映射出的 `read-*`、`node-*`、`link-*` 和当前 artifact声明的 `local:*`。实现不得提供 `owner-*`、`id-*`等兜底别名，也不得把出现规划中的数量或动作解释为图治理的代码级上限；图的创建、复用、编辑、重构和归档方案由 AI自审阶段决定。
+模型引用只允许当前模型可见输入中的 `evidence_*`、`node_*`、`link_*` 永久 ID 和当前 artifact 声明的 `local:*`。实现不得提供兜底别名，也不得把出现规划中的数量或动作解释为图治理的代码级上限；图的创建、复用、编辑、重构和归档方案由 AI 自审阶段决定。
 
 Zod Schema 的唯一来源为 `packages/contracts` 和 `packages/prompt-contracts`，禁止在 Renderer、应用用例或 DeepSeek 适配器中重复声明。
 
@@ -211,7 +213,7 @@ Zod Schema 的唯一来源为 `packages/contracts` 和 `packages/prompt-contract
 | `link_heads` | `project_id`, `scope_key`, `source_scope_id`, `link_id`, `revision_id`, `visibility`, `effective_at`, `digest` | `(project_id, scope_key, link_id)` 唯一 |
 | `graph_revisions` | `id`, `project_id`, `scope_id`, `target_kind`, `target_id`, `operation`, `before_json`, `after_json`, `reason`, `evidence_ids_json`, `created_at` | `(project_id, target_kind, target_id, created_at)` |
 | `document_versions` | `id`, `project_id`, `scope_id`, `source_id`, `chapter_id`, `visibility`, `content_ref`, `heading`, `publish_path`, `digest`, `predecessor_source_id`, `created_at` | `(project_id, source_id)` 唯一，`(project_id, chapter_id, visibility)` |
-| `source_units` | `id`, `project_id`, `source_id`, `sequence_no`, `content_ref`, `digest`, `settlement_status`, `created_at` | `(source_id, sequence_no)` 唯一 |
+| `source_units` | `id`, `project_id`, `source_id`, `sequence_no`, `content_ref`, `digest`, `created_at` | `(source_id, sequence_no)` 唯一；结算状态只以 `settlement_records` 为准 |
 | `settlement_records` | `id`, `project_id`, `scope_id`, `source_unit_id`, `graph_refs_json`, `reason`, `status`, `digest`, `created_at` | `(scope_id, source_unit_id)` |
 | `scene_spacetime_bindings` | `id`, `project_id`, `scope_id`, `source_id`, `scene_index`, `scene_anchor_id`, `source_unit_indexes_json`, `temporal_reference_refs_json`, `time_anchor_refs_json`, `spatial_reference_refs_json`, `location_anchor_refs_json`, `predecessor_scene_indexes_json`, `predecessor_scene_refs_json`, `transition_path_refs_json`, `correspondence_refs_json`, `reason`, `self_review`, `visibility`, `digest`, `created_at` | `(scope_id, scene_index)` 唯一，`(scope_id, scene_anchor_id)`，`(project_id, visibility)` |
 | `graph_revision_spacetime` | `id`, `project_id`, `scope_id`, `graph_revision_id`, `effect_disposition`, `effective_scene_binding_ids_json`, `effective_existing_scene_refs_json`, `current_entry_refs_json`, `predecessor_revision_required`, `predecessor_revision_ids_json`, `historical_return_refs_json`, `reason`, `self_review`, `visibility`, `digest`, `created_at` | `(scope_id, graph_revision_id)` 唯一，`(project_id, visibility)` |
@@ -296,7 +298,7 @@ const defaultDeepSeekRuntimeConfig = {
 }
 ```
 
-调用使用 OpenAI 兼容 `chat/completions` 接口。`thinkingModeEnabled` 决定是否发送 DeepSeek `thinking.enabled/disabled`；开启时同时发送 `reasoning_effort`，强度只能是 `low`、`high` 或 `max`。`jsonModeEnabled` 默认 `false`；关闭时不发送 `response_format`，开启时附加 `response_format: { type: "json_object" }`。三项设置均随模型配置持久化并在每轮开始时冻结。模型按末尾契约返回 Worldseed JSON 文本，适配器提取第一个完整 JSON 对象并执行 Schema 校验。V1 不使用 Tool Calling；模型需要读取或修改时返回 Worldseed JSON，应用层执行读取或暂存提案，再将实际结果追加到同一 `TurnContext`。发送给模型的请求移除不需要的后端技术字段，并使用本次请求专属的临时引用别名；返回结果先校验别名契约，再恢复真实技术 ID。模型不生成 UUID，适配器不执行阶段专用字段移动或身份猜测。
+调用使用 OpenAI 兼容 `chat/completions` 接口。`thinkingModeEnabled` 决定是否发送 DeepSeek `thinking.enabled/disabled`；开启时同时发送 `reasoning_effort`，强度只能是 `low`、`high` 或 `max`。`jsonModeEnabled` 默认 `false`；关闭时不发送 `response_format`，开启时附加 `response_format: { type: "json_object" }`。三项设置均随模型配置持久化并在每轮开始时冻结。模型按末尾契约返回 Worldseed JSON 文本，适配器提取第一个完整 JSON 对象并执行 Schema 校验。V1 不使用 Tool Calling；模型需要读取或修改时返回 Worldseed JSON，应用层执行读取或暂存提案，再将实际结果追加到同一 `TurnContext`。已有对象在模型和数据库中使用同一个项目级永久 ID；每个技术前缀拥有独立项目计数器。新对象仅在当前图治理事务使用 `local:*`，由应用层一次性物化为永久 ID。适配器不执行阶段专用字段移动、长期 ID 别名转换或身份猜测。
 
 可选代理只在 DeepSeek 基础设施适配器内通过注入的 HTTP dispatcher 生效，不修改进程级全局代理，也不影响 SQLite、文件系统或其他网络适配器。
 
@@ -373,11 +375,11 @@ const defaultWorldEvolutionProfile = {
   maxActiveFrontiersPerTurn: 4,
   maxConsecutiveFrontierDeferrals: 6,
   maxBackgroundStepsPerFrontier: 3,
-  backgroundContextTokenBudget: 8000,
-  maxBackgroundModelCalls: 8,
-  maxBackgroundWallTimeMs: 15000,
-  maxBackgroundTotalTokens: 24000,
-  lazyCatchUpTokenBudget: 12000,
+  backgroundContextTokenBudget: 32000,
+  maxBackgroundModelCalls: 80,
+  maxBackgroundWallTimeMs: 3600000,
+  maxBackgroundTotalTokens: 400000,
+  lazyCatchUpTokenBudget: 48000,
   maxJointFrontiersPerTurn: 2,
   maxJointParticipants: 8,
   maxCrossImpactRounds: 2,

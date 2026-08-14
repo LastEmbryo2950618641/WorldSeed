@@ -47,9 +47,9 @@ type PhaseRequest<TInput> = {
 }
 ```
 
-应用层内部请求中的 ID 必须能够从同一项目、同一任务和允许的作用域解析。发送给模型时，适配器移除模型不需要的技术字段，并将仍需引用的真实 ID 替换为本次请求专属别名；模型消息不直接暴露持久化 UUID，也不直接嵌入整个持久化图。
+应用层内部请求中的 ID 必须能够从同一项目、同一任务和允许的作用域解析。发送给模型时，适配器移除模型不需要的运行字段，只保留当前阶段实际需要引用的项目级永久 ID；模型消息不直接嵌入整个持久化图。
 
-每个阶段只有一套 artifact schema。模型直接返回该语义 artifact，应用层不再维护第二套“模型 artifact”并做字段翻译。模型不生成章节、原文、提案、修订、投影、结算或决定记录 UUID；这些技术身份由应用层在物化时创建。模型使用本次请求的 `read-*`、`node-*`、`link-*` 等临时别名引用已有证据；适配器先验证别名结果，再恢复真实 ID。只有 `graph_governance` 可以声明新的 `local:*`；后续阶段可以复用本请求中 graph governance 已声明的局部句柄，但不能新增或伪造新的局部句柄，其他阶段仍只能引用本轮可读的已有图身份。
+每个阶段只有一套 artifact schema。模型直接返回该语义 artifact，应用层不再维护第二套“模型 artifact”并做字段翻译。已有对象由模型和数据库共同使用 `node_*`、`link_*`、`evidence_*` 等项目级永久 ID；模型不能编造永久 ID。只有 `graph_governance` 可以声明新的 `local:*`；后续阶段可以复用当前治理事务已经声明的局部句柄，但不能新增或伪造局部句柄。治理结果通过校验后，应用层使用按前缀独立递增的项目计数器一次性物化 `local:*`，其他技术记录身份也由应用层创建。
 
 ## 3. 公共结果
 
@@ -88,7 +88,7 @@ type PhaseResult<TArtifact> = {
 - `outcome = approve` 时该阶段必需产物必须存在；
 - `outcome = retire` 只表示放弃当前 pending 任务或产物，不表示归档已提交世界历史。
 
-以上 `PhaseResult` 是应用层恢复后的内部结果。模型实际返回的引用字段使用请求中展示的临时别名；模型不得输出 UUID、阶段运行 ID、请求 ID或数据库记录 ID。
+以上 `PhaseResult` 同时使用模型和数据库共享的项目级永久 ID。模型只能复用当前可见输入中已经出现的永久 ID，不得输出阶段运行 ID、请求 ID或自行发明数据库记录 ID。
 
 ## 4. 读取请求
 
@@ -120,7 +120,7 @@ AI只提出搜索表达和原因。应用层执行检索并把真实返回内容
 
 `sourceKinds = source` 指向应用内部已经提交且不可变的原文单元投影，不等同于读取用户工作目录中的 `章节正文/*.md`。`allowWorkspaceChapterReads = false` 只禁止后者，不得屏蔽内部原文投影。模型查询精确原话、标题或其他逐字内容时必须使用非空 `exactKeys`；若同一查询包含 `graph` 或 `revision`，应用层会机械去重并补入 `source`，保证精确索引候选不会因模型混淆两类来源而被过滤。仅查询 `rule` 或 `reference` 时不会补入 `source`，普通语义查询也不会因此扩大召回范围。
 
-source 语义候选命中后，应用层可围绕当前请求的首个高相关原文单元，按同一来源的相邻顺序返回有界连续窗口。窗口只由来源身份、序号、`maxCandidates` 和累计证据 Token 预算决定，不根据正文中的人物、对白、地点或事件类型特化。窗口内每个单元仍是独立 `read-*` 证据，模型只能引用实际返回的单元，不能把未返回的前后文当作已读事实。
+source 语义候选命中后，应用层可围绕当前请求的首个高相关原文单元，按同一来源的相邻顺序返回有界连续窗口。窗口只由来源身份、序号、`maxCandidates` 和累计证据 Token 预算决定，不根据正文中的人物、对白、地点或事件类型特化。窗口内每个单元仍是独立 `evidence_*` 证据，模型只能引用实际返回的单元，不能把未返回的前后文当作已读事实。
 
 `requestedReads` 与 `outcome` 必须保持单一语义：只有 `outcome = request_read` 可以携带非空读取请求；`continue` 以及其他结果必须返回空数组。后端不再执行“已经决定继续、却又附带读取”的矛盾结果，避免阶段在已有充分证据后继续扩张。
 
@@ -355,7 +355,7 @@ type GraphGovernanceArtifact = {
 }
 ```
 
-新图对象必须使用 `local:*` 引用；同一 artifact 内重复引用同一对象时必须复用该引用。已有图对象只能使用本轮图证据中实际返回的 `ownerId`，不能使用 read ID、章节 evidence ID 或仅凭章节正文声称已经完成身份复用。`ownerMutationIndex`、`mutationIndex` 和 `sourceUnitIndex` 只引用当前 artifact 或当前章节中的数组位置。应用层在批准后一次性把 `local:*`、数组索引和技术记录转换为 UUID；任意 content、metadata 或时空绑定内精确匹配局部句柄的值也递归物化，持久层不得残留 `local:*`。归档通过普通 committed 节点与连接实现，不使用 `retired` 代替世界历史。
+新图对象必须使用 `local:*` 引用；同一 artifact 内重复引用同一对象时必须复用该引用。已有图对象只能使用当前模型可见图证据中实际返回的永久 `ownerId`，不能使用 read ID、章节 evidence ID 或仅凭章节正文声称已经完成身份复用。`ownerMutationIndex`、`mutationIndex` 和 `sourceUnitIndex` 只引用当前 artifact 或当前章节中的数组位置。应用层在批准后按对象前缀独立计数器一次性把 `local:*` 物化为永久 ID，并解析数组索引和生成其他技术记录；任意 content、metadata 或时空绑定内精确匹配局部句柄的值也递归物化，持久层不得残留 `local:*`。归档通过普通 committed 节点与连接实现，不使用 `retired` 代替世界历史。
 
 `sceneSpacetimeBindings` 声明普通图结构在本轮承担的时空角色，不创建第二套世界 schema。它必须按 `dependency_audit.sceneContinuity.sceneIndex` 恰好覆盖一次，并保持相同的 `predecessorSceneIndexes`；本轮前置通过索引解析到对应新场景锚点，旧图前置继续使用本轮已读引用。正式正文场景的 `sourceUnitIndexes` 必须非空，全部原文单元至少被一个场景覆盖；无正文后台演化必须为空。只有对应场景声明 `predecessorRequired = false` 时两类前置和过渡路径才可以同时为空；声明 `correspondenceRequired = true` 时 `correspondenceRefs` 必须非空。无法精确换算时应引用 AI建立的明确不确定性结构，而不是伪造数值。
 
@@ -369,6 +369,40 @@ type GraphGovernanceArtifact = {
 
 ### 5.11 semantic_review
 
+`semantic_review` 是一个具有两个模型调用子步骤的阶段，不新增领域阶段类型：
+
+1. **计划子步骤**：AI 阅读治理结果并只提交 `VerificationProbePlan[]`；
+2. **执行子步骤**：应用层通过统一检索端口真实执行全部计划，保存 `ProbeExecutionResult[]`；
+3. **审查子步骤**：AI 读取不可变执行结果，再提交 `SemanticReviewArtifact` 和逐探针判断。
+
+计划与审查可以使用同一个阶段名和同一个稳定检查点，但必须具有不同的 `operationId` 和阶段运行记录。应用层不能让 AI 在同一次输出中同时声明查询计划、观察结果和通过结论。
+
+```ts
+type VerificationProbePlan = {
+  purpose: string // AI 自定义本次局部验证的含义，不使用平台预设领域枚举
+  sceneBindingIndexes: number[]
+  mutationSpacetimeSettlementIndexes: number[]
+  query: RetrievalQuery
+  expectedEvidence: string
+  reason: string
+}
+
+type ProbeExecutionResult = {
+  probeIndex: number
+  operationId: string
+  status: "completed" | "budget_exhausted" | "interrupted" | "failed"
+  returnedReadRefs: string[]
+  returnedGraphRefs: string[]
+  returnedProposalRefs: string[]
+  resultDigest: string
+  diagnostic?: string
+}
+```
+
+`RetrievalQuery` 复用普通资料和图召回已经支持的 exact、semantic、neighborhood 与 source 查询组合。它不增加人物查询、势力查询、地点查询等领域专用字段。AI 不生成探针技术 ID；应用层按计划数组位置冻结 `probeIndex`，并生成稳定 `operationId`。`ProbeExecutionResult` 只能由应用层产生，AI 不得填写、覆盖或补造其中的引用、状态和摘要。
+
+图治理尚未提交时，探针执行器必须同时读取“已提交图 + 当前治理 artifact 的只读提案 overlay”。overlay 只解释本轮 `local:*`、本轮修改和本轮声明的检索投影，不写入数据库、不产生永久 ID，也不进入普通事实读取账本。执行结果把 overlay 命中放入 `returnedProposalRefs`，把持久化 Evidence 和已提交图命中分别放入 `returnedReadRefs`、`returnedGraphRefs`，三者不能混用。
+
 ```ts
 type SemanticReviewArtifact = {
   approvedMutationIndexes: number[]
@@ -379,13 +413,8 @@ type SemanticReviewArtifact = {
   rejectedMutationSpacetimeSettlementIndexes: number[]
   approvedAffectedFrontierRefs: string[]
   rejectedAffectedFrontierRefs: string[]
-  verificationProbes: Array<{
-    purpose: "scene_restore" | "current_state" | "history_return" | "source_return"
-    sceneBindingIndexes: number[]
-    mutationSpacetimeSettlementIndexes: number[]
-    query: string
-    observedReadRefs: string[]
-    observedGraphRefs: string[]
+  verificationProbeAssessments: Array<{
+    probeIndex: number
     verdict: "pass" | "uncertain" | "fail"
     reason: string
   }>
@@ -403,7 +432,11 @@ type SemanticReviewArtifact = {
 
 语义审批必须对 `graph_governance.mutations`、`sceneSpacetimeBindings`、`mutationSpacetimeSettlements` 和 `affectedFrontierRefs` 中的每个索引或引用分别恰好作出一次决定：每项只能出现在对应批准或拒绝集合之一，不能遗漏、重复或越界。存在任何拒绝项时必须返回 `graph_governance`，修订后原审批与前沿集合失效，不能部分沿用。`sceneInventoryComplete` 由 AI 复核场景清单是否覆盖草稿全部实际场景；代码不能从正文自行切场景。
 
-`verificationProbes` 必须引用本轮实际读取证据和图 owner。每个场景绑定至少由 `scene_restore` 覆盖；正式正文场景还由 `source_return` 覆盖；每个 `world_effect` 修改时空结算至少由 `current_state` 和 `history_return` 覆盖；每个 `representation_only` 至少由 `history_return` 覆盖。失败探针必须返回治理，`uncertain` 只能用于图中已经明确保存不确定性的跨参照结果，不能替代当前入口、历史路径或原文返回失败。
+每个 `verificationProbeAssessment` 必须一对一引用由应用层成功执行的 `ProbeExecutionResult.probeIndex`，并保持目的和覆盖索引不变。没有执行结果、执行被中断或摘要不匹配时，AI 不能给出 `pass`；应用层也不能用空结果自动构造通过判断。
+
+AI 必须为正文中的实际场景、修改后的当前含义、历史路径和原文返回设计足够的探针覆盖，但覆盖项的划分、用途名称、查询入口和停止条件由 AI 根据本轮图结构与正文自行定义，不使用平台预设的四类探针枚举。`fail` 和 `uncertain` 都必须形成明确审核建议，但不能阻止本轮正文和图提交；`uncertain` 只能用于图中已经明确保存不确定性的跨参照结果，不能把实际返回失败伪装成合理不确定性。
+
+探针执行超过检索、Token、时间或调用预算时，按任务检查点协议暂停，不丢弃治理结果、探针计划或已完成探针。继续执行只运行尚未完成的探针；重试当前阶段从计划子步骤重新开始。后续轮次或用户修改触发新治理时，旧探针记录继续作为审计历史保存，但不能冒充新治理结果的验证证据。
 
 ### 5.12 settlement_review
 

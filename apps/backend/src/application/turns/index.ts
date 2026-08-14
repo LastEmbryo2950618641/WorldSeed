@@ -1,3 +1,6 @@
 export * from "./ports/index.js"
 export * from "./retrieval-gap.js"
 export * from "./turn-orchestrator.js"
+export * from "./verification-probe-coordinator.js"
+export * from "./graph-capacity-policy.js"
+export * from "./graph-governance-assembler.js"

@@ -48,8 +48,9 @@ class ReferenceRegistry {
 
   public tokenFor(actual: string): string {
     const token = this.actualToToken.get(actual)
-    if (token === undefined) throw new Error(`No model reference alias registered for ${actual}`)
-    return token
+    if (token !== undefined) return token
+    if (isPersistentId(actual)) return actual
+    throw new Error(`No model reference alias registered for ${actual}`)
   }
 
   public encode(value: unknown): unknown {
@@ -87,6 +88,9 @@ function registerRequestReferences(request: PhaseRequestEnvelope, registry: Refe
     for (const evidence of request.input.readEvidence) {
       if (!isRecord(evidence)) continue
       registerIfUuid(evidence.readId, "read", registry)
+      if (isRecord(evidence.sourcePosition)) {
+        registerIfUuid(evidence.sourcePosition.sourceRef, "source", registry)
+      }
       if (evidence.ownerKind === "node" || evidence.ownerKind === "link") {
         registerIfUuid(evidence.ownerId, evidence.ownerKind, registry)
       }
@@ -138,6 +142,7 @@ function createModelInput(value: unknown): unknown {
     workspaceCatalog,
     readEvidence,
     retrievalGaps,
+    verificationProbeExecutions,
     ...semanticInput
   } = value
   void ignoredSourceId
@@ -151,10 +156,25 @@ function createModelInput(value: unknown): unknown {
     ...(Array.isArray(retrievalGaps)
       ? { retrievalGaps: retrievalGaps.map(createModelRetrievalGap) }
       : retrievalGaps === undefined ? {} : { retrievalGaps }),
+    ...(Array.isArray(verificationProbeExecutions)
+      ? { verificationProbeExecutions: verificationProbeExecutions.map(createModelVerificationProbeExecution) }
+      : verificationProbeExecutions === undefined ? {} : { verificationProbeExecutions }),
     ...(isRecord(workspaceCatalog)
       ? { workspaceCatalog: { entries: workspaceCatalog.entries } }
       : workspaceCatalog === undefined ? {} : { workspaceCatalog }),
   }
+}
+
+function createModelVerificationProbeExecution(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  const {
+    requestId: ignoredRequestId,
+    operationId: ignoredOperationId,
+    ...execution
+  } = value
+  void ignoredRequestId
+  void ignoredOperationId
+  return execution
 }
 
 function createModelReadEvidence(value: unknown): unknown {
@@ -209,6 +229,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
+}
+
+function isPersistentId(value: string): boolean {
+  return /^(?:node|link|evidence|source|revision)_[1-9][0-9]*$/u.test(value)
 }
 
 function assertNoTechnicalUuids(value: unknown): void {
