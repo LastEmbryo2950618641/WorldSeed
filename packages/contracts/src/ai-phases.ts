@@ -11,6 +11,10 @@ export const phaseOutcomeValues = ["continue", "request_read", "blocked", "appro
 export const phaseOutcomeSchema = z.enum(phaseOutcomeValues)
 export type PhaseOutcome = z.infer<typeof phaseOutcomeSchema>
 
+export const modelReasoningKindValues = ["provider_reasoning", "provider_summary"] as const
+export const modelReasoningKindSchema = z.enum(modelReasoningKindValues)
+export type ModelReasoningKind = z.infer<typeof modelReasoningKindSchema>
+
 export const phaseRequestEnvelopeSchema = z.object({
   schemaVersion: schemaVersionSchema,
   envelopeId: idSchema,
@@ -45,6 +49,8 @@ export const phaseResultEnvelopeSchema = z.object({
   unresolvedDependencies: z.array(unresolvedDependencySchema),
   reason: z.string().min(1),
   selfReview: z.string().min(1),
+  modelReasoning: z.string().min(1).optional(),
+  modelReasoningKind: modelReasoningKindSchema.optional(),
 }).superRefine((result, context) => {
   if (result.outcome === "request_read" && result.requestedReads.length === 0) {
     context.addIssue({

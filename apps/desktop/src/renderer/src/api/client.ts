@@ -330,10 +330,9 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
     case "model.profiles.read":
       return {
         profiles: [
-          { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", credentialRef: "model-profile:deepseek-v4-flash", apiProtocol: "openai_chat_completions", contextWindowTokens: 1_000_000, apiKey: "", hasApiKey: false, thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false, disableResponseStorage: true, serviceTier: "auto" },
-          { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-pro", credentialRef: "model-profile:deepseek-v4-pro", apiProtocol: "openai_chat_completions", contextWindowTokens: 1_000_000, apiKey: "", hasApiKey: false, thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false, disableResponseStorage: true, serviceTier: "auto" },
+          { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com", model: "deepseek-chat", credentialRef: "model-profile:deepseek", apiProtocol: "openai_chat_completions", contextWindowTokens: 1_000_000, apiKey: "", hasApiKey: false, thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false, disableResponseStorage: true, serviceTier: "auto" },
         ],
-        activeProfileId: "deepseek-v4-flash",
+        activeProfileId: "deepseek",
       }
     case "model.profiles.save":
       return payload

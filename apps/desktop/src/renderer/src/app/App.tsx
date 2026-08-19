@@ -160,8 +160,11 @@ export function App(): React.JSX.Element {
     })
   })
 
-  const openFile = async (path: string): Promise<void> => {
-    if (project === undefined) return
+  const openFile = async (path: string | undefined): Promise<void> => {
+    if (project === undefined || !isWorkspaceFilePath(path)) {
+      setError("无法打开文件：工作区文件路径为空或无效")
+      return
+    }
     setError(undefined)
     try {
       const result = await invokeBackend<{ content: string }>("workspace.read", {
@@ -246,9 +249,12 @@ export function App(): React.JSX.Element {
         } catch (cause) {
           setPostCommitNotice(`本轮正文与图数据已提交，但工作区刷新失败：${cause instanceof Error ? cause.message : String(cause)}`)
         }
-        if (snapshot.result !== undefined) {
-          await loadCommittedGraph(snapshot.result)
-          await openFile(snapshot.result.chapterPath)
+        const chapterPath = snapshot.result?.chapterPath ?? snapshot.finalization?.chapterPath
+        if (chapterPath !== undefined) {
+          if (snapshot.result !== undefined) await loadCommittedGraph(snapshot.result)
+          await openFile(chapterPath)
+        } else if (snapshot.finalization !== undefined) {
+          setPostCommitNotice("本轮已完成，但未找到可打开的章节路径；章节提交记录仍已保留。")
         }
         for (let attempt = 0; attempt < 10; attempt += 1) {
           await new Promise((resolve) => setTimeout(resolve, 100))
@@ -553,6 +559,10 @@ function parseWordCount(value: string): number | undefined {
   if (!/^\d+$/.test(normalized)) return undefined
   const parsed = Number(normalized)
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
+}
+
+function isWorkspaceFilePath(value: string | undefined): value is string {
+  return value !== undefined && value.trim().length > 0 && value.toLowerCase().endsWith(".md")
 }
 
 export function mergeGraphSlices(current: GraphSlice | undefined, next: GraphSlice): GraphSlice {

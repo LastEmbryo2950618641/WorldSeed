@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react"
 import { Activity, Check, Circle, GitBranch, History, LoaderCircle, Network, Orbit } from "lucide-react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { aiPhaseValues, type HistoryOverview, type ProjectSettings, type ResettableRuntimeMetricId } from "@worldseed/contracts"
 
-import type { GraphSlice, TaskSnapshot } from "../../api/client.js"
+import type { GraphSlice, PhaseRunSnapshot, TaskSnapshot } from "../../api/client.js"
 import { useWorkbenchStore, type RightTab } from "../../state/workbench-store.js"
 import { WorldGraph } from "./WorldGraph.js"
 import { HistoryPanel } from "./HistoryPanel.js"
@@ -124,7 +126,7 @@ function ProcessPanel({ task, onOpenCheckpoint, onResetMetrics }: { task: TaskSn
         <summary className={`phase-row ${isDone ? "done" : isCurrent ? "current" : ""}`}>
           <span className="phase-icon">{isDone ? <Check size={13} /> : isCurrent ? <LoaderCircle size={13} /> : <Circle size={10} />}</span>
           <span><strong>{phase}</strong><small>{labels[phase]}</small></span>
-          <em>{latest?.status === "failed" ? "失败" : isDone ? "已完成" : isCurrent ? "进行中" : "等待"}</em>
+          <PhaseMetricRings runs={runs} />
         </summary>
         {latest?.result === undefined ? <PhasePending latestStatus={latest?.status} /> : <PhaseDetails result={latest.result} />}
       </details>)
@@ -153,7 +155,7 @@ function GraphGovernanceGroup({ task }: { task: TaskSnapshot | undefined }): Rea
     <summary className={`phase-row ${done ? "done" : active === undefined ? "" : "current"}`}>
       <span className="phase-icon">{done ? <Check size={13} /> : active === undefined ? <Circle size={10} /> : <LoaderCircle size={13} />}</span>
       <span><strong>graph_governance</strong><small>分步治理世界图</small></span>
-      <em>{done ? "已完成" : runs.length === 0 ? "等待" : "进行中"}</em>
+      <PhaseMetricRings runs={runs} />
     </summary>
     <div className="governance-step-list">{steps.map((step) => {
       const phaseRuns = step.kind === "ai" ? runs.filter((run) => run.phase === step.id) : []
@@ -163,12 +165,11 @@ function GraphGovernanceGroup({ task }: { task: TaskSnapshot | undefined }): Rea
         : completed.has("graph_structure_plan") && (capacityRuns.length === 0 || completed.has("graph_capacity_rewrite"))
       const stepDone = step.kind === "mechanical" ? mechanicalComplete : latest?.status === "completed"
       const stepCurrent = latest?.status === "running" || latest?.status === "failed"
-      const skipped = step.id === "graph_capacity_rewrite" && completed.has("graph_spacetime_settlement") && capacityRuns.length === 0
       return <details className={`governance-step ${stepDone ? "done" : stepCurrent ? "current" : ""}`} key={step.id}>
         <summary>
           <span>{stepDone ? <Check size={12} /> : stepCurrent ? <LoaderCircle size={12} /> : <Circle size={9} />}</span>
           <strong>{step.label}</strong>
-          <em>{skipped ? "未触发" : stepDone ? "已完成" : stepCurrent ? "进行中" : "等待"}</em>
+          <PhaseMetricRings runs={phaseRuns} />
         </summary>
         {step.kind === "mechanical"
           ? <CapacityRunDetails rewriteCount={capacityRuns.length} complete={mechanicalComplete} />
@@ -176,6 +177,104 @@ function GraphGovernanceGroup({ task }: { task: TaskSnapshot | undefined }): Rea
       </details>
     })}</div>
   </details>
+}
+
+type PhaseMetric = Readonly<{
+  contextTokens?: number
+  modelCalls?: number
+  kvRate?: number
+  latencyMs?: number
+  retrievalRounds?: number
+}>
+
+function PhaseMetricRings({ runs }: { runs: readonly PhaseRunSnapshot[] }): React.JSX.Element {
+  const metric = summarizePhaseMetrics(runs)
+  return <span className="phase-metric-rings" aria-label="阶段运行指标">
+    <PhaseMetricRing value={metric.contextTokens === undefined ? "--" : formatCompactMetric(metric.contextTokens)} label="平均上下文请求 Token 数" />
+    <PhaseMetricRing value={metric.modelCalls === undefined ? "--" : formatCompactMetric(metric.modelCalls)} label="平均 AI 请求数" />
+    <PhaseMetricRing value={metric.kvRate === undefined ? "--" : `${String(Math.round(metric.kvRate * 100))}%`} label="平均 KV 缓存命中率" {...(metric.kvRate === undefined ? {} : { progress: metric.kvRate })} />
+    <PhaseMetricRing value={metric.latencyMs === undefined ? "--" : formatPhaseDuration(metric.latencyMs)} label="平均请求时间" />
+    <PhaseMetricRing value={metric.retrievalRounds === undefined ? "--" : String(metric.retrievalRounds)} label="当前阶段检索轮次" />
+  </span>
+}
+
+function PhaseMetricRing({ value, label, progress }: { value: string; label: string; progress?: number }): React.JSX.Element {
+  const style = { "--phase-ring-progress": progress === undefined ? "0%" : `${String(Math.round(progress * 100))}%` } as React.CSSProperties
+  return <span className={`phase-metric-ring${value === "--" ? " empty" : ""}`} style={style} aria-label={`${label}: ${value}`} tabIndex={0}>
+    <span>{value}</span>
+    <span className="phase-metric-tooltip" role="tooltip"><strong>{label}</strong><span>{value}</span></span>
+  </span>
+}
+
+function summarizePhaseMetrics(runs: readonly PhaseRunSnapshot[]): PhaseMetric {
+  const samples = runs.map((run) => ({ run, usage: readPhaseUsage(run.usage) }))
+  const average = (values: readonly number[]): number | undefined => values.length === 0 ? undefined : values.reduce((sum, value) => sum + value, 0) / values.length
+  const modelCalls = samples.map((sample) => sample.usage.modelCalls).filter(isNumber)
+  const requestSamples = samples.flatMap((sample) => {
+    const inputTokens = sample.usage.inputTokens
+    const latencyMs = sample.usage.latencyMs ?? phaseElapsedMs(sample.run)
+    const calls = sample.usage.modelCalls ?? (inputTokens !== undefined || latencyMs !== undefined ? 1 : 0)
+    return calls > 0 ? [{ calls, inputTokens, latencyMs }] : []
+  })
+  const totalRequestCalls = requestSamples.reduce((sum, sample) => sum + sample.calls, 0)
+  const totalInputTokens = requestSamples.reduce((sum, sample) => sum + (sample.inputTokens ?? 0), 0)
+  const totalLatencyMs = requestSamples.reduce((sum, sample) => sum + (sample.latencyMs ?? 0), 0)
+  const hitTokens = samples.map((sample) => sample.usage.cacheHitInputTokens).filter(isNumber).reduce((sum, value) => sum + value, 0)
+  const missTokens = samples.map((sample) => sample.usage.cacheMissInputTokens).filter(isNumber).reduce((sum, value) => sum + value, 0)
+  const retrievalRounds = samples.filter((sample) => phaseRunRequestsRead(sample.run)).length
+  const contextTokens = totalRequestCalls === 0 ? undefined : totalInputTokens / totalRequestCalls
+  const averageModelCalls = average(modelCalls)
+  const latencyMs = totalRequestCalls === 0 ? undefined : totalLatencyMs / totalRequestCalls
+  return {
+    ...(contextTokens === undefined ? {} : { contextTokens }),
+    ...(averageModelCalls === undefined ? {} : { modelCalls: averageModelCalls }),
+    ...(hitTokens + missTokens === 0 ? {} : { kvRate: hitTokens / (hitTokens + missTokens) }),
+    ...(latencyMs === undefined ? {} : { latencyMs }),
+    ...(samples.length === 0 ? {} : { retrievalRounds }),
+  }
+}
+
+function phaseRunRequestsRead(run: PhaseRunSnapshot): boolean {
+  if (typeof run.result !== "object" || run.result === null) return false
+  return (run.result as Record<string, unknown>).outcome === "request_read"
+}
+
+type PhaseUsageValues = Readonly<{
+  modelCalls?: number
+  inputTokens?: number
+  latencyMs?: number
+  cacheHitInputTokens?: number
+  cacheMissInputTokens?: number
+}>
+
+function readPhaseUsage(value: unknown): PhaseUsageValues {
+  if (typeof value !== "object" || value === null) return {}
+  const usage = value as Record<string, unknown>
+  return {
+    ...(isNumber(usage.modelCalls) ? { modelCalls: usage.modelCalls } : {}),
+    ...(isNumber(usage.inputTokens) ? { inputTokens: usage.inputTokens } : {}),
+    ...(isNumber(usage.latencyMs) ? { latencyMs: usage.latencyMs } : {}),
+    ...(isNumber(usage.cacheHitInputTokens) ? { cacheHitInputTokens: usage.cacheHitInputTokens } : {}),
+    ...(isNumber(usage.cacheMissInputTokens) ? { cacheMissInputTokens: usage.cacheMissInputTokens } : {}),
+  }
+}
+
+function phaseElapsedMs(run: PhaseRunSnapshot): number | undefined {
+  return run.finishedAtMs === undefined ? undefined : Math.max(0, run.finishedAtMs - run.startedAtMs)
+}
+
+function isNumber(value: unknown): value is number {
+  return value !== undefined && Number.isFinite(value)
+}
+
+function formatCompactMetric(value: number): string {
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`
+  return Number.isInteger(value) ? String(value) : value.toFixed(1)
+}
+
+function formatPhaseDuration(valueMs: number): string {
+  if (valueMs < 1000) return `${String(Math.round(valueMs))}ms`
+  return `${(valueMs / 1000).toFixed(1)}s`
 }
 
 function CapacityRunDetails({ rewriteCount, complete }: { rewriteCount: number; complete: boolean }): React.JSX.Element {
@@ -189,7 +288,7 @@ function CapacityRunDetails({ rewriteCount, complete }: { rewriteCount: number; 
 
 function PhasePending({ latestStatus }: { latestStatus: string | undefined }): React.JSX.Element {
   if (latestStatus === "running") {
-    return <p className="phase-empty">已向模型发起请求，等待 AI 返回结构化思考与输出。</p>
+    return <p className="phase-empty">已向模型发起请求，等待 AI 返回思考记录与正式输出。</p>
   }
   return <p className="phase-empty">尚未进入该阶段；进入后会先显示请求态，返回后再展开 AI 思考与 AI 输出。</p>
 }
@@ -202,20 +301,18 @@ function PhaseDetails({ result }: { result: unknown }): React.JSX.Element {
   const continuityAdvice = Array.isArray(artifact?.continuityAdvice)
     ? artifact.continuityAdvice
     : []
-  const thought = {
-    modelReasoning: value.modelReasoning,
-    reason: value.reason,
-    selfReview: value.selfReview,
-    requestedReads: value.requestedReads,
-    unresolvedDependencies: value.unresolvedDependencies,
-  }
-  const output = value.rawModelOutput ?? value.artifact ?? value
+  const modelReasoning = typeof value.modelReasoning === "string" && value.modelReasoning.trim().length > 0
+    ? value.modelReasoning
+    : "该模型未返回可展示的思考内容。"
+  const reasoningLabel = value.modelReasoningKind === "provider_summary" ? "AI 思考摘要" : "AI 思考"
+  const { modelReasoning: _modelReasoning, modelReasoningKind: _modelReasoningKind, ...structuredOutput } = value
+  const output = value.rawModelOutput ?? (typeof result === "object" && result !== null ? structuredOutput : result)
   return <div className="phase-details">
-    <p className="phase-note">展开后可查看该阶段的 AI 思考摘要与原始输出，默认折叠，避免占满右侧面板。</p>
+    <p className="phase-note">展开后可查看该阶段的模型思考记录与正式输出，默认折叠，避免占满右侧面板。</p>
     {continuityAdvice.length === 0 ? null : <ContinuityAdvicePanel advice={continuityAdvice} />}
     <details>
-      <summary className="sub-panel-summary">AI 思考</summary>
-      <pre>{formatJson(thought, "暂无结构化思考结果")}</pre>
+      <summary className="sub-panel-summary">{reasoningLabel}</summary>
+      <div className="phase-reasoning-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{modelReasoning}</ReactMarkdown></div>
     </details>
     <details>
       <summary className="sub-panel-summary">AI 输出</summary>

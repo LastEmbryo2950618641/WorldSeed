@@ -474,6 +474,8 @@ describe("backend utility runtime", () => {
     const taskId = readTaskId(started)
     const interrupted = await waitForTaskStatus(facade, taskId, "awaiting_user_decision")
     const interruptedMetrics = readRuntimeMetrics(interrupted)
+    expect(interruptedMetrics.metrics.find((metric) => metric.metricId === "context_tokens")?.current)
+      .toBe(readLatestRequestInputTokens(interrupted))
     expect(interruptedMetrics.metrics.find((metric) => metric.metricId === "model_calls")).toMatchObject({
       metricId: "model_calls",
       current: 1,
@@ -1002,6 +1004,25 @@ function readRuntimeMetrics(response: ClientResponse) {
     throw new Error("Task response has no runtime metrics")
   }
   return runtimeMetricsSnapshotSchema.parse(response.data.runtimeMetrics)
+}
+
+function readLatestRequestInputTokens(response: ClientResponse): number {
+  if (!response.ok || typeof response.data !== "object" || response.data === null || !("phaseRuns" in response.data)) {
+    throw new Error("Task response has no phase runs")
+  }
+  const phaseRuns = response.data.phaseRuns
+  if (!Array.isArray(phaseRuns)) throw new Error("Task phase runs are invalid")
+  const latest = phaseRuns.at(-1)
+  if (typeof latest !== "object" || latest === null || !("usage" in latest)) {
+    throw new Error("Latest phase run has no usage")
+  }
+  const usage = latest.usage
+  if (typeof usage !== "object" || usage === null || !("lastRequestInputTokens" in usage)) {
+    throw new Error("Latest phase run has no provider input Token count")
+  }
+  const inputTokens = usage.lastRequestInputTokens
+  if (typeof inputTokens !== "number") throw new Error("Provider input Token count is invalid")
+  return inputTokens
 }
 
 async function waitForCompletedTask(facade: BackendFacade, taskId: string): Promise<ClientResponse> {

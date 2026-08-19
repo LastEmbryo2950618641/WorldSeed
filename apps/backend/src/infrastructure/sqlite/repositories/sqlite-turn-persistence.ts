@@ -284,10 +284,10 @@ export class SqliteTurnPersistence implements TurnPersistencePort {
         description: runtimeMetricDescription(metricId, window.limit_value !== null),
       }
     })
-    const contextTokens = chain?.token_estimate ?? 0
+    const contextTokens = await readLatestRequestInputTokens(this.database, taskId)
     const contextThreshold = contextRecord?.budget.maxTokens ?? config.contextThresholdTokens
     metrics.push(
-      readOnlyMetric("context_tokens", "活动上下文", "context_window", "tokens", contextTokens, contextThreshold, contextTokens, contextThreshold > 0 && contextTokens >= contextThreshold ? "exhausted" : contextTokens >= contextThreshold * 0.8 ? "warning" : "normal", "当前模型可见链与触发机械压缩的阈值。"),
+      readOnlyMetric("context_tokens", "活动上下文", "context_window", "tokens", contextTokens, contextThreshold, contextTokens, contextTokens !== null && contextThreshold > 0 && contextTokens >= contextThreshold ? "exhausted" : contextTokens !== null && contextTokens >= contextThreshold * 0.8 ? "warning" : "normal", "最近一次已完成模型请求由提供方返回的真实输入 Token；请求完成前显示不可用。本地估算仅用于请求前压缩判断。"),
       readOnlyMetric("context_limit", "模型上下文上限", "context_window", "tokens", config.modelContextWindowTokens, null, config.modelContextWindowTokens, "fixed", "模型配置声明的固定上下文容量，不能通过任务重置改变。"),
       readOnlyMetric("retrieval_rounds", "当前阶段检索轮次", "phase", "count", await countCurrentRetrievalRounds(this.database, taskId), config.maxRetrievalRounds, null, "normal", "当前阶段已经消耗的选择性读取轮次。"),
       readOnlyMetric("kv_cache_hit_rate", "KV 缓存命中率", "task_total", "ratio", kv.hitRate, null, kv.hitRate, "fixed", "按提供方返回的缓存命中与未命中输入 Token 计算。"),
@@ -1166,6 +1166,25 @@ function readKvSummary(value: string | undefined): { hitRate: number | null } {
   const misses = readOptionalNonnegativeMetricNumber(record.cacheMissInputTokens)
   if (hits === undefined || misses === undefined || hits + misses === 0) return { hitRate: null }
   return { hitRate: hits / (hits + misses) }
+}
+
+async function readLatestRequestInputTokens(database: Kysely<ProjectDatabase>, taskId: string): Promise<number | null> {
+  const rows = await database.selectFrom("phase_runs").select("usage_json")
+    .where("task_id", "=", taskId).where("status", "=", "completed")
+    .orderBy("finished_at", "desc").orderBy("started_at", "desc").execute()
+  for (const row of rows) {
+    const usage = decodeJson(row.usage_json)
+    if (typeof usage !== "object" || usage === null) continue
+    const record = usage as Record<string, unknown>
+    const lastRequestInputTokens = readOptionalNonnegativeMetricNumber(record.lastRequestInputTokens)
+    if (lastRequestInputTokens !== undefined) return lastRequestInputTokens
+    const inputTokens = readOptionalNonnegativeMetricNumber(record.inputTokens)
+    const modelCalls = readOptionalNonnegativeMetricNumber(record.modelCalls)
+    if (inputTokens !== undefined && inputTokens > 0) {
+      return modelCalls !== undefined && modelCalls > 0 ? inputTokens / modelCalls : inputTokens
+    }
+  }
+  return null
 }
 
 function readBlockedRuntimeMetricIds(value: string | null): Set<string> {

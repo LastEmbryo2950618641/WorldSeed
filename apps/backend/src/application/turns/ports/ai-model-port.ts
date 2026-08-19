@@ -6,6 +6,7 @@ import type {
   ReadRequest,
   VerificationProbeDescriptor,
   ModelContextMessageDraft,
+  ModelReasoningKind,
   VisibleModelContextMessage,
   WorkspaceCatalogSnapshot,
 } from "@worldseed/contracts"
@@ -16,6 +17,7 @@ import type { StageProjection } from "@worldseed/prompt-contracts"
 export type PhaseModelUsage = Readonly<{
   modelCalls?: number
   inputTokens: number
+  lastRequestInputTokens?: number
   outputTokens: number
   latencyMs: number
   cacheHitInputTokens?: number
@@ -23,6 +25,7 @@ export type PhaseModelUsage = Readonly<{
   provider?: string
   model?: string
   reasoningContent?: string
+  reasoningKind?: ModelReasoningKind
 }>
 
 export type PhaseModelExecution = Readonly<{

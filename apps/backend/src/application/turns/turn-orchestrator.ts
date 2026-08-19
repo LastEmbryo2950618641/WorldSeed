@@ -2057,6 +2057,7 @@ export class TurnOrchestrator {
         result: {
           ...parsedResult,
           ...(execution.usage.reasoningContent === undefined ? {} : { modelReasoning: execution.usage.reasoningContent }),
+          ...(execution.usage.reasoningKind === undefined ? {} : { modelReasoningKind: execution.usage.reasoningKind }),
         },
         usage: execution.usage,
         ...(execution.contextExchange === undefined ? {} : {

@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, type CSSProperties } from "react"
 import type { ResettableRuntimeMetricId, RuntimeMetric } from "@worldseed/contracts"
 import {
   AlertTriangle,
@@ -63,16 +63,13 @@ export function RuntimeMonitor({ task, onOpenCheckpoint, onResetMetrics }: {
         <Eye size={14} />
       </button>
       <div className="runtime-metrics">
-        {metrics.length === 0 ? <p className="phase-empty">等待后端返回运行指标。</p> : metrics.map((metric) => {
-          const ratio = metric.limit === null || metric.current === null ? 0 : Math.min(1, metric.current / metric.limit)
-          const pending = pendingMetricIds.has(metric.metricId)
-          return <div className={`runtime-metric ${metric.state === "warning" || metric.state === "exhausted" ? "warning" : ""}`} key={metric.metricId} title={metric.description}>
-            <span>{metric.label}</span>
-            <div className="runtime-meter" aria-hidden="true"><i style={{ width: `${String(Math.round(ratio * 100))}%` }} /></div>
-            <strong>{formatMetric(metric)}{metric.cumulative === null ? "" : ` · 累计 ${formatMetricNumber(metric.cumulative, metric.unit)}`}</strong>
-            {metric.resettable ? <button type="button" disabled={!canReset || pending} title={`重置${metric.label}`} onClick={() => { void reset([metric.metricId as ResettableRuntimeMetricId]); }}><RotateCcw size={12} /></button> : <em>只读</em>}
-          </div>
-        })}
+        {metrics.length === 0 ? <p className="phase-empty">等待后端返回运行指标。</p> : null}
+        <div className="runtime-ring-grid">
+          <RuntimeRing metric={metrics.find((metric) => metric.metricId === "wall_time")} label="执行时间" />
+          <RuntimeRing metric={metrics.find((metric) => metric.metricId === "context_tokens")} label="活动上下文长度" />
+          <RuntimeRing metric={metrics.find((metric) => metric.metricId === "kv_cache_hit_rate")} label="KV 缓存平均命中率" />
+          <RuntimeRing metric={metrics.find((metric) => metric.metricId === "compression_generation")} label="上下文压缩总次数" />
+        </div>
       </div>
       <div className="runtime-monitor-footer">
         <span>{resetError ?? `快照 ${task?.runtimeMetrics === undefined ? "-" : formatTimestamp(task.runtimeMetrics.capturedAtMs)}`}</span>
@@ -80,6 +77,34 @@ export function RuntimeMonitor({ task, onOpenCheckpoint, onResetMetrics }: {
       </div>
     </> : null}
   </section>
+}
+
+function RuntimeRing({ metric, label }: { metric: RuntimeMetric | undefined; label: string }): React.JSX.Element {
+  const limit = metric?.limit ?? null
+  const currentValue = metric?.current ?? null
+  const ratio = currentValue === null
+    ? 0
+    : Math.min(1, metric?.unit === "ratio" ? currentValue : limit === null ? 0 : currentValue / limit)
+  const current = currentValue === null ? "--" : formatMetricNumber(currentValue, metric?.unit ?? "count")
+  const centerValue = current
+  const detail = metric === undefined
+    ? "等待数据"
+      : metric.unit === "ratio"
+        ? "任务累计"
+      : metric.unit === "generation"
+        ? "活动链累计"
+      : limit === null
+        ? "只读"
+        : `/ ${formatMetricNumber(limit, metric.unit)}`
+  const style = { "--ring-progress": `${String(Math.round(ratio * 100))}%` } as CSSProperties
+  const state = metric?.state === "warning" || metric?.state === "exhausted" ? " warning" : ""
+  const tooltipValue = `${current} ${detail}`
+  return <div className={`runtime-ring-card${state}`} title={metric?.description ?? label}>
+    <div className="runtime-ring" style={style} aria-label={`${label} ${tooltipValue}`} tabIndex={0}>
+      <span>{centerValue}</span>
+    </div>
+    <div className="runtime-ring-tooltip" role="tooltip"><strong>{label}</strong><span>{tooltipValue}</span></div>
+  </div>
 }
 
 export function TaskCheckpointDialog({ task, onClose, onResume, onPause, onResetMetrics }: {

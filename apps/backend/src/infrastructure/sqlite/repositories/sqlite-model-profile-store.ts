@@ -7,8 +7,7 @@ import type { RegistryDatabase } from "../database-types.js"
 import { runtimeLog } from "../../diagnostics/index.js"
 
 const defaultProfiles = Object.freeze([
-  { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", credentialRef: "model-profile:deepseek-v4-flash", apiProtocol: "openai_chat_completions", contextWindowTokens: 1_000_000, thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false, disableResponseStorage: true, serviceTier: "auto" },
-  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-pro", credentialRef: "model-profile:deepseek-v4-pro", apiProtocol: "openai_chat_completions", contextWindowTokens: 1_000_000, thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false, disableResponseStorage: true, serviceTier: "auto" },
+  { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com", model: "deepseek-chat", credentialRef: "model-profile:deepseek", apiProtocol: "openai_chat_completions", contextWindowTokens: 1_000_000, thinkingModeEnabled: true, reasoningEffort: "high", jsonModeEnabled: false, disableResponseStorage: true, serviceTier: "auto" },
 ] satisfies readonly ModelProfile[])
 
 export class SqliteModelProfileStore implements ModelProfileStorePort {
@@ -22,7 +21,9 @@ export class SqliteModelProfileStore implements ModelProfileStorePort {
       .selectAll()
       .orderBy("position", "asc")
       .execute()
-    if (rows.length === 0) return this.save({ profiles: [...defaultProfiles], activeProfileId: defaultProfiles[0]?.id ?? "deepseek-v4-flash" })
+    if (rows.length === 0) return this.save({ profiles: [...defaultProfiles], activeProfileId: defaultProfiles[0]?.id ?? "deepseek" })
+    const migratedDefaults = migrateLegacyDefaultProfiles(rows)
+    if (migratedDefaults !== undefined) return this.save({ profiles: [migratedDefaults], activeProfileId: migratedDefaults.id })
     const profiles = rows.map(mapProfile)
     const active = rows.find((profile) => profile.is_active === 1) ?? rows[0]
     if (active === undefined) throw new Error("Model profile registry is empty")
@@ -58,6 +59,30 @@ export class SqliteModelProfileStore implements ModelProfileStorePort {
     })
     return { profiles: input.profiles, activeProfileId: input.activeProfileId }
   }
+}
+
+function migrateLegacyDefaultProfiles(rows: readonly RegistryDatabase["model_profiles"][]): ModelProfile | undefined {
+  if (rows.length === 0 || !rows.every(isLegacyDefaultProfile)) return undefined
+  const source = rows.find((row) => row.model === "deepseek-v4-flash" || row.id === "deepseek-chat") ?? rows[0]
+  if (source === undefined) return undefined
+  const profile = mapProfile(source)
+  return {
+    ...profile,
+    id: "deepseek",
+    name: "DeepSeek",
+    model: profile.model === "deepseek-v4-flash" ? "deepseek-chat" : profile.model,
+  }
+}
+
+function isLegacyDefaultProfile(row: RegistryDatabase["model_profiles"]): boolean {
+  return row.id === "deepseek-chat"
+    || row.id === "deepseek-reasoner"
+    || row.id === "deepseek-v4-flash"
+    || row.id === "deepseek-v4-pro"
+    || row.name === "DeepSeek Flash"
+    || row.name === "DeepSeek V4 Flash"
+    || row.name === "DeepSeek Reasoner"
+    || row.name === "DeepSeek V4 Pro"
 }
 
 function mapProfile(row: RegistryDatabase["model_profiles"]): ModelProfile {

@@ -74,6 +74,10 @@ function runtimeMetricsFixture(modelCalls: number, inputTokens: number, outputTo
       { metricId: "model_calls", label: "模型调用", scope: "turn_window", unit: "count", current: modelCalls, limit: 400, cumulative: modelCalls, state: "normal", blocking: false, resettable: true, resetMode: "new_window", resetGeneration: 0, lastResetAt: null, description: "调用窗口" },
       { metricId: "input_tokens", label: "输入 Token", scope: "turn_window", unit: "tokens", current: inputTokens, limit: null, cumulative: inputTokens, state: "fixed", blocking: false, resettable: false, resetMode: "provider_fixed", resetGeneration: 0, lastResetAt: null, description: "输入累计" },
       { metricId: "output_tokens", label: "输出 Token", scope: "turn_window", unit: "tokens", current: outputTokens, limit: null, cumulative: outputTokens, state: "fixed", blocking: false, resettable: false, resetMode: "provider_fixed", resetGeneration: 0, lastResetAt: null, description: "输出累计" },
+      { metricId: "wall_time", label: "执行时间", scope: "turn_window", unit: "milliseconds", current: 60_000, limit: 120_000, cumulative: 60_000, state: "normal", blocking: false, resettable: true, resetMode: "new_window", resetGeneration: 0, lastResetAt: null, description: "执行时间" },
+      { metricId: "context_tokens", label: "活动上下文", scope: "context_window", unit: "tokens", current: 100_000, limit: 970_000, cumulative: 100_000, state: "normal", blocking: false, resettable: false, resetMode: "provider_fixed", resetGeneration: 0, lastResetAt: null, description: "活动上下文" },
+      { metricId: "retrieval_rounds", label: "当前阶段检索轮次", scope: "phase", unit: "count", current: 1, limit: 10, cumulative: null, state: "normal", blocking: false, resettable: false, resetMode: "provider_fixed", resetGeneration: 0, lastResetAt: null, description: "检索轮次" },
+      { metricId: "compression_generation", label: "上下文压缩代次", scope: "context_window", unit: "generation", current: 1, limit: null, cumulative: 1, state: "fixed", blocking: false, resettable: false, resetMode: "provider_fixed", resetGeneration: 0, lastResetAt: null, description: "压缩代次" },
       { metricId: "kv_cache_hit_rate", label: "KV 缓存命中率", scope: "task_total", unit: "ratio", current: kvRate, limit: null, cumulative: kvRate, state: "fixed", blocking: false, resettable: false, resetMode: "provider_fixed", resetGeneration: 0, lastResetAt: null, description: "缓存命中" },
     ],
   }
@@ -178,9 +182,11 @@ describe("right rail process UI contract", () => {
       },
     }))
 
-    expect(html).toContain("7 / 9")
-    expect(html).toContain("累计 17")
-    expect(html).not.toContain("7 / 400")
+    expect(html).not.toContain("7 / 9")
+    expect(html).not.toContain("累计 17")
+    expect(html).not.toContain("0 / 10")
+    expect(html.split("class=\"phase-list\"")[0]).not.toContain("当前阶段检索轮次")
+    expect(html).toContain("上下文压缩总次数")
   })
 
   it("shows an explicit model-in-flight state before a phase result returns", () => {
@@ -201,8 +207,38 @@ describe("right rail process UI contract", () => {
     }))
 
     expect(html).toContain("已向模型发起请求")
-    expect(html).toContain("等待 AI 返回结构化思考与输出")
+    expect(html).toContain("等待 AI 返回思考记录与正式输出")
     expect(html).toContain("等待后端返回运行指标")
+  })
+
+  it("omits the redundant text status column from phase rows", () => {
+    const html = renderToStaticMarkup(React.createElement(RightRail, {
+      graphSlice: undefined,
+      task: { status: "paused" },
+    }))
+
+    const phaseList = html.slice(html.indexOf('class="phase-list"'))
+    expect(phaseList).not.toContain("<em>")
+    expect(phaseList).toContain("<span class=\"phase-icon\"><svg")
+  })
+
+  it("keeps phase status icons without rendering text labels", () => {
+    const html = renderToStaticMarkup(React.createElement(RightRail, {
+      graphSlice: undefined,
+      task: {
+        status: "running",
+        phaseRuns: [
+          { phaseRunId: "completed", phase: "interpret", status: "completed", attempt: 1, usage: {}, startedAtMs: 1, finishedAtMs: 2 },
+          { phaseRunId: "running", phase: "rule_assembly", status: "running", attempt: 1, usage: {}, startedAtMs: 3 },
+          { phaseRunId: "failed", phase: "source_retrieval", status: "failed", attempt: 1, usage: {}, startedAtMs: 4 },
+        ],
+      },
+    }))
+
+    expect(html).not.toContain("<em>已完成</em>")
+    expect(html).not.toContain("<em>进行中</em>")
+    expect(html).not.toContain("<em>失败</em>")
+    expect(html).toContain("class=\"phase-icon\"")
   })
 
   it("shows cost, KV cache hit rate, and collapsible AI panels", () => {
@@ -227,6 +263,8 @@ describe("right rail process UI contract", () => {
           status: "completed",
           attempt: 1,
           result: {
+            modelReasoning: "**正在判断当前场景所需的时空锚点。**",
+            modelReasoningKind: "provider_summary",
             reason: "读取当前场景锚点",
             selfReview: "依赖合理",
             artifact: { intent: "观察周围" },
@@ -246,18 +284,40 @@ describe("right rail process UI contract", () => {
     }))
 
     expect(html).not.toContain("实际运行模型")
-    expect(html).toContain("3 / 400")
-    expect(html).toContain("1.2k / 只读")
-    expect(html).toContain("450 / 只读")
+    expect(html).not.toContain("3 / 400")
+    expect(html).not.toContain("1.2k / 只读")
+    expect(html).not.toContain("450 / 只读")
     expect(html).toContain("68%")
-    expect(html).toContain("AI 思考")
+    expect((html.match(/class=\"runtime-ring-card/g) ?? []).length).toBe(4)
+    expect(html).not.toContain("runtime-counter")
+    expect(html).not.toContain("1 / 10 / 10")
+    expect(html).toContain("执行时间")
+    expect(html).toContain("活动上下文长度")
+    expect(html).toContain("KV 缓存平均命中率")
+    expect(html).toContain("runtime-ring-tooltip")
+    expect(html.split("class=\"phase-list\"")[0]).not.toContain("当前阶段检索轮次")
+    expect(html).toContain("上下文压缩总次数")
+    expect(html).toContain("1 活动链累计")
+    expect(html).toContain("AI 思考摘要")
     expect(html).toContain("AI 输出")
+    expect(html).toContain("<strong>正在判断当前场景所需的时空锚点。</strong>")
+    expect(html).not.toContain("**正在判断")
+    expect(html).not.toContain("modelReasoning")
+    expect(html).not.toContain("modelReasoningKind")
     expect(html).toContain("运行监控")
     expect(html).toContain("最近稳定检查点")
     expect(html).toContain("全部重置")
     expect(html).toContain("读取当前场景锚点")
     expect(html).toContain("审查正文响应")
     expect(html).toContain("尚未进入该阶段")
+    expect(html).toContain("平均上下文请求 Token 数")
+    expect(html).toContain("平均 AI 请求数")
+    expect(html).toContain("平均 KV 缓存命中率")
+    expect(html).toContain("平均请求时间")
+    expect(html).toContain("当前阶段检索轮次")
+    expect(html).toContain("phase-metric-tooltip")
+    expect(html).toContain("平均上下文请求 Token 数: 400")
+    expect(html).toContain("68%")
   })
 
   it("shows advisory continuity results collapsed without changing the completed task state", () => {
@@ -301,7 +361,7 @@ describe("right rail process UI contract", () => {
     expect(html).not.toContain("<details class=\"continuity-advice\" open=\"\"")
   })
 
-  it("updates live usage totals when another phase run is returned", () => {
+  it("updates the process view when another phase run is returned", () => {
     const baseTask = {
       status: "running",
       lastPhase: "interpret",
@@ -334,11 +394,46 @@ describe("right rail process UI contract", () => {
     const initialHtml = renderToStaticMarkup(React.createElement(RightRail, { graphSlice: undefined, task: baseTask }))
     const updatedHtml = renderToStaticMarkup(React.createElement(RightRail, { graphSlice: undefined, task: updatedTask }))
 
-    expect(initialHtml).toContain("1 / 400")
-    expect(initialHtml).toContain("100 / 只读")
-    expect(updatedHtml).toContain("3 / 400")
-    expect(updatedHtml).toContain("350 / 只读")
-    expect(updatedHtml).toContain("100 / 只读")
+    expect(initialHtml).toContain("interpret")
+    expect(initialHtml).toContain("1 活动链累计")
+    expect(updatedHtml).toContain("rule_assembly")
+    expect(updatedHtml).toContain("1 活动链累计")
+    expect(updatedHtml).not.toContain("3 / 400")
+  })
+
+  it("summarizes repeated phase requests into compact phase metrics", () => {
+    const html = renderToStaticMarkup(React.createElement(RightRail, {
+      graphSlice: undefined,
+      task: {
+        status: "completed",
+        lastPhase: "interpret",
+        phaseRuns: [{
+          phaseRunId: "phase-read",
+          phase: "interpret",
+          status: "completed",
+          attempt: 1,
+          result: { outcome: "request_read" },
+          usage: { modelCalls: 1, inputTokens: 100, latencyMs: 1000, cacheHitInputTokens: 50, cacheMissInputTokens: 50 },
+          startedAtMs: 1,
+          finishedAtMs: 1001,
+        }, {
+          phaseRunId: "phase-final",
+          phase: "interpret",
+          status: "completed",
+          attempt: 2,
+          result: { outcome: "complete" },
+          usage: { modelCalls: 3, inputTokens: 300, latencyMs: 3000, cacheHitInputTokens: 150, cacheMissInputTokens: 150 },
+          startedAtMs: 1002,
+          finishedAtMs: 4002,
+        }],
+      },
+    }))
+
+    expect(html).toContain("平均上下文请求 Token 数: 100")
+    expect(html).toContain("平均 AI 请求数: 2")
+    expect(html).toContain("平均 KV 缓存命中率: 50%")
+    expect(html).toContain("平均请求时间: 1.0s")
+    expect(html).toContain("当前阶段检索轮次: 1")
   })
 
   it("renders a blocked checkpoint with explicit user-controlled recovery", () => {

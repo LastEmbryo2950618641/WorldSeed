@@ -1438,6 +1438,7 @@ describe("DeepSeekAiModelAdapter", () => {
         expect.objectContaining({ role: "user" }),
       ]))
       expect(execution.usage.reasoningContent).toContain("检查了当前阶段契约")
+      expect(execution.usage.reasoningKind).toBe("provider_summary")
       expect(execution.usage).toMatchObject({
         inputTokens: 100,
         outputTokens: 20,
@@ -1534,6 +1535,8 @@ describe("DeepSeekAiModelAdapter", () => {
     const execution = await adapter.execute(request)
     expect(calls).toBe(2)
     expect(execution.usage.modelCalls).toBe(2)
+    expect(execution.usage.inputTokens).toBe(20)
+    expect(execution.usage.lastRequestInputTokens).toBe(10)
     expect(execution.contextExchange?.requestMessages).toHaveLength(4)
     expect(execution.contextExchange?.requestMessages.some((message) => message.content?.includes("Regenerate"))).toBe(false)
   })
@@ -1689,6 +1692,7 @@ describe("DeepSeekAiModelAdapter", () => {
     expect(calls).toBe(1)
     expect(execution.result).toEqual(fake.result)
     expect(execution.usage.reasoningContent).toBe(reasoningContent)
+    expect(execution.usage.reasoningKind).toBe("provider_reasoning")
   })
 
   it("repeats the complete phase contract at the end of initial and repair requests", async () => {

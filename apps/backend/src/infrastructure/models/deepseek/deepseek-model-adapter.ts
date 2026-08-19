@@ -4,6 +4,7 @@ import { ProxyAgent } from "undici"
 
 import {
   PROTOCOL_VERSION,
+  type ModelReasoningKind,
   type ModelContextMessageDraft,
   type PhaseRequestEnvelope,
 } from "@worldseed/contracts"
@@ -58,6 +59,7 @@ type PromptSnapshot = Readonly<{
 export type DeepSeekCompletionResponse = Readonly<{
   content: string | null
   reasoningContent?: string | null
+  reasoningKind?: ModelReasoningKind
   finishReason?: string | null
   responseId?: string
   messageFieldNames?: readonly string[]
@@ -187,6 +189,7 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
     })
     let lastError: unknown
     let totalInputTokens = 0
+    let lastRequestInputTokens: number | undefined
     let totalOutputTokens = 0
     let cacheHitInputTokens = 0
     let cacheMissInputTokens = 0
@@ -270,6 +273,7 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
         })
       }
       totalInputTokens += usage.inputTokens
+      if (response.usage !== undefined && response.usage !== null) lastRequestInputTokens = usage.inputTokens
       totalOutputTokens += usage.outputTokens
       if (usage.cacheHitInputTokens !== undefined) {
         cacheHitInputTokens += usage.cacheHitInputTokens
@@ -322,6 +326,7 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
           usage: {
             modelCalls: repairAttempt + 1,
             inputTokens: totalInputTokens,
+            ...(lastRequestInputTokens === undefined ? {} : { lastRequestInputTokens }),
             outputTokens: totalOutputTokens,
             latencyMs: Math.max(0, Date.now() - startedAt),
             ...(hasCacheHit ? { cacheHitInputTokens } : {}),
@@ -330,7 +335,11 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
             model: this.config.model,
             ...(response.reasoningContent === undefined || response.reasoningContent === null
               ? {}
-              : { reasoningContent: response.reasoningContent }),
+              : {
+                  reasoningContent: response.reasoningContent,
+                  reasoningKind: response.reasoningKind
+                    ?? (this.config.apiProtocol === "openai_responses" ? "provider_summary" : "provider_reasoning"),
+                }),
           },
         }
       } catch (error) {
@@ -416,7 +425,7 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
             ...(finishReason === undefined ? {} : { finishReason }),
             ...(responseId === undefined ? {} : { responseId }),
             messageFieldNames: Object.keys(responseRecord),
-            ...(reasoningContent === undefined ? {} : { reasoningContent }),
+            ...(reasoningContent === undefined ? {} : { reasoningContent, reasoningKind: "provider_summary" as const }),
             ...(usage === undefined ? {} : { usage }),
           }
         }
@@ -439,7 +448,7 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
           finishReason: response.choices[0]?.finish_reason ?? null,
           responseId: response.id,
           messageFieldNames: Object.keys(message),
-          ...(reasoningContent === undefined ? {} : { reasoningContent }),
+          ...(reasoningContent === undefined ? {} : { reasoningContent, reasoningKind: "provider_reasoning" as const }),
           usage: response.usage,
         }
       },

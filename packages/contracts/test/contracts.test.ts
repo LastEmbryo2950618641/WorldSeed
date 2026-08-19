@@ -167,6 +167,28 @@ describe("shared contracts", () => {
     expect(result.outcome).toBe("blocked")
   })
 
+  it("preserves provider reasoning display metadata in stored phase results", () => {
+    const result = phaseResultEnvelopeSchema.parse({
+      schemaVersion: 1,
+      envelopeId: ids.envelope,
+      contextId: ids.context,
+      phase: "source_retrieval",
+      outcome: "blocked",
+      requestedReads: [],
+      citedReadIds: [],
+      producedArtifactIds: [],
+      decisionRecordIds: [],
+      unresolvedDependencies: [],
+      reason: "The source is unavailable",
+      selfReview: "No unavailable source was treated as fact",
+      modelReasoning: "**Checking available sources**",
+      modelReasoningKind: "provider_summary",
+    })
+
+    expect(result.modelReasoning).toBe("**Checking available sources**")
+    expect(result.modelReasoningKind).toBe("provider_summary")
+  })
+
   it("supports archive-preserving graph retirement", () => {
     expect(graphMutationSchema.parse({
       operation: "retire_node",

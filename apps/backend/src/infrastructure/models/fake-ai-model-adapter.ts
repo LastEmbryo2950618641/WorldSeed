@@ -79,6 +79,7 @@ export class FakeAiModelAdapter implements AIModelPort {
       },
       usage: {
         inputTokens,
+        lastRequestInputTokens: inputTokens,
         outputTokens,
         latencyMs: Math.max(0, Date.now() - startedAt),
         cacheHitInputTokens: Math.floor(inputTokens / 2),
