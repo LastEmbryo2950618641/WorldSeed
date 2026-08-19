@@ -4,8 +4,8 @@ import { dirname, resolve } from "node:path"
 import process from "node:process"
 
 import Database from "better-sqlite3"
-import { auditPhaseCompletion, auditPromptPrefix } from "../../../scripts/acceptance/lib/full-chain-audit.mjs"
-import { auditVerificationProbeCoverage } from "./lib/graph-audit.mjs"
+import { auditPhaseCompletion, auditPromptPrefix, auditStageProjectionProfiles } from "../../../scripts/acceptance/lib/full-chain-audit.mjs"
+import { auditTemporalContinuityCoverage, auditVerificationProbeCoverage } from "./lib/graph-audit.mjs"
 const databasePath = resolve(requiredEnvironment("WORLDSEED_ACCEPTANCE_DB"))
 const workspace = resolve(requiredEnvironment("WORLDSEED_ACCEPTANCE_WORKSPACE"))
 const logPath = resolve(requiredEnvironment("WORLDSEED_ACCEPTANCE_LOG"))
@@ -17,13 +17,14 @@ const minimumRecentKvRate = readRatio("WORLDSEED_ACCEPTANCE_MIN_RECENT_KV", 0.98
 const database = new Database(databasePath, { readonly: true, fileMustExist: true })
 const project = database.prepare("select id, name from projects order by created_at desc limit 1").get()
 if (project === undefined) throw new Error("Acceptance database contains no project")
-const selectedTask = selectTask(database, process.env.WORLDSEED_ACCEPTANCE_TASK_ID)
+const selectedTask = selectTask(database, project.id, process.env.WORLDSEED_ACCEPTANCE_TASK_ID)
 const checks = []
 
 checks.push(check("completed_turn_exists", selectedTask?.status === "completed", selectedTask ?? null))
 checks.push(checkPhaseCompletion(database, selectedTask?.id))
 checks.push(checkFinalization(database, selectedTask?.id, workspace))
 checks.push(checkGraph(database, selectedTask?.id))
+checks.push(checkTemporalContinuity(database, selectedTask?.id))
 checks.push(checkGraphCapacity(database, project.id))
 checks.push(checkGraphArchiveOutlets(database, project.id))
 checks.push(checkWorkspaceIsolation(database, project.id, workspace))
@@ -35,6 +36,9 @@ checks.push(checkBackgroundEvolution(database))
 
 const runtimeEvents = await readRuntimeEvents(logPath)
 checks.push(checkPromptPrefix(database, runtimeEvents, selectedTask?.id))
+checks.push(selectedTask?.id === undefined
+  ? result("stage_projection_profiles", "insufficient", "No completed turn task is available")
+  : auditStageProjectionProfiles(runtimeEvents, selectedTask.id))
 checks.push(checkPromptRoles(runtimeEvents, selectedTask?.id))
 checks.push(checkKv(database, runtimeEvents, selectedTask?.id, minimumEffectiveKvRate, minimumRecentKvRate))
 
@@ -55,9 +59,19 @@ await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8")
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
 process.exitCode = report.summary.fail > 0 || report.summary.not_implemented > 0 || report.summary.insufficient > 0 ? 1 : 0
 
-function selectTask(database, taskId) {
+function selectTask(database, projectId, taskId) {
   if (taskId !== undefined) return database.prepare("select * from tasks where id = ?").get(taskId)
-  return database.prepare("select * from tasks where kind = 'turn' order by created_at desc limit 1").get()
+  const activeChapterTask = database.prepare(`
+    select tasks.*
+    from canonical_chapter_messages
+    join tasks on tasks.id = canonical_chapter_messages.task_id
+    where canonical_chapter_messages.project_id = ? and tasks.kind = 'turn'
+    order by canonical_chapter_messages.chapter_sequence desc, canonical_chapter_messages.created_at desc
+    limit 1
+  `).get(projectId)
+  return activeChapterTask ?? database.prepare(
+    "select * from tasks where project_id = ? and kind = 'turn' order by created_at desc limit 1",
+  ).get(projectId)
 }
 
 function checkPhaseCompletion(database, taskId) {
@@ -105,6 +119,12 @@ function checkGraph(database, taskId) {
     sourceUnits,
     frontiers,
   })
+}
+
+function checkTemporalContinuity(database, taskId) {
+  if (taskId === undefined) return result("temporal_continuity_coverage", "insufficient", "No completed turn task is available")
+  const coverage = auditTemporalContinuityCoverage(database, taskId)
+  return result("temporal_continuity_coverage", coverage.passed ? "pass" : "fail", coverage)
 }
 
 function checkGraphCapacity(database, projectId) {

@@ -13,3 +13,9 @@ export function createRetrievalGaps(
     query: request.query,
   }))
 }
+
+export function mergeRetrievalGaps(
+  ...groups: readonly (readonly TurnRetrievalGap[])[]
+): TurnRetrievalGap[] {
+  return [...new Map(groups.flat().map((gap) => [gap.requestId, gap])).values()]
+}

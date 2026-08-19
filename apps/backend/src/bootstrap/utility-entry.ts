@@ -15,7 +15,9 @@ export async function startBackendUtility(
 ): Promise<MessagePortTransport> {
   configureRuntimeDiagnostics(options.diagnostics)
   const container = await BackendContainer.open(options)
-  const transport = new MessagePortTransport(port, new BackendFacade(container))
+  const transport = new MessagePortTransport(port, new BackendFacade(container, {
+    automaticEvolutionEnabled: process.env.WORLDSEED_AUTOMATIC_EVOLUTION_ENABLED !== "false",
+  }))
   transport.attach()
   return transport
 }

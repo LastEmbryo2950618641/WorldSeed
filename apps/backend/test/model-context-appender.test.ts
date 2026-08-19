@@ -4,7 +4,7 @@ import type { PhaseRequestEnvelope, VisibleModelContextMessage } from "@worldsee
 import { ModelContextAppender } from "../src/index.js"
 
 describe("ModelContextAppender", () => {
-  it("appends only new turn data, evidence, and unrepresented artifacts", () => {
+  it("appends each consumer phase's dependencies once while preserving the stable chain prefix", () => {
     const appender = new ModelContextAppender()
     const request = createRequest()
     const firstModelRequest = createModelRequest([evidence("evidence_1")], {
@@ -48,8 +48,48 @@ describe("ModelContextAppender", () => {
     expect(secondInput.userInput).toBeUndefined()
     expect(secondInput.workspaceCatalog).toBeUndefined()
     expect(secondInput.readEvidence).toEqual([evidence("evidence_2")])
-    expect(secondInput.artifacts).toEqual({ rule_assembly: { selectedWorkspacePaths: [] } })
+    expect(secondInput.artifacts).toEqual({
+      interpret: { intent: "observe" },
+      rule_assembly: { selectedWorkspacePaths: [] },
+    })
     expect(secondDelta.committedReadIds).toEqual(["evidence_2"])
+  })
+
+  it("omits unchanged artifacts within one phase and reappends changed artifacts", () => {
+    const appender = new ModelContextAppender()
+    const request = { ...createRequest(), phase: "graph_structure_plan" as const }
+    const firstModelRequest = createModelRequest([], {
+      draft: { contentMarkdown: "第一版正文" },
+      dependency_audit: { sceneContinuity: [] },
+    })
+    firstModelRequest.phase = "graph_structure_plan"
+    const firstDelta = appender.createDelta(request, firstModelRequest, [systemMessage()])
+    const firstMessage = visibleMessage({
+      messageId: "00000000-0000-4000-8000-000000000013",
+      sequence: 1,
+      kind: "phase_request",
+      phase: "graph_structure_plan",
+      content: appender.formatDelta(firstDelta),
+    })
+
+    const unchanged = appender.createDelta(
+      request,
+      firstModelRequest,
+      [systemMessage(), firstMessage],
+    ) as { input: Record<string, unknown> }
+    expect(unchanged.input.artifacts).toBeUndefined()
+
+    const changedModelRequest = createModelRequest([], {
+      draft: { contentMarkdown: "第二版正文" },
+      dependency_audit: { sceneContinuity: [] },
+    })
+    changedModelRequest.phase = "graph_structure_plan"
+    const changed = appender.createDelta(
+      request,
+      changedModelRequest,
+      [systemMessage(), firstMessage],
+    ) as { input: Record<string, unknown> }
+    expect(changed.input.artifacts).toEqual({ draft: { contentMarkdown: "第二版正文" } })
   })
 
   it("appends graph capacity when it first appears and whenever it changes", () => {
@@ -109,6 +149,157 @@ describe("ModelContextAppender", () => {
       [systemMessage(), interpretMessage, governanceMessage],
     ) as { input: Record<string, unknown> }
     expect(changedDelta.input.graphCapacity).toEqual(changedRequest.input.graphCapacity)
+  })
+
+  it("does not append a repeated fact version under a different read ID", () => {
+    const appender = new ModelContextAppender()
+    const request = createRequest()
+    const firstEvidence = {
+      ...evidence("evidence_1"),
+      versionKey: "node:node_1:revision_1",
+      ownerKind: "node",
+      ownerId: "node_1",
+      digest: "projection-a",
+    }
+    const repeatedEvidence = {
+      ...firstEvidence,
+      readId: "evidence_2",
+      canonicalReadId: "evidence_1",
+      readIdAliases: ["evidence_2"],
+      digest: "projection-b",
+    }
+    const firstDelta = appender.createDelta(
+      request,
+      createModelRequest([firstEvidence], {}),
+      [systemMessage()],
+    )
+    const firstMessage = visibleMessage({
+      messageId: "00000000-0000-4000-8000-000000000031",
+      sequence: 1,
+      kind: "phase_request",
+      phase: "interpret",
+      content: appender.formatDelta(firstDelta),
+    })
+    const secondRequest = createModelRequest([repeatedEvidence], {})
+    const secondDelta = appender.createDelta(
+      { ...request, phase: "rule_assembly" },
+      secondRequest,
+      [systemMessage(), firstMessage],
+    ) as { input: Record<string, unknown>; committedReadIds: readonly string[] }
+
+    expect(secondDelta.input.readEvidence).toBeUndefined()
+    expect(secondDelta.committedReadIds).toEqual([])
+  })
+
+  it("does not reappend visible legacy evidence when the current view adds a version key", () => {
+    const appender = new ModelContextAppender()
+    const request = createRequest()
+    const legacyEvidence = {
+      ...evidence("evidence_1"),
+      ownerKind: "node",
+      ownerId: "node_1",
+      digest: "projection-a",
+    }
+    const canonicalEvidence = {
+      ...legacyEvidence,
+      canonicalReadId: "evidence_1",
+      readIdAliases: ["evidence_2"],
+      versionKey: "node:node_1:revision_1",
+    }
+    const firstDelta = appender.createDelta(
+      request,
+      createModelRequest([legacyEvidence], {}),
+      [systemMessage()],
+    )
+    const firstMessage = visibleMessage({
+      messageId: "00000000-0000-4000-8000-000000000033",
+      sequence: 1,
+      kind: "phase_request",
+      phase: "interpret",
+      content: appender.formatDelta(firstDelta),
+    })
+
+    const secondDelta = appender.createDelta(
+      { ...request, phase: "rule_assembly" },
+      createModelRequest([canonicalEvidence], {}),
+      [systemMessage(), firstMessage],
+    ) as { input: Record<string, unknown>; committedReadIds: readonly string[] }
+
+    expect(secondDelta.input.readEvidence).toBeUndefined()
+    expect(secondDelta.committedReadIds).toEqual([])
+  })
+
+  it("repeats only explicitly resurfaced evidence already visible in the chain", () => {
+    const appender = new ModelContextAppender()
+    const request = createRequest()
+    const firstEvidence = {
+      ...evidence("evidence_1"),
+      canonicalReadId: "evidence_1",
+      readIdAliases: ["evidence_2"],
+      versionKey: "node:node_1:revision_1",
+    }
+    const firstDelta = appender.createDelta(
+      request,
+      createModelRequest([firstEvidence], {}),
+      [systemMessage()],
+    )
+    const firstMessage = visibleMessage({
+      messageId: "00000000-0000-4000-8000-000000000032",
+      sequence: 1,
+      kind: "phase_request",
+      phase: "interpret",
+      content: appender.formatDelta(firstDelta),
+    })
+    const secondRequest = createModelRequest([firstEvidence], {})
+    secondRequest.input.resurfacedReadIds = ["evidence_2"]
+
+    const secondDelta = appender.createDelta(
+      { ...request, phase: "interpret" },
+      secondRequest,
+      [systemMessage(), firstMessage],
+    ) as { input: Record<string, unknown>; committedReadIds: readonly string[] }
+
+    expect(secondDelta.input.resurfacedReadIds).toEqual(["evidence_2"])
+    expect(secondDelta.input.readEvidence).toEqual([firstEvidence])
+    expect(secondDelta.committedReadIds).toEqual(["evidence_1"])
+  })
+
+  it("appends stage projections only when their canonical digest changes", () => {
+    const appender = new ModelContextAppender()
+    const request = createRequest()
+    const projection = { kind: "graph_governance_review", projectionDigest: "projection-a", proposals: [] }
+    const firstRequest = createModelRequest([], {})
+    firstRequest.input.stageProjection = projection
+    const firstDelta = appender.createDelta(
+      { ...request, phase: "graph_governance_review" },
+      firstRequest,
+      [systemMessage()],
+    ) as { input: Record<string, unknown> }
+    const firstMessage = visibleMessage({
+      messageId: "00000000-0000-4000-8000-000000000041",
+      sequence: 1,
+      kind: "phase_request",
+      phase: "graph_governance_review",
+      content: appender.formatDelta(firstDelta),
+    })
+
+    expect(firstDelta.input.stageProjection).toEqual(projection)
+
+    const unchanged = appender.createDelta(
+      { ...request, phase: "graph_governance_review" },
+      firstRequest,
+      [systemMessage(), firstMessage],
+    ) as { input: Record<string, unknown> }
+    expect(unchanged.input.stageProjection).toBeUndefined()
+
+    const changedRequest = createModelRequest([], {})
+    changedRequest.input.stageProjection = { ...projection, projectionDigest: "projection-b" }
+    const changed = appender.createDelta(
+      { ...request, phase: "graph_governance_review" },
+      changedRequest,
+      [systemMessage(), firstMessage],
+    ) as { input: Record<string, unknown> }
+    expect(changed.input.stageProjection).toMatchObject({ projectionDigest: "projection-b" })
   })
 })
 

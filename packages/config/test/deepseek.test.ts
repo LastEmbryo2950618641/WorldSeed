@@ -50,10 +50,10 @@ describe("DeepSeek environment configuration", () => {
     })).toThrow("must be true or false")
   })
 
-  it("rejects unsupported reasoning effort settings", () => {
-    expect(() => deepSeekRuntimeConfigFromEnvironment({
+  it("accepts medium reasoning effort settings", () => {
+    expect(deepSeekRuntimeConfigFromEnvironment({
       DEEPSEEK_API_KEY: "test-key",
       WORLDSEED_DEEPSEEK_REASONING_EFFORT: "medium",
-    })).toThrow()
+    })).toMatchObject({ reasoningEffort: "medium" })
   })
 })

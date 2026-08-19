@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { ContextWindowManager } from "../src/index.js"
+import { ContextWindowManager, estimateModelMessageTokens } from "../src/index.js"
 import type { ModelContextMessage } from "@worldseed/contracts"
 
 function message(input: Partial<ModelContextMessage> & Pick<ModelContextMessage, "messageId" | "sequence" | "kind" | "tokenEstimate">): ModelContextMessage {
@@ -22,6 +22,10 @@ function message(input: Partial<ModelContextMessage> & Pick<ModelContextMessage,
 }
 
 describe("ContextWindowManager", () => {
+  it("does not undercount common Chinese text as three quarters of a token per character", () => {
+    expect(estimateModelMessageTokens("世界连续演化")).toBe(14)
+  })
+
   it("removes older non-narrative messages before older chapters", () => {
     const turnId = "00000000-0000-4000-8000-000000000010"
     const messages = [

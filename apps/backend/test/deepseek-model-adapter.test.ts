@@ -98,6 +98,9 @@ describe("DeepSeekAiModelAdapter", () => {
       "user",
       "user",
     ])
+    const outputReminder = completionMessages.at(-1)?.content ?? ""
+    expect(outputReminder.indexOf("FINAL PHASE-SPECIFIC REQUIREMENTS FOR interpret:"))
+      .toBeGreaterThan(outputReminder.indexOf("complete model-facing result schema"))
     expect(execution.contextExchange?.requestMessages.map((message) => message.kind)).toEqual([
       "phase_request",
       "phase_instruction",
@@ -267,8 +270,11 @@ describe("DeepSeekAiModelAdapter", () => {
     )
     expect(secondDelta).toContain("evidence_2")
     expect(secondDelta).not.toContain("evidence_1")
-    expect(secondDelta).not.toContain("只在本轮第一次追加的用户输入")
-    expect(secondDelta).not.toContain('"interpret"')
+    const secondDeltaInput = JSON.parse(
+      secondDelta.slice("Worldseed context delta JSON:\n".length),
+    ) as { input?: { userInput?: unknown; artifacts?: Record<string, unknown> } }
+    expect(secondDeltaInput.input?.userInput).toBeUndefined()
+    expect(secondDeltaInput.input?.artifacts?.interpret).toEqual(firstResult.result.artifact)
   })
 
   it("sends model aliases instead of technical UUIDs and restores returned aliases", async () => {
@@ -711,6 +717,7 @@ describe("DeepSeekAiModelAdapter", () => {
     expect(finalMessage).toContain("currently has 3 persisted narrative source unit(s)")
     expect(finalMessage).toContain("sceneContinuity must not be empty")
     expect(finalMessage).toContain("indexes exactly: 0, 1, 2")
+    expect(finalMessage).toContain("same subject, action or state, and result")
     expect(finalMessage).not.toContain("This background evolution has no narrative source units")
   })
 
@@ -759,13 +766,15 @@ describe("DeepSeekAiModelAdapter", () => {
       sceneSpacetimeBindings: readonly Record<string, unknown>[]
     }
     let calls = 0
+    let firstRequestTail = ""
     const adapter = new DeepSeekAiModelAdapter(
       { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 1 },
       { getSecret: () => Promise.resolve("test-key") },
       new NodePromptResourceAdapter(promptRoot),
       {
-        complete: () => {
+        complete: (input) => {
           calls += 1
+          if (calls === 1) firstRequestTail = input.messages.at(-1)?.content ?? ""
           const artifact = {
             ...validArtifact,
             sceneSpacetimeBindings: validArtifact.sceneSpacetimeBindings.map((binding) => ({
@@ -785,6 +794,11 @@ describe("DeepSeekAiModelAdapter", () => {
     const execution = await adapter.execute(request)
 
     expect(calls).toBe(2)
+    expect(firstRequestTail).toContain("Scene 0: predecessorSceneIndexes must equal []")
+    expect(firstRequestTail).toContain("predecessorSceneAnchorRefs must be non-empty")
+    expect(firstRequestTail).toContain("transitionPathRefs must be non-empty")
+    expect(firstRequestTail).toContain("When a predecessorSceneRef is evidence")
+    expect(firstRequestTail).not.toContain("predecessorSceneRefs are evidence references")
     expect(execution.result.artifact).toMatchObject({
       sceneSpacetimeBindings: [{ transitionPathRefs: ["local:occurrence"] }],
     })
@@ -1335,6 +1349,160 @@ describe("DeepSeekAiModelAdapter", () => {
     try {
       await expect(adapter.execute(request)).rejects.toThrow("DeepSeek request failed")
       expect(Date.now() - startedAt).toBeLessThan(1_000)
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => { if (error === undefined) resolve(); else reject(error) })
+      })
+    }
+  })
+
+  it("uses the OpenAI Responses protocol without storing remote response state", async () => {
+    const phaseRequest = createRequest()
+    const fake = await new FakeAiModelAdapter(randomUUID).execute(phaseRequest)
+    let receivedPath = ""
+    let receivedUserAgent = ""
+    let receivedBody: Record<string, unknown> = {}
+    const server = createServer((request, response) => {
+      receivedPath = request.url ?? ""
+      receivedUserAgent = request.headers["user-agent"] ?? ""
+      const chunks: Buffer[] = []
+      request.on("data", (chunk: Buffer) => { chunks.push(chunk) })
+      request.on("end", () => {
+        receivedBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>
+        response.writeHead(200, { "content-type": "application/json" })
+        response.end(JSON.stringify({
+          id: "resp_test",
+          object: "response",
+          created_at: Math.floor(Date.now() / 1000),
+          status: "completed",
+          output_text: JSON.stringify(toModelResult(fake.result)),
+          output: [
+            {
+              id: "reasoning_test",
+              type: "reasoning",
+              status: "completed",
+              summary: [{ type: "summary_text", text: "检查了当前阶段契约。" }],
+            },
+            {
+              id: "message_test",
+              type: "message",
+              status: "completed",
+              role: "assistant",
+              content: [{
+                type: "output_text",
+                text: JSON.stringify(toModelResult(fake.result)),
+                annotations: [],
+                logprobs: [],
+              }],
+            },
+          ],
+          usage: {
+            input_tokens: 100,
+            input_tokens_details: { cached_tokens: 80, cache_write_tokens: 0 },
+            output_tokens: 20,
+            output_tokens_details: { reasoning_tokens: 5 },
+            total_tokens: 120,
+          },
+        }))
+      })
+    })
+    await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve) })
+    const address = server.address() as AddressInfo
+    const adapter = new DeepSeekAiModelAdapter(
+      {
+        ...defaultDeepSeekRuntimeConfig,
+        apiProtocol: "openai_responses",
+        baseUrl: `http://127.0.0.1:${String(address.port)}`,
+        disableResponseStorage: true,
+        serviceTier: "fast",
+        reasoningEffort: "xhigh",
+        jsonModeEnabled: true,
+        maxAttempts: 1,
+        maxSchemaRepairAttempts: 0,
+      },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+    )
+
+    try {
+      const execution = await adapter.execute(phaseRequest)
+      expect(receivedPath).toBe("/responses")
+      expect(receivedUserAgent).toBe("Worldseed/0.1")
+      expect(receivedBody.store).toBe(false)
+      expect(receivedBody.service_tier).toBe("fast")
+      expect(receivedBody.reasoning).toEqual({ effort: "xhigh", summary: "detailed" })
+      expect(receivedBody.text).toEqual({ format: { type: "json_object" } })
+      expect(receivedBody.input).toEqual(expect.arrayContaining([
+        expect.objectContaining({ role: "system" }),
+        expect.objectContaining({ role: "user" }),
+      ]))
+      expect(execution.usage.reasoningContent).toContain("检查了当前阶段契约")
+      expect(execution.usage).toMatchObject({
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheHitInputTokens: 80,
+        cacheMissInputTokens: 20,
+      })
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => { if (error === undefined) resolve(); else reject(error) })
+      })
+    }
+  })
+
+  it("omits the Responses service tier when automatic provider selection is configured", async () => {
+    const phaseRequest = createRequest()
+    const fake = await new FakeAiModelAdapter(randomUUID).execute(phaseRequest)
+    let receivedBody: Record<string, unknown> = {}
+    const server = createServer((request, response) => {
+      const chunks: Buffer[] = []
+      request.on("data", (chunk: Buffer) => { chunks.push(chunk) })
+      request.on("end", () => {
+        receivedBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>
+        response.writeHead(200, { "content-type": "application/json" })
+        response.end(JSON.stringify({
+          id: "resp_auto_tier",
+          object: "response",
+          status: "completed",
+          output_text: JSON.stringify(toModelResult(fake.result)),
+          output: [{
+            id: "message_auto_tier",
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [{
+              type: "output_text",
+              text: JSON.stringify(toModelResult(fake.result)),
+              annotations: [],
+              logprobs: [],
+            }],
+          }],
+          usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+        }))
+      })
+    })
+    await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve) })
+    const address = server.address() as AddressInfo
+    const adapter = new DeepSeekAiModelAdapter(
+      {
+        ...defaultDeepSeekRuntimeConfig,
+        apiProtocol: "openai_responses",
+        baseUrl: `http://127.0.0.1:${String(address.port)}`,
+        serviceTier: "auto",
+        thinkingModeEnabled: false,
+        jsonModeEnabled: false,
+        maxAttempts: 1,
+        maxSchemaRepairAttempts: 0,
+      },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+    )
+
+    try {
+      await adapter.execute(phaseRequest)
+      expect(receivedBody).not.toHaveProperty("service_tier")
     } finally {
       server.closeAllConnections()
       await new Promise<void>((resolve, reject) => {
@@ -2910,6 +3078,118 @@ describe("DeepSeekAiModelAdapter", () => {
 
     expect(execution.result.artifact).toMatchObject({ approvedAffectedFrontierRefs: ["local:world"] })
     expect(finalMessage).toContain("affected frontiers available for review: local:world")
+  })
+
+  it("pins every approved frontier to an exact output array position", async () => {
+    const affectedFrontierRefs = ["local:alpha", "local:beta"]
+    const governance = {
+      mutations: affectedFrontierRefs.map((ref) => ({ operation: "create_node" as const, ref, data: { content: ref } })),
+      retrievalProjections: [],
+      settlementRecords: [],
+      mutationSpacetimeSettlements: [],
+      sceneSpacetimeBindings: [],
+      affectedFrontierRefs,
+      archiveOutletRefs: [],
+      decisionRecords: [],
+    }
+    const semanticReview = {
+      approvedMutationIndexes: [0, 1],
+      rejectedMutationIndexes: [],
+      approvedSpacetimeBindingIndexes: [],
+      rejectedSpacetimeBindingIndexes: [],
+      approvedMutationSpacetimeSettlementIndexes: [],
+      rejectedMutationSpacetimeSettlementIndexes: [],
+      approvedAffectedFrontierRefs: affectedFrontierRefs,
+      rejectedAffectedFrontierRefs: [],
+      verificationProbeAssessments: [],
+      sceneInventoryComplete: true,
+      graphStillDiscoverable: true,
+      graphStillConcise: true,
+      continuityPreserved: true,
+      spacetimeContinuityPreserved: true,
+    }
+    const request = createRequest({
+      phase: "frontier_settlement",
+      input: {
+        workflow: "turn",
+        userInput: "继续推进。",
+        chapterSequence: 1,
+        sourceId: randomUUID(),
+        sourceUnitIds: [],
+        phaseRunIds: [],
+        readEvidence: [],
+        retrievalGaps: [],
+        artifacts: {},
+        validationArtifacts: { graph_governance: governance, semantic_review: semanticReview },
+        stageProjection: {
+          kind: "frontier_settlement",
+          version: 1,
+          sourceArtifactDigests: {
+            graph_governance: "digest-governance",
+            semantic_review: "digest-review",
+            settlement_review: "digest-settlement",
+          },
+          pendingScope: { scopeId: "scope_1", candidateDigest: "digest-scope" },
+          projectionDigest: "digest-projection",
+          unresolvedIssues: [],
+          affectedFrontierRefs,
+          approvedSceneBindings: [],
+          archiveOutletRefs: [],
+          correspondenceRefs: [],
+          priorFrontierStates: [{
+            frontierAnchorRef: "local:alpha",
+            lastSceneAnchorRefs: ["local:old-scene"],
+            lastTimeAnchorRefs: ["local:old-time"],
+            lastLocationAnchorRefs: ["local:old-place"],
+            correspondenceRefs: ["local:old-correspondence"],
+          }],
+        },
+      },
+    })
+    let finalMessage = ""
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 0 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      {
+        complete: (input) => {
+          finalMessage = input.messages.at(-1)?.content ?? ""
+          return Promise.resolve({
+            content: JSON.stringify({
+              outcome: "continue",
+              artifact: {
+                frontiers: affectedFrontierRefs.map((frontierAnchorRef) => ({
+                  frontierAnchorRef,
+                  disposition: "archived",
+                  lastSceneAnchorRefs: [],
+                  lastTimeAnchorRefs: [],
+                  lastLocationAnchorRefs: [],
+                  correspondenceRefs: [],
+                  reason: "当前局部已归档。",
+                })),
+              },
+              requestedReads: [],
+              citedReadIds: [],
+              unresolvedDependencies: [],
+              reason: "完成前沿结算。",
+              selfReview: "已逐项核对批准引用。",
+            }),
+            usage: { prompt_tokens: 10, completion_tokens: 5 },
+          })
+        },
+      },
+    )
+
+    await adapter.execute(request)
+
+    expect(finalMessage).toContain("Approved frontier count: 2")
+    expect(finalMessage).toContain("artifact.frontiers length must be exactly 2 and must not be empty")
+    expect(finalMessage).toContain('[0].frontierAnchorRef must be exactly "local:alpha"')
+    expect(finalMessage).toContain('[1].frontierAnchorRef must be exactly "local:beta"')
+    expect(finalMessage).toContain("Prior anchors for frontier local:alpha")
+    expect(finalMessage).toContain("lastSceneAnchorRefs=[local:old-scene]")
+    expect(finalMessage.indexOf("FINAL PHASE-SPECIFIC REQUIREMENTS FOR frontier_settlement:"))
+      .toBeGreaterThan(finalMessage.indexOf("Required top-level shape:"))
   })
 
 })

@@ -91,7 +91,113 @@ function graphRevision(
   }
 }
 
+function testId(index: number): string {
+  return `10000000-0000-4000-8000-${String(index).padStart(12, "0")}`
+}
+
+async function createPendingRetrievalFixture() {
+  const directory = temporaryDirectory()
+  const database = await openProjectDatabase(join(directory, "pending-retrieval.sqlite"))
+  const projectId = testId(900)
+  const scopeId = testId(901)
+  const projectRepository = new SqliteProjectRepository(
+    database,
+    join(directory, "workspace"),
+    join(directory, "internal"),
+  )
+  const manifest: ProjectManifest = {
+    id: projectId,
+    protocolVersion: "worldseed.v1",
+    manifestVersion: 1,
+    displayName: "Pending Retrieval",
+    workspaceRootRef: join(directory, "workspace"),
+    fixedEntries: fixedWorkspaceEntries,
+    internalStoreRef: join(directory, "internal"),
+    manifestDigest: digest(fixedWorkspaceEntries),
+  }
+  await projectRepository.create({
+    projectId,
+    name: manifest.displayName,
+    manifestVersion: 1,
+    committedSequence: 0,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+  }, manifest)
+  await new SqliteTaskScopeRepository(database).create({
+    projectId,
+    taskId: testId(902),
+    turnId: testId(903),
+    scopeId,
+    kind: "turn",
+    status: "created",
+    reason: "Exercise pending retrieval idempotency",
+    configSnapshot: {},
+    promptSnapshot: {},
+    createdAtMs: 2,
+  })
+  return {
+    database,
+    projectId,
+    scopeId,
+    repository: new SqliteRetrievalRepository(database),
+  }
+}
+
 describe("SQLite repository contract", () => {
+  it("reuses an identical pending projection during resumed finalization", async () => {
+    const fixture = await createPendingRetrievalFixture()
+    const input = {
+      projectionId: testId(904),
+      projectId: fixture.projectId,
+      scopeId: fixture.scopeId,
+      ownerKind: "node",
+      ownerId: "node_26",
+      ownerRevisionId: "revision_1091",
+      exactKeys: ["旅人", "七点整"],
+      semanticText: "旅人七点整后接近雾港。",
+      sourceRefs: [{ sourceId: "source_98" }],
+      digest: "canonical-projection-digest",
+    }
+
+    const first = await fixture.repository.stageProjection(input)
+    const resumed = await fixture.repository.stageProjection({
+      ...input,
+      projectionId: testId(905),
+    })
+    const rows = await fixture.database.selectFrom("retrieval_projections").selectAll().execute()
+    const exactKeys = await fixture.database.selectFrom("retrieval_exact_keys").selectAll().execute()
+    await fixture.database.destroy()
+
+    expect(resumed.projectionId).toBe(first.projectionId)
+    expect(rows).toHaveLength(1)
+    expect(exactKeys).toHaveLength(2)
+  })
+
+  it("rejects different pending projection content for one canonical owner revision", async () => {
+    const fixture = await createPendingRetrievalFixture()
+    const input = {
+      projectionId: testId(906),
+      projectId: fixture.projectId,
+      scopeId: fixture.scopeId,
+      ownerKind: "node",
+      ownerId: "node_26",
+      ownerRevisionId: "revision_1091",
+      exactKeys: ["旅人"],
+      semanticText: "旅人仍在柳渡。",
+      sourceRefs: [{ sourceId: "source_98" }],
+      digest: "first-projection-digest",
+    }
+    await fixture.repository.stageProjection(input)
+
+    await expect(fixture.repository.stageProjection({
+      ...input,
+      projectionId: testId(907),
+      semanticText: "旅人已经抵达雾港。",
+      digest: "conflicting-projection-digest",
+    })).rejects.toThrow("Pending retrieval projection conflicts with canonical owner revision")
+    await fixture.database.destroy()
+  })
+
   it("registers projects and resolves them by stable workspace identity", async () => {
     const directory = temporaryDirectory()
     const database = await openRegistryDatabase(join(directory, "registry.sqlite"))
@@ -578,5 +684,271 @@ describe("SQLite repository contract", () => {
     expect(await graphRepository.getNode({ projectId: ids.project }, ids.node3)).toBeUndefined()
     expect((await scopeRepository.findScope(ids.scope4))?.visibility).toBe("retired")
     await database.destroy()
+  })
+
+  it("keeps a strong historical fact beside its current owner when short current matches fill the limit", async () => {
+    const directory = temporaryDirectory()
+    const database = await openProjectDatabase(join(directory, "historical-fact-retrieval.sqlite"))
+    const projectId = testId(100)
+    const firstScopeId = testId(101)
+    const secondScopeId = testId(102)
+    const targetNodeId = testId(103)
+    const projectRepository = new SqliteProjectRepository(
+      database,
+      join(directory, "workspace"),
+      join(directory, "internal"),
+    )
+    const scopeRepository = new SqliteTaskScopeRepository(database)
+    const graphRepository = new SqliteGraphRepository(database)
+    const retrievalRepository = new SqliteRetrievalRepository(database)
+    const commitRepository = new SqliteScopeCommitRepository(database)
+    const manifest: ProjectManifest = {
+      id: projectId,
+      protocolVersion: "worldseed.v1",
+      manifestVersion: 1,
+      displayName: "Historical Fact Retrieval",
+      workspaceRootRef: join(directory, "workspace"),
+      fixedEntries: fixedWorkspaceEntries,
+      internalStoreRef: join(directory, "internal"),
+      manifestDigest: digest(fixedWorkspaceEntries),
+    }
+    await projectRepository.create({
+      projectId,
+      name: manifest.displayName,
+      manifestVersion: 1,
+      committedSequence: 0,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+    }, manifest)
+    await scopeRepository.create({
+      projectId,
+      taskId: testId(104),
+      turnId: testId(105),
+      scopeId: firstScopeId,
+      kind: "turn",
+      status: "created",
+      reason: "Create historical fact retrieval fixture",
+      configSnapshot: {},
+      promptSnapshot: {},
+      createdAtMs: 10,
+    })
+
+    const distractorNodeIds = Array.from({ length: 8 }, (_, index) => testId(120 + index))
+    await graphRepository.stageRevisions(projectId, firstScopeId, [
+      graphRevision(testId(140), firstScopeId, "node", targetNodeId, {
+        id: targetNodeId,
+        content: { state: "旅人清晨持有三张车票" },
+      }),
+      ...distractorNodeIds.map((nodeId, index) => graphRevision(testId(150 + index), firstScopeId, "node", nodeId, {
+        id: nodeId,
+        content: { state: `旅人清晨持有普通物件${String(index)}` },
+      })),
+    ])
+    await retrievalRepository.stageProjection({
+      projectionId: testId(160),
+      projectId,
+      scopeId: firstScopeId,
+      ownerKind: "node",
+      ownerId: targetNodeId,
+      ownerRevisionId: testId(140),
+      exactKeys: [],
+      semanticText: "旅人清晨持有三张车票",
+      sourceRefs: [],
+      digest: "historical-target",
+    })
+    for (const [index, nodeId] of distractorNodeIds.entries()) {
+      await retrievalRepository.stageProjection({
+        projectionId: testId(170 + index),
+        projectId,
+        scopeId: firstScopeId,
+        ownerKind: "node",
+        ownerId: nodeId,
+        ownerRevisionId: testId(150 + index),
+        exactKeys: [],
+        semanticText: `旅人清晨持有普通物件${String(index)}`,
+        sourceRefs: [],
+        digest: `distractor-${String(index)}`,
+      })
+    }
+    await commitRepository.commit(firstScopeId)
+
+    await scopeRepository.create({
+      projectId,
+      taskId: testId(106),
+      turnId: testId(107),
+      scopeId: secondScopeId,
+      kind: "turn",
+      status: "created",
+      reason: "Move the target without restating unchanged possessions",
+      configSnapshot: {},
+      promptSnapshot: {},
+      createdAtMs: 20,
+    })
+    await graphRepository.stageRevisions(projectId, secondScopeId, [
+      graphRevision(testId(141), secondScopeId, "node", targetNodeId, {
+        id: targetNodeId,
+        content: { state: "旅人当前到达柳渡" },
+      }),
+    ])
+    await retrievalRepository.stageProjection({
+      projectionId: testId(161),
+      projectId,
+      scopeId: secondScopeId,
+      ownerKind: "node",
+      ownerId: targetNodeId,
+      ownerRevisionId: testId(141),
+      exactKeys: [],
+      semanticText: "旅人当前到达柳渡",
+      sourceRefs: [],
+      digest: "current-target",
+    })
+    await commitRepository.commit(secondScopeId)
+
+    const matches = await retrievalRepository.searchText(
+      { projectId },
+      "旅人 清晨 持有 三张车票",
+      4,
+    )
+    await database.destroy()
+    expect(matches.filter((projection) => projection.ownerId === targetNodeId).map((projection) => ({
+      projectionId: projection.projectionId,
+      stateRole: projection.stateRole,
+    }))).toEqual([
+      { projectionId: testId(161), stateRole: "current" },
+      { projectionId: testId(160), stateRole: "historical" },
+    ])
+  })
+
+  it("does not let the first Chinese query term consume every semantic candidate", async () => {
+    const directory = temporaryDirectory()
+    const database = await openProjectDatabase(join(directory, "balanced-chinese-retrieval.sqlite"))
+    const projectId = testId(200)
+    const firstScopeId = testId(201)
+    const secondScopeId = testId(202)
+    const targetNodeId = testId(203)
+    const projectRepository = new SqliteProjectRepository(
+      database,
+      join(directory, "workspace"),
+      join(directory, "internal"),
+    )
+    const scopeRepository = new SqliteTaskScopeRepository(database)
+    const graphRepository = new SqliteGraphRepository(database)
+    const retrievalRepository = new SqliteRetrievalRepository(database)
+    const commitRepository = new SqliteScopeCommitRepository(database)
+    const manifest: ProjectManifest = {
+      id: projectId,
+      protocolVersion: "worldseed.v1",
+      manifestVersion: 1,
+      displayName: "Balanced Chinese Retrieval",
+      workspaceRootRef: join(directory, "workspace"),
+      fixedEntries: fixedWorkspaceEntries,
+      internalStoreRef: join(directory, "internal"),
+      manifestDigest: digest(fixedWorkspaceEntries),
+    }
+    await projectRepository.create({
+      projectId,
+      name: manifest.displayName,
+      manifestVersion: 1,
+      committedSequence: 0,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+    }, manifest)
+    await scopeRepository.create({
+      projectId,
+      taskId: testId(204),
+      turnId: testId(205),
+      scopeId: firstScopeId,
+      kind: "turn",
+      status: "created",
+      reason: "Create balanced semantic retrieval fixture",
+      configSnapshot: {},
+      promptSnapshot: {},
+      createdAtMs: 10,
+    })
+
+    const distractorNodeIds = Array.from({ length: 8 }, (_, index) => testId(220 + index))
+    await graphRepository.stageRevisions(projectId, firstScopeId, [
+      graphRevision(testId(240), firstScopeId, "node", targetNodeId, {
+        id: targetNodeId,
+        content: { state: "旅人持有三张车票与空信封" },
+      }),
+      ...distractorNodeIds.map((nodeId, index) => graphRevision(testId(250 + index), firstScopeId, "node", nodeId, {
+        id: nodeId,
+        content: { state: `主角当前持有事物清单中的钥匙${String(index)}` },
+      })),
+    ])
+    await retrievalRepository.stageProjection({
+      projectionId: testId(260),
+      projectId,
+      scopeId: firstScopeId,
+      ownerKind: "node",
+      ownerId: targetNodeId,
+      ownerRevisionId: testId(240),
+      exactKeys: [],
+      semanticText: "旅人持有三张车票与空信封",
+      sourceRefs: [],
+      digest: "balanced-target-history",
+    })
+    for (const [index, nodeId] of distractorNodeIds.entries()) {
+      await retrievalRepository.stageProjection({
+        projectionId: testId(270 + index),
+        projectId,
+        scopeId: firstScopeId,
+        ownerKind: "node",
+        ownerId: nodeId,
+        ownerRevisionId: testId(250 + index),
+        exactKeys: [],
+        semanticText: `主角当前持有事物清单中的钥匙${String(index)}`,
+        sourceRefs: [],
+        digest: `balanced-distractor-${String(index)}`,
+      })
+    }
+    await commitRepository.commit(firstScopeId)
+
+    await scopeRepository.create({
+      projectId,
+      taskId: testId(206),
+      turnId: testId(207),
+      scopeId: secondScopeId,
+      kind: "turn",
+      status: "created",
+      reason: "Move the target without restating stable inventory",
+      configSnapshot: {},
+      promptSnapshot: {},
+      createdAtMs: 20,
+    })
+    await graphRepository.stageRevisions(projectId, secondScopeId, [
+      graphRevision(testId(241), secondScopeId, "node", targetNodeId, {
+        id: targetNodeId,
+        content: { state: "旅人到达柳渡镇口候车亭" },
+      }),
+    ])
+    await retrievalRepository.stageProjection({
+      projectionId: testId(261),
+      projectId,
+      scopeId: secondScopeId,
+      ownerKind: "node",
+      ownerId: targetNodeId,
+      ownerRevisionId: testId(241),
+      exactKeys: [],
+      semanticText: "旅人到达柳渡镇口候车亭",
+      sourceRefs: [],
+      digest: "balanced-target-current",
+    })
+    await commitRepository.commit(secondScopeId)
+
+    const matches = await retrievalRepository.searchText(
+      { projectId },
+      "主角目前持有的事物清单：钥匙、车票、信封及其来处",
+      6,
+    )
+    await database.destroy()
+    expect(matches.filter((projection) => projection.ownerId === targetNodeId).map((projection) => ({
+      projectionId: projection.projectionId,
+      stateRole: projection.stateRole,
+    }))).toEqual([
+      { projectionId: testId(261), stateRole: "current" },
+      { projectionId: testId(260), stateRole: "historical" },
+    ])
   })
 })

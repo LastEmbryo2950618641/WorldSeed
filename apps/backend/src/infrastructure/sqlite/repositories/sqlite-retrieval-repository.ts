@@ -19,6 +19,22 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
     projection: Omit<RetrievalProjection, "visibility">,
   ): Promise<RetrievalProjection> {
     await assertPendingScope(this.database, projection.projectId, projection.scopeId)
+    const existing = await this.database.selectFrom("retrieval_projections").selectAll()
+      .where("project_id", "=", projection.projectId)
+      .where("scope_id", "=", projection.scopeId)
+      .where("owner_kind", "=", projection.ownerKind)
+      .where("owner_id", "=", projection.ownerId)
+      .where("owner_revision_id", "=", projection.ownerRevisionId)
+      .where("visibility", "=", "pending")
+      .executeTakeFirst()
+    if (existing !== undefined) {
+      if (!sameProjectionContent(existing, projection)) {
+        throw new Error(
+          `Pending retrieval projection conflicts with canonical owner revision: ${projection.ownerKind}:${projection.ownerId}@${projection.ownerRevisionId}`,
+        )
+      }
+      return mapProjection(existing)
+    }
     await this.insertProjection(projection, "pending")
     return { ...projection, visibility: "pending" as const }
   }
@@ -214,13 +230,15 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
         Math.max(limit, currentProjections.length),
         currentProjections.map((projection) => projection.projectionId),
       )
-    const shortTerms = extractShortSearchTerms(normalizedExpression)
-    const shortTextMatches = shortTerms.length === 0
+    const shortTerms = extractSubstringSearchTerms(normalizedExpression)
+    const shortTextMatchesByTerm = shortTerms.length === 0
       ? []
-      : (await Promise.all(shortTerms.map((term) => this.searchShortText(scope, term, limit)))).flat()
-    const currentShortMatches = shortTerms.length === 0
-      ? []
-      : currentProjections.filter((projection) => shortTerms.some((term) => projection.semanticText.includes(term)))
+      : await Promise.all(shortTerms.map((term) => this.searchShortText(scope, term, limit)))
+    const currentShortMatchesByTerm = shortTerms.map((term) => (
+      currentProjections.filter((projection) => projection.semanticText.includes(term))
+    ))
+    const shortTextMatches = shortTextMatchesByTerm.flat()
+    const currentShortMatches = currentShortMatchesByTerm.flat()
     const projectionIds = matches.map((row) => row.projection_id)
     if (projectionIds.length === 0 && currentMatches.length === 0 && shortTextMatches.length === 0 && currentShortMatches.length === 0) {
       return []
@@ -234,18 +252,19 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
       ])])
       .execute()
     const byId = new Map(rows.map((row) => [row.id, mapProjection(row)]))
-    return this.attachSourcePositions(closeGraphProjectionCandidates([
-      ...currentMatches,
-      ...currentShortMatches,
-      ...projectionIds.flatMap((projectionId) => {
+    const candidates = interleaveUnique([
+      currentMatches,
+      projectionIds.flatMap((projectionId) => {
         const projection = byId.get(projectionId)
         return projection === undefined ? [] : [projection]
       }),
-      ...shortTextMatches.flatMap((match) => {
+      ...currentShortMatchesByTerm,
+      ...shortTextMatchesByTerm.map((termMatches) => termMatches.flatMap((match) => {
         const projection = byId.get(match.projection_id)
         return projection === undefined ? [] : [projection]
-      }),
-    ], currentProjections, limit))
+      })),
+    ], (projection) => projection.projectionId)
+    return this.attachSourcePositions(closeGraphProjectionCandidates(candidates, currentProjections, limit))
   }
 
   public async searchSourceText(
@@ -262,10 +281,11 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
     const matches = codePointLength(normalizedExpression) <= 2
       ? await this.searchShortSourceText(scope, normalizedExpression, limit, sourceIds)
       : await this.searchFts(scope, normalizedExpression, limit, sourceIds)
-    const shortTerms = extractShortSearchTerms(normalizedExpression)
-    const shortTextMatches = shortTerms.length === 0
+    const shortTerms = extractSubstringSearchTerms(normalizedExpression)
+    const shortTextMatchesByTerm = shortTerms.length === 0
       ? []
-      : (await Promise.all(shortTerms.map((term) => this.searchShortSourceText(scope, term, limit, sourceIds)))).flat()
+      : await Promise.all(shortTerms.map((term) => this.searchShortSourceText(scope, term, limit, sourceIds)))
+    const shortTextMatches = shortTextMatchesByTerm.flat()
     if (substringMatches.length === 0 && matches.length === 0 && shortTextMatches.length === 0) return []
     const rows = await this.database.selectFrom("retrieval_projections").selectAll()
       .where("id", "in", [...new Set([
@@ -275,7 +295,12 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
       ])])
       .execute()
     const byId = new Map(rows.map((row) => [row.id, mapProjection(row)]))
-    return this.attachSourcePositions(uniqueProjections([...substringMatches, ...matches, ...shortTextMatches].flatMap((match) => {
+    const rankedMatches = interleaveUnique([
+      substringMatches,
+      matches,
+      ...shortTextMatchesByTerm,
+    ], (match) => match.projection_id)
+    return this.attachSourcePositions(uniqueProjections(rankedMatches.flatMap((match) => {
       const projection = byId.get(match.projection_id)
       return projection === undefined ? [] : [projection]
     }), limit))
@@ -289,12 +314,18 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
   ): Promise<readonly { projection_id: string }[]> {
     let query = this.database.selectFrom("retrieval_projections")
       .innerJoin("source_units", "source_units.id", "retrieval_projections.owner_id")
+      .innerJoin("artifact_scopes", "artifact_scopes.id", "retrieval_projections.scope_id")
       .select("retrieval_projections.id as projection_id")
       .where("retrieval_projections.project_id", "=", scope.projectId)
       .where("retrieval_projections.owner_kind", "=", "source")
       .where(sql<boolean>`instr(retrieval_projections.semantic_text, ${expression}) > 0`)
     if (sourceIds !== undefined) query = query.where("source_units.source_id", "in", [...sourceIds])
-    return query.where(visibleRetrievalProjection(scope)).limit(limit).execute()
+    return query.where(visibleRetrievalProjection(scope))
+      .orderBy(sql`CASE WHEN retrieval_projections.visibility = 'pending' THEN 1 ELSE 0 END`, "desc")
+      .orderBy("artifact_scopes.committed_sequence", "desc")
+      .orderBy("retrieval_projections.id", "desc")
+      .limit(limit)
+      .execute()
   }
 
   public async expandSourceNeighborhood(
@@ -474,6 +505,7 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
   ): Promise<readonly { projection_id: string }[]> {
     let query = this.database.selectFrom("retrieval_projections")
       .innerJoin("source_units", "source_units.id", "retrieval_projections.owner_id")
+      .innerJoin("artifact_scopes", "artifact_scopes.id", "retrieval_projections.scope_id")
       .select("retrieval_projections.id as projection_id")
       .where("retrieval_projections.project_id", "=", scope.projectId)
       .where("retrieval_projections.owner_kind", "=", "source")
@@ -482,7 +514,12 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
       query = query.where("source_units.source_id", "in", [...sourceIds])
     }
     query = query.where(visibleRetrievalProjection(scope))
-    return query.limit(limit).execute()
+    return query
+      .orderBy(sql`CASE WHEN retrieval_projections.visibility = 'pending' THEN 1 ELSE 0 END`, "desc")
+      .orderBy("artifact_scopes.committed_sequence", "desc")
+      .orderBy("retrieval_projections.id", "desc")
+      .limit(limit)
+      .execute()
   }
 
   private async searchCurrentFts(
@@ -536,11 +573,17 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
     limit: number,
   ): Promise<readonly { projection_id: string }[]> {
     const query = this.database.selectFrom("retrieval_projections")
-      .select("id as projection_id")
-      .where("project_id", "=", scope.projectId)
-      .where(sql<boolean>`instr(semantic_text, ${expression}) > 0`)
+      .innerJoin("artifact_scopes", "artifact_scopes.id", "retrieval_projections.scope_id")
+      .select("retrieval_projections.id as projection_id")
+      .where("retrieval_projections.project_id", "=", scope.projectId)
+      .where(sql<boolean>`instr(retrieval_projections.semantic_text, ${expression}) > 0`)
     const visibleQuery = query.where(visibleRetrievalProjection(scope))
-    return visibleQuery.limit(limit).execute()
+    return visibleQuery
+      .orderBy(sql`CASE WHEN retrieval_projections.visibility = 'pending' THEN 1 ELSE 0 END`, "desc")
+      .orderBy("artifact_scopes.committed_sequence", "desc")
+      .orderBy("retrieval_projections.id", "desc")
+      .limit(limit)
+      .execute()
   }
 
   private async findCurrentGraphProjections(
@@ -630,6 +673,16 @@ export class SqliteRetrievalRepository implements RetrievalRepository {
   }
 }
 
+function sameProjectionContent(
+  row: RetrievalProjectionRow,
+  projection: Omit<RetrievalProjection, "visibility">,
+): boolean {
+  return row.exact_keys_json === encodeJson(projection.exactKeys)
+    && row.semantic_text === projection.semanticText
+    && row.source_refs_json === encodeJson(projection.sourceRefs)
+    && row.digest === projection.digest
+}
+
 function visibleRetrievalProjection(scope: RetrievalSearchScope) {
   const committed = sql<boolean>`(
     retrieval_projections.visibility = 'committed'
@@ -670,11 +723,14 @@ function buildSemanticFtsQuery(expression: string): string {
     .join(" OR ")
 }
 
-function extractShortSearchTerms(expression: string): readonly string[] {
+function extractSubstringSearchTerms(expression: string): readonly string[] {
   return [...new Set(expression
     .normalize("NFKC")
     .split(/[^\p{L}\p{N}_-]+/u)
-    .filter((term) => codePointLength(term) === 2))]
+    .filter((term) => {
+      const length = codePointLength(term)
+      return length >= 2 && length <= 24
+    }))].slice(0, 12)
 }
 
 function sourceProjectionFilter(
@@ -742,6 +798,24 @@ function uniqueProjections(
   limit: number,
 ): readonly RetrievalProjection[] {
   return [...new Map(projections.map((projection) => [projection.projectionId, projection])).values()].slice(0, limit)
+}
+
+function interleaveUnique<T>(
+  groups: readonly (readonly T[])[],
+  key: (value: T) => string,
+): readonly T[] {
+  const result: T[] = []
+  const seen = new Set<string>()
+  const maximumLength = groups.reduce((maximum, group) => Math.max(maximum, group.length), 0)
+  for (let index = 0; index < maximumLength; index += 1) {
+    for (const group of groups) {
+      const value = group[index]
+      if (value === undefined || seen.has(key(value))) continue
+      seen.add(key(value))
+      result.push(value)
+    }
+  }
+  return result
 }
 
 function closeGraphProjectionCandidates(

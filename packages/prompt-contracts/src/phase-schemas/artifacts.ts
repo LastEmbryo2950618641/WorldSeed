@@ -7,6 +7,7 @@ import {
 
 const continuityStatusSchema = z.enum(["pass", "revise", "unknown"])
 const referenceSchema = z.string().min(1)
+const evidenceReferenceSchema = z.string().regex(/^(?:(?:read-[1-9][0-9]*)|(?:evidence_[1-9][0-9]*))$/u)
 const indexSchema = z.number().int().nonnegative()
 const localReferenceSchema = z.string().regex(/^local:[a-zA-Z0-9_.-]+$/u)
 const semanticDependencySchema = z.object({
@@ -124,6 +125,54 @@ export const chapterNamingArtifactSchema = z.object({
   continuityEvidenceRefs: z.array(referenceSchema),
 })
 
+export const temporalClaimSchema = z.object({
+  claimRef: z.string().regex(/^claim:[a-zA-Z0-9_.:-]+$/u),
+  sceneIndex: indexSchema,
+  sourceUnitIndexes: z.array(indexSchema),
+  proseExcerpt: z.string().min(1),
+  referenceDescription: z.string().min(1),
+  referenceRefs: z.array(referenceSchema),
+  evidenceRefs: z.array(referenceSchema),
+  timelineRefs: z.array(referenceSchema),
+  relationDescription: z.string().min(1),
+  verdict: z.enum(["pass", "uncertain", "conflict"]),
+  reason: z.string().min(1),
+  missingEvidence: z.array(z.string().min(1)),
+})
+
+export const temporalClaimSettlementSchema = z.object({
+  claimRef: temporalClaimSchema.shape.claimRef,
+  sceneIndex: indexSchema,
+  referenceRefs: z.array(referenceSchema),
+  timeAnchorRefs: z.array(referenceSchema),
+  timelineRefs: z.array(referenceSchema),
+  correspondenceRefs: z.array(referenceSchema),
+  historicalReturnRefs: z.array(referenceSchema),
+  confidence: z.enum(["certain", "uncertain"]),
+  explanation: z.string().min(1),
+  selfReview: z.string().min(1),
+})
+
+export const temporalClaimAssessmentSchema = z.object({
+  claimRef: temporalClaimSchema.shape.claimRef,
+  evidenceSufficient: z.boolean(),
+  verdict: z.enum(["pass", "uncertain", "conflict"]),
+  narrativeContext: z.string().min(1),
+  evidenceRefs: z.array(evidenceReferenceSchema),
+  responsibility: z.enum(["dependency", "spacetime", "retrieval", "draft"]),
+  reason: z.string().min(1),
+  advice: z.string().min(1).optional(),
+})
+
+export const continuityAdviceSchema = z.object({
+  claimRef: temporalClaimSchema.shape.claimRef,
+  proseExcerpt: z.string().min(1),
+  verdict: z.enum(["pass", "uncertain", "conflict"]),
+  summary: z.string().min(1),
+  evidenceRefs: z.array(evidenceReferenceSchema),
+  suggestedDirection: z.string().min(1).optional(),
+})
+
 export const dependencyAuditArtifactSchema = z.object({
   missingDependencies: z.array(semanticDependencySchema),
   unplannedContent: z.array(z.object({
@@ -144,7 +193,13 @@ export const dependencyAuditArtifactSchema = z.object({
     crossReferenceContinuity: continuityStatusSchema,
     reason: z.string().min(1),
   })),
+  temporalClaims: z.array(temporalClaimSchema).default([]),
   informationBoundary: continuityStatusSchema,
+}).superRefine((artifact, context) => {
+  const claimRefs = artifact.temporalClaims.map((claim) => claim.claimRef)
+  if (new Set(claimRefs).size !== claimRefs.length) {
+    context.addIssue({ code: "custom", path: ["temporalClaims"], message: "temporal claim references must be unique" })
+  }
 })
 
 export const responseReviewArtifactSchema = z.object({
@@ -254,6 +309,7 @@ export const graphSpacetimeSettlementArtifactSchema = z.object({
   proposalSettlements: z.array(spacetimeSettlementBaseSchema.extend({
     proposalRefs: z.array(proposalReferenceSchema).min(1),
   }).superRefine(assertSpacetimeSettlementRules)),
+  temporalClaimSettlements: z.array(temporalClaimSettlementSchema).default([]),
 })
 
 export const graphRetrievalDesignArtifactSchema = z.object({
@@ -295,6 +351,7 @@ export const graphGovernanceReviewArtifactSchema = z.object({
     verdict: z.enum(["pass", "uncertain", "fail"]),
     reason: z.string().min(1),
   })),
+  temporalClaimAssessments: z.array(temporalClaimAssessmentSchema).default([]),
   selfReview: z.string().min(1),
 })
 
@@ -392,6 +449,7 @@ export const frontierSettlementArtifactSchema = z.object({
 export const commitReviewArtifactSchema = z.object({
   recommendation: z.enum(["commit", "revise", "retire"]),
   revisionTargetPhase: aiPhaseSchema.optional(),
+  continuityAdvice: z.array(continuityAdviceSchema).default([]),
   finalSelfReview: z.string().min(1),
 })
 

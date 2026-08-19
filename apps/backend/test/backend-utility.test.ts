@@ -86,10 +86,13 @@ describe("backend utility runtime", () => {
         baseUrl: "https://api.deepseek.com",
         model: "deepseek-v4-flash",
         credentialRef: "model-profile:deepseek-primary",
+        apiProtocol: "openai_chat_completions",
         contextWindowTokens: 1_000_000,
         thinkingModeEnabled: true,
         reasoningEffort: "low",
         jsonModeEnabled: false,
+        disableResponseStorage: true,
+        serviceTier: "auto",
       }],
       activeProfileId: "deepseek-primary",
     })
@@ -930,6 +933,46 @@ describe("backend utility runtime", () => {
     expect(evolution.graphRevisionCount).toBeGreaterThan(0)
     expect(evolution.chapterCount).toBe(0)
     expect(evolution.contextChainCount).toBe(1)
+  })
+
+  it("can suppress automatic evolution for an isolated acceptance run", async () => {
+    const root = mkdtempSync(join(tmpdir(), "worldseed-no-auto-evolution-"))
+    temporaryDirectories.push(root)
+    const applicationDataRoot = join(root, "application-data")
+    const workspaceRootRef = join(root, "workspace")
+    const promptPackageRoot = fileURLToPath(new URL("../../../packages/prompt-contracts/", import.meta.url))
+    const facade = new BackendFacade(await BackendContainer.open({
+      applicationDataRoot,
+      promptPackageRoot,
+      model: new FakeAiModelAdapter(randomUUID),
+    }), { automaticEvolutionEnabled: false })
+    openFacades.push(facade)
+    const projectId = randomUUID()
+    await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "project.create",
+      payload: { projectId, displayName: "No Automatic Evolution", workspaceRootRef },
+    })
+    const started = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "turn.start",
+      payload: { projectId, workspaceRootRef, userInput: "只完成前台章节。", chapterSequence: 1 },
+    })
+    const turnTaskId = readTaskId(started)
+    await waitForTaskStatus(facade, turnTaskId, "completed")
+    await waitForHistoryEntries(facade, projectId, workspaceRootRef, 1)
+
+    const database = new Database(join(applicationDataRoot, "projects", projectId, "project.sqlite"), {
+      readonly: true,
+      fileMustExist: true,
+    })
+    try {
+      expect(database.prepare("select count(*) count from tasks where kind = 'evolution'").get()?.count).toBe(0)
+    } finally {
+      database.close()
+    }
   })
 })
 

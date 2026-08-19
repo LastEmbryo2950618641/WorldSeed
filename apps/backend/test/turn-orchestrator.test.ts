@@ -344,6 +344,106 @@ describe("TurnOrchestrator", () => {
     }))
   })
 
+  it("continues graph review when a verification probe reaches the retrieval-round limit", async () => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    const events: Array<{ event: string; fields?: Readonly<Record<string, unknown>> }> = []
+    let commitReviewInput: TurnPhaseInput | undefined
+    const model: AIModelPort = {
+      info: fake.info,
+      execute: async (request, options) => {
+        if (request.phase === "commit_review") commitReviewInput = request.input as TurnPhaseInput
+        return fake.execute(request, options)
+      },
+    }
+    const orchestrator = fixture.createOrchestrator(model, fixture.commit, {
+      log: (_level, event, fields) => events.push({ event, fields }),
+    })
+
+    const result = await orchestrator.execute({
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "验证图审核探针达到检索轮次上限后仍能提交。",
+      chapterSequence: 1,
+      maxRetrievalRounds: 1,
+    })
+
+    const task = await fixture.taskScopes.findTask(result.taskId)
+    const checkpoints = await fixture.persistence.listVerificationProbeCheckpoints(result.taskId)
+    const governanceRuns = (await fixture.persistence.listPhaseRuns(result.taskId))
+      .filter((run) => run.phase === "graph_governance_review")
+    const finalReview = governanceRuns.at(-1)?.result as {
+      requestedReads?: readonly unknown[]
+      artifact?: { verificationProbeAssessments?: readonly unknown[] }
+    } | undefined
+
+    expect(task?.status).toBe("completed")
+    expect(result.chapterPath).toBe("章节正文/第一章 世界种子.md")
+    expect(checkpoints).toHaveLength(0)
+    expect(finalReview?.requestedReads?.length).toBeGreaterThan(0)
+    expect(finalReview?.artifact?.verificationProbeAssessments).toEqual([])
+    expect(commitReviewInput?.retrievalGaps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ typeId: "system:retrieval-gap" }),
+    ]))
+    expect(events).toContainEqual(expect.objectContaining({
+      event: "verification_probe.read_gap_recorded",
+      fields: expect.objectContaining({
+        phase: "graph_governance_review",
+        message: expect.stringContaining("no execution or pass assessment was fabricated"),
+      }),
+    }))
+  })
+
+  it("pauses instead of committing a narrative turn with an empty graph structure", async () => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    const events: Array<{ event: string; fields?: Readonly<Record<string, unknown>> }> = []
+    const model: AIModelPort = {
+      info: fake.info,
+      execute: async (request, options) => {
+        const execution = await fake.execute(request, options)
+        if (request.phase !== "graph_structure_plan") return execution
+        return {
+          ...execution,
+          result: {
+            ...execution.result,
+            outcome: "request_read",
+            artifact: {
+              proposals: [],
+              decisionRecords: [],
+              affectedFrontierRefs: [],
+              archiveOutletRefs: [],
+            },
+            requestedReads: [queryGraphFact("正式候选正文")],
+          },
+        }
+      },
+    }
+    const orchestrator = fixture.createOrchestrator(model, fixture.commit, {
+      log: (_level, event, fields) => events.push({ event, fields }),
+    })
+
+    await expect(orchestrator.execute({
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "让新的事务进入正文并持续存在。",
+      chapterSequence: 1,
+      maxRetrievalRounds: 1,
+    })).rejects.toThrow("Graph structure plan cannot be empty when the turn has persisted narrative source units")
+
+    const task = await fixture.database.selectFrom("tasks").selectAll().executeTakeFirstOrThrow()
+    const finalizations = await fixture.database.selectFrom("turn_finalizations").select("id").execute()
+    expect(task.status).toBe("awaiting_user_decision")
+    expect(finalizations).toEqual([])
+    expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual([])
+    expect(events).toContainEqual(expect.objectContaining({
+      event: "graph.structure.empty_rejected",
+      fields: expect.objectContaining({ sourceUnitCount: expect.any(Number) }),
+    }))
+  })
+
   it("creates traceable retrieval gaps without source identifiers", () => {
     const requestId = randomUUID()
     const [gap] = createRetrievalGaps([{
@@ -706,10 +806,12 @@ describe("TurnOrchestrator", () => {
       .where("owner_id", "=", ownerId).execute()
     let ruleAssemblyInput: TurnPhaseInput | undefined
     let freshnessRequested = false
+    const interpretInputs: TurnPhaseInput[] = []
     const model: AIModelPort = {
       info: fake.info,
       execute: async (request) => {
         const execution = await fake.execute(request)
+        if (request.phase === "interpret") interpretInputs.push(request.input as TurnPhaseInput)
         if (request.phase === "interpret" && !freshnessRequested) {
           freshnessRequested = true
           return {
@@ -750,6 +852,13 @@ describe("TurnOrchestrator", () => {
     const ownerEvidenceAfter = await fixture.database.selectFrom("evidence_objects").selectAll()
       .where("owner_id", "=", ownerId).execute()
     expect(ownerEvidenceAfter).toHaveLength(ownerEvidenceBefore.length)
+    expect(interpretInputs).toHaveLength(2)
+    expect(interpretInputs[1]?.resurfacedReadIds).toEqual(expect.arrayContaining([
+      expect.any(String),
+    ]))
+    expect(interpretInputs[1]?.readEvidence.some((evidence) => (
+      evidence.ownerId === ownerId && evidence.stateRole === "current"
+    ))).toBe(true)
     expect(ruleAssemblyInput?.readEvidence.filter((evidence) => evidence.ownerId === ownerId)).toEqual([
       expect.objectContaining({ stateRole: "current" }),
     ])
@@ -790,6 +899,13 @@ describe("TurnOrchestrator", () => {
             artifact: {
               ...(execution.result.artifact as Record<string, unknown>),
               recommendation: "revise",
+              continuityAdvice: ((execution.result.artifact as { continuityAdvice?: readonly Record<string, unknown>[] }).continuityAdvice ?? [])
+                .map((advice) => ({
+                  ...advice,
+                  verdict: "conflict",
+                  summary: "正文相对时间存在冲突，但建议不得阻断提交",
+                  suggestedDirection: "用户可在提交后自行修改正文",
+                })),
               finalSelfReview: "建议后续补充连续性说明，但不阻断本轮提交",
             },
           },
@@ -919,8 +1035,101 @@ describe("TurnOrchestrator", () => {
       expect.objectContaining({ disposition: "active" }),
     ])
     expect(await fixture.database.selectFrom("kv_usage").selectAll().execute()).toHaveLength(16)
+    const commitReview = phaseRuns.find((run) => run.phase === "commit_review")?.result as {
+      artifact?: { continuityAdvice?: readonly { verdict?: string }[] }
+    } | undefined
+    expect(commitReview?.artifact?.continuityAdvice).toEqual([
+      expect.objectContaining({ verdict: "conflict" }),
+    ])
     expect((await fixture.taskScopes.findTask(result.taskId))?.status).toBe("completed")
     expect((await fixture.taskScopes.findScope(result.scopeId))?.visibility).toBe("committed")
+  })
+
+  it("keeps aggregate governance internal and sends self-contained projections to review stages", async () => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    const captured = new Map<string, TurnPhaseInput>()
+    const model: AIModelPort = {
+      info: fake.info,
+      execute: async (request, options) => {
+        if (["graph_governance_review", "settlement_review", "frontier_settlement", "commit_review"].includes(request.phase)) {
+          captured.set(request.phase, request.input as TurnPhaseInput)
+        }
+        return fake.execute(request, options)
+      },
+    }
+
+    await fixture.createOrchestrator(model, fixture.commit).execute({
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "旧桥下出现一枚会记录潮汐时间的铜钥匙。",
+      chapterSequence: 1,
+    })
+
+    for (const phase of ["graph_governance_review", "settlement_review", "frontier_settlement", "commit_review"] as const) {
+      const input = captured.get(phase)
+      expect(input?.artifacts.graph_governance, phase).toBeUndefined()
+      expect(input?.stageProjection, phase).toMatchObject({ kind: phase })
+      expect(input?.validationArtifacts?.graph_governance, phase).toBeDefined()
+    }
+  })
+
+  it("canonicalizes duplicate model projections before staging graph settlement", async () => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    const model: AIModelPort = {
+      info: fake.info,
+      execute: async (request, options) => {
+        const execution = await fake.execute(request, options)
+        if (request.phase !== "graph_retrieval_design") return execution
+        const artifact = execution.result.artifact as {
+          projections: readonly {
+            ownerProposalRef?: string
+            ownerRef?: string
+            exactKeys: readonly string[]
+            semanticText: string
+          }[]
+          sourceSettlements: readonly unknown[]
+        }
+        const first = artifact.projections[0]
+        if (first === undefined) throw new Error("Fake retrieval design must include a projection")
+        return {
+          ...execution,
+          result: {
+            ...execution.result,
+            artifact: {
+              ...artifact,
+              projections: [
+                ...artifact.projections,
+                {
+                  ...first,
+                  exactKeys: ["canonical duplicate key"],
+                  semanticText: "Canonical duplicate semantic entry.",
+                },
+              ],
+            },
+          },
+        }
+      },
+    }
+
+    const result = await fixture.createOrchestrator(model, fixture.commit).execute({
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "旧桥下出现一枚会记录潮汐时间的铜钥匙。",
+      chapterSequence: 1,
+    })
+    const projections = await fixture.database.selectFrom("retrieval_projections").selectAll()
+      .where("scope_id", "=", result.scopeId)
+      .where("owner_kind", "=", "node")
+      .execute()
+
+    expect(projections).toHaveLength(1)
+    expect(JSON.parse(projections[0]?.exact_keys_json ?? "[]")).toContain("canonical duplicate key")
+    expect(projections[0]?.semantic_text).toContain("Canonical duplicate semantic entry.")
+    expect((await fixture.taskScopes.findTask(result.taskId))?.status).toBe("completed")
   })
 
   it("rejects a draft placeholder at the draft phase instead of publishing it", async () => {
@@ -1895,7 +2104,9 @@ describe("TurnOrchestrator", () => {
             },
           }
         }
-        if (request.phase === "draft") draftInput = request.input as TurnPhaseInput
+        if (request.phase === "draft") {
+          draftInput = request.input as TurnPhaseInput
+        }
         return execution
       },
     }
@@ -2043,7 +2254,9 @@ describe("TurnOrchestrator", () => {
             },
           }
         }
-        if (request.phase === "draft") draftInput = request.input as TurnPhaseInput
+        if (request.phase === "draft") {
+          draftInput = request.input as TurnPhaseInput
+        }
         return execution
       },
     }
@@ -2312,6 +2525,7 @@ describe("TurnOrchestrator", () => {
     })
 
     let interpretCalls = 0
+    const interpretInputs: TurnPhaseInput[] = []
     let ruleAssemblyInput: TurnPhaseInput | undefined
     const model: AIModelPort = {
       info: fake.info,
@@ -2319,6 +2533,7 @@ describe("TurnOrchestrator", () => {
         const execution = await fake.execute(request)
         if (request.phase === "interpret") {
           interpretCalls += 1
+          interpretInputs.push(request.input as TurnPhaseInput)
           if (interpretCalls <= 2) {
             return {
               ...execution,
@@ -2349,7 +2564,10 @@ describe("TurnOrchestrator", () => {
       evidence.ownerKind === "node" || evidence.ownerKind === "link"
     )) ?? []
     const stableEvidenceKeys = graphEvidence.map((evidence) => `${evidence.ownerId}:${evidence.digest}`)
-    expect(interpretCalls).toBe(2)
+    expect(interpretCalls).toBe(3)
+    expect(interpretInputs[2]?.resurfacedReadIds).toEqual(expect.arrayContaining([
+      expect.any(String),
+    ]))
     expect(graphEvidence.length).toBeGreaterThan(0)
     expect(new Set(stableEvidenceKeys).size).toBe(stableEvidenceKeys.length)
   })

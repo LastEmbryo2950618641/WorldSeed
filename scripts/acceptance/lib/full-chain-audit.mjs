@@ -100,6 +100,34 @@ export function auditPromptPrefix(events, taskId, phaseRunStatusByEnvelopeId) {
   })
 }
 
+export function auditStageProjectionProfiles(events, taskId) {
+  const profiles = events.filter((event) => event.component === "deepseek-model"
+    && event.event === "completion.prompt_profiled"
+    && event.taskId === taskId
+    && stageProjectionPhases.includes(event.phase))
+  const latestByPhase = new Map(profiles.map((profile) => [profile.phase, profile]))
+  const invalid = stageProjectionPhases.flatMap((phase) => {
+    const profile = latestByPhase.get(phase)
+    const sections = profile?.modelRequestSections
+    const valid = sections?.stageProjectionKind === phase
+      && typeof sections?.stageProjectionDigest === "string"
+      && sections.stageProjectionDigest.length === 64
+      && Number(sections?.stageProjectionCharacters) > 0
+    return valid ? [] : [{ phase, profile }]
+  })
+  const coveredPhases = stageProjectionPhases.filter((phase) => !invalid.some((item) => item.phase === phase))
+  const missingPhases = stageProjectionPhases.filter((phase) => !latestByPhase.has(phase))
+  const deduplicatedEvidenceCharacters = [...latestByPhase.values()].reduce((total, profile) => (
+    total + Number(profile.modelRequestSections?.deduplicatedEvidenceCharacters ?? 0)
+  ), 0)
+  return auditResult("stage_projection_profiles", invalid.length === 0 ? "pass" : "fail", {
+    coveredPhases,
+    missingPhases,
+    invalid,
+    deduplicatedEvidenceCharacters,
+  })
+}
+
 export function auditPhaseCompletion(taskKind, rows) {
   const completed = new Set(rows.filter((row) => row.status === "completed").map((row) => row.phase))
   const expected = expectedPhases(taskKind)
@@ -160,4 +188,11 @@ const stagedGraphPhases = [
   "graph_spacetime_settlement",
   "graph_retrieval_design",
   "graph_governance_review",
+]
+
+const stageProjectionPhases = [
+  "graph_governance_review",
+  "settlement_review",
+  "frontier_settlement",
+  "commit_review",
 ]

@@ -16,10 +16,13 @@ export type DeepSeekModelSelection = Readonly<{
   baseUrl: string
   model: string
   apiKey: string
+  apiProtocol?: "openai_chat_completions" | "openai_responses"
   contextWindowTokens: number
   thinkingModeEnabled?: boolean
-  reasoningEffort?: "low" | "high" | "max"
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
   jsonModeEnabled?: boolean
+  disableResponseStorage?: boolean
+  serviceTier?: "auto" | "default" | "flex" | "priority" | "fast"
 }>
 
 export function createModelFromEnvironment(
@@ -46,11 +49,14 @@ export function createModelFromSelection(
     ...defaultDeepSeekRuntimeConfig,
     baseUrl: selection.baseUrl.trim(),
     model: selection.model.trim(),
+    apiProtocol: selection.apiProtocol ?? defaultDeepSeekRuntimeConfig.apiProtocol,
     apiKeyRef: "turn-api-key",
     contextWindowTokens: selection.contextWindowTokens,
     thinkingModeEnabled: selection.thinkingModeEnabled ?? defaultDeepSeekRuntimeConfig.thinkingModeEnabled,
     reasoningEffort: selection.reasoningEffort ?? defaultDeepSeekRuntimeConfig.reasoningEffort,
     jsonModeEnabled: selection.jsonModeEnabled ?? defaultDeepSeekRuntimeConfig.jsonModeEnabled,
+    disableResponseStorage: selection.disableResponseStorage ?? defaultDeepSeekRuntimeConfig.disableResponseStorage,
+    serviceTier: selection.serviceTier ?? defaultDeepSeekRuntimeConfig.serviceTier,
   })
   return new DeepSeekAiModelAdapter(
     config,

@@ -14,6 +14,7 @@ import type {
 } from "@worldseed/contracts"
 
 import {
+  dependencyAuditArtifactSchema,
   graphGovernanceArtifactSchema,
   type GraphGovernanceArtifact,
 } from "@worldseed/prompt-contracts"
@@ -131,7 +132,7 @@ export class FakeAiModelAdapter implements AIModelPort {
         }
       case "emergence_review":
         return {
-          approvedDecisionIndexes: input.artifacts.emergence_planning === undefined ? [] : [0],
+          approvedDecisionIndexes: phaseArtifacts(input).emergence_planning === undefined ? [] : [0],
           revisionRequests: [],
           identityRecallComplete: true,
           temporalEntryComplete: true,
@@ -175,6 +176,20 @@ export class FakeAiModelAdapter implements AIModelPort {
             crossReferenceContinuity: "pass",
             reason: "The scene has explicit local time and location anchors",
           }],
+          temporalClaims: input.workflow === "turn" ? [{
+            claimRef: "claim:scene:1",
+            sceneIndex: 0,
+            sourceUnitIndexes: input.sourceUnitIds.length === 0 ? [] : [0],
+            proseExcerpt: "此后发生的一切，都将从这些已经写下的依据继续生长。",
+            referenceDescription: "相对于本章当前场景已经发生的变化",
+            referenceRefs: [],
+            evidenceRefs: input.readEvidence.slice(0, 1).map((evidence) => evidence.readId),
+            timelineRefs: [],
+            relationDescription: "此后指向当前场景变化之后的开放未来",
+            verdict: "pass",
+            reason: "该表达只依赖本章场景内部的先后关系",
+            missingEvidence: [],
+          }] : [],
           informationBoundary: "pass",
         }
       case "response_review":
@@ -216,6 +231,7 @@ export class FakeAiModelAdapter implements AIModelPort {
         }
       case "graph_spacetime_settlement": {
         const governance = this.createGraphGovernanceArtifact(input)
+        const dependency = dependencyAuditArtifactSchema.parse(phaseArtifacts(input).dependency_audit)
         return {
           sceneSpacetimeBindings: governance.sceneSpacetimeBindings,
           proposalSettlements: governance.mutationSpacetimeSettlements.map((settlement) => ({
@@ -229,6 +245,18 @@ export class FakeAiModelAdapter implements AIModelPort {
             reason: settlement.reason,
             selfReview: settlement.selfReview,
             proposalRefs: settlement.mutationIndexes.map((index) => `proposal:mutation:${String(index + 1)}`),
+          })),
+          temporalClaimSettlements: dependency.temporalClaims.map((claim) => ({
+            claimRef: claim.claimRef,
+            sceneIndex: claim.sceneIndex,
+            referenceRefs: ["local:occurrence"],
+            timeAnchorRefs: ["local:time"],
+            timelineRefs: ["local:time"],
+            correspondenceRefs: [],
+            historicalReturnRefs: ["local:occurrence"],
+            confidence: "certain" as const,
+            explanation: "The deterministic claim is bound to the generated scene and time entry",
+            selfReview: "The fixture does not infer an unavailable numeric duration",
           })),
         }
       }
@@ -255,7 +283,8 @@ export class FakeAiModelAdapter implements AIModelPort {
           })),
         }
       }
-      case "graph_governance_review":
+      case "graph_governance_review": {
+        const dependency = dependencyAuditArtifactSchema.parse(phaseArtifacts(input).dependency_audit)
         return {
           recommendation: "pass",
           issues: [],
@@ -273,10 +302,20 @@ export class FakeAiModelAdapter implements AIModelPort {
               : "uncertain" as const,
             reason: "The application-executed staged governance probe was assessed",
           })),
+          temporalClaimAssessments: dependency.temporalClaims.map((claim) => ({
+            claimRef: claim.claimRef,
+            evidenceSufficient: true,
+            verdict: "pass" as const,
+            narrativeContext: "The prose describes a direct within-scene temporal relation",
+            evidenceRefs: claim.evidenceRefs,
+            responsibility: "spacetime" as const,
+            reason: "The claim is bound to the current scene and generated time entry",
+          })),
           selfReview: "The staged deterministic graph is complete and selectively discoverable",
         }
+      }
       case "semantic_review": {
-        const governance = graphGovernanceArtifactSchema.parse(input.artifacts.graph_governance)
+        const governance = graphGovernanceArtifactSchema.parse(phaseArtifacts(input).graph_governance)
         return {
           approvedMutationIndexes: governance.mutations.map((_, index) => index),
           rejectedMutationIndexes: [],
@@ -329,11 +368,20 @@ export class FakeAiModelAdapter implements AIModelPort {
             revisitCondition: "Revisit when later input or world pressure refers to this local branch",
           }],
         }
-      case "commit_review":
+      case "commit_review": {
+        const dependency = dependencyAuditArtifactSchema.parse(phaseArtifacts(input).dependency_audit)
         return {
           recommendation: "commit",
+          continuityAdvice: dependency.temporalClaims.map((claim) => ({
+            claimRef: claim.claimRef,
+            proseExcerpt: claim.proseExcerpt,
+            verdict: "pass" as const,
+            summary: "The deterministic temporal expression is consistent with its current scene reference",
+            evidenceRefs: claim.evidenceRefs,
+          })),
           finalSelfReview: "All required Fake AI phase artifacts are present and the settlement is complete",
         }
+      }
     }
   }
 
@@ -433,6 +481,10 @@ export class FakeAiModelAdapter implements AIModelPort {
       }],
     }
   }
+}
+
+function phaseArtifacts(input: TurnPhaseInput): Partial<Record<AIPhase, unknown>> {
+  return input.validationArtifacts ?? input.artifacts
 }
 
 function executionCancellationReason(signal: AbortSignal): Error {

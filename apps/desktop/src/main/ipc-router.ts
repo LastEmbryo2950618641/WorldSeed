@@ -94,10 +94,13 @@ async function saveModelProfiles(backend: BackendProcess, vault: FileCredentialV
       baseUrl: profile.baseUrl,
       model: profile.model,
       credentialRef: profile.credentialRef,
+      apiProtocol: profile.apiProtocol,
       contextWindowTokens: profile.contextWindowTokens,
       thinkingModeEnabled: profile.thinkingModeEnabled,
       reasoningEffort: profile.reasoningEffort,
       jsonModeEnabled: profile.jsonModeEnabled,
+      disableResponseStorage: profile.disableResponseStorage,
+      serviceTier: profile.serviceTier,
     })),
     activeProfileId: input.activeProfileId,
   })

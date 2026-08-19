@@ -13,6 +13,7 @@ export const deepSeekRuntimeConfigSchema = z.object({
     message: "baseUrl must use HTTPS unless it targets localhost",
   }),
   model: z.string().trim().min(1),
+  apiProtocol: z.enum(["openai_chat_completions", "openai_responses"]),
   apiKeyRef: z.string().min(1),
   contextWindowTokens: z.number().int().positive(),
   proxyUrl: z.url().refine((url) => url.startsWith("http://") || url.startsWith("https://"), {
@@ -24,6 +25,8 @@ export const deepSeekRuntimeConfigSchema = z.object({
   jsonModeEnabled: z.boolean(),
   thinkingModeEnabled: z.boolean(),
   reasoningEffort: deepSeekReasoningEffortSchema,
+  disableResponseStorage: z.boolean(),
+  serviceTier: z.enum(["auto", "default", "flex", "priority", "fast"]),
 })
 export type DeepSeekRuntimeConfig = z.infer<typeof deepSeekRuntimeConfigSchema>
 
@@ -31,6 +34,7 @@ export const defaultDeepSeekRuntimeConfig = Object.freeze({
   provider: "deepseek",
   baseUrl: "https://api.deepseek.com",
   model: "deepseek-v4-flash",
+  apiProtocol: "openai_chat_completions",
   apiKeyRef: "deepseek-api-key",
   contextWindowTokens: 1_000_000,
   timeoutMs: defaultTurnWallTimeMs,
@@ -39,6 +43,8 @@ export const defaultDeepSeekRuntimeConfig = Object.freeze({
   jsonModeEnabled: false,
   thinkingModeEnabled: true,
   reasoningEffort: "high",
+  disableResponseStorage: true,
+  serviceTier: "auto",
 } as const satisfies DeepSeekRuntimeConfig)
 
 export type DeepSeekEnvironment = Readonly<Record<string, string | undefined>>

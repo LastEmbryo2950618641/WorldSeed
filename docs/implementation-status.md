@@ -83,10 +83,29 @@
 - 同一 Task 自动回退到 `graph_structure_plan`，没有重新生成正文或创建替代任务。重跑后 9 项候选由 3 条决定记录完整覆盖，18 个 Source、3 个场景、5 个图修订、5 个检索投影和 1 个 AI 自定义探针完成提交。
 - 项目只读审计为 15/15 通过；活动上下文仍是单一追加链，完整消息 4,080 条，当前可见 105 条，系统规则只有 1 条。有效相邻前缀平均命中率为 99.32%，最近三次为 99.97%；供应商按整轮输入统计的命中率为 92.64%，主要包含冷启动、恢复和新增 Evidence，不能与相邻可复用前缀指标混为一谈。
 - 人工正文检查发现第 24 章相对时间措辞沿用了第 21 章的“昨天”。这不否定图持久化和召回闭环，但证明“图正确提交”尚不能升级为“正文长期语义完全自洽”。正文审核仍按产品原则只给建议、不拒绝提交。
+- 图治理输入降重与相对时间逐项审查已经形成独立设计：[图治理降本与正文连续性审查设计](superpowers/specs/2026-08-14-graph-governance-cost-continuity-design.md)。本段记录的是 8 月 14 日实施前状态；最新实施状态见 2.5。
+
+### 2.5 2026-08-17 图治理降本与连续性审查实施
+
+- Evidence 已按事实版本键合并，保留 canonical read ID 与旧 alias；模型输出中的历史 alias 在引用校验、artifact 解析和跨阶段契约校验前统一归一，不放宽未知 ID 校验。
+- `graph_governance_review`、`settlement_review`、`frontier_settlement` 和 `commit_review` 已改为职责内自包含投影；模型请求日志单独记录投影 digest、字符数和被移除的重复 Evidence 字符。
+- 正文相对时间已形成逐项断言、时空结算、治理 assessment 和提交建议链；冲突与不确定仍只有建议权，不阻断正文、图和历史提交。
+- 验收报告现同时检查非零图修订、Source、四段治理、Finalization、自动历史、阶段投影、时间断言覆盖和单链字节前缀；配对汇总器要求至少三组严格同起点样本，并用中位数判断 Token、provider 延迟、Schema repair 和 KV 是否退化。
+- 自动化、类型检查和构建已通过；现有真实样本尚无一组同时满足两侧非零图修订和最新语义门禁。Pair 6 基线完成 9 次调用、7,339,711 输入 Token 后在 `graph_spacetime_settlement` 连续超时并最终遇到 402，优化侧在 `interpret` 遇到相同 402。真实三组 A/B、暂停恢复和遗忘上下文召回仍是完成门禁，当前状态只能记为 `design_complete_implemented`，不能升级为 `verified`。
+- Pair 7、Pair 8 使用与主应用完全相同的凭据和 `deepseek-v4-flash`，均在 `interpret` 以零次成功调用返回 `402 Insufficient Balance`；受控切换到 `deepseek-v4-pro` 后仍返回同一 402，已确认当前阻塞是账户级外部状态而不是模型选择、Schema 或编排错误。失败任务均已恢复到同一 25 章冻结点，三项摘要一致，50 条正文/上下文对象引用全部位于各自运行根且目标文件存在。
+- 最新本地复验为 44 个测试文件、323 项测试通过，类型检查和构建通过。当前分支全量 lint 与改造前基线同为 108 个既存错误，本批没有新增 lint 回归；这些既存错误不作为真实 A/B 的替代证据。
+
+### 2.6 2026-08-19 后台前沿恢复验收
+
+- 后台演化任务 `b98addd2-a29a-404f-8276-b00e4b34beb9` 在原 Task 和原 pending 作用域内恢复并完成，未新建替代任务；最终恢复沿用已完成 `commit_review`，只执行统一存储提交。
+- `frontier_settlement` 对正文继续只接受获批场景绑定；无正文后台演化只允许继承本轮实际读取的同一前沿旧锚点。模型请求清单、结果引用校验和最终持久化共用同一投影读取规则，避免模型校验通过后存储层再次拒绝。
+- 本轮提交事件节点 `node_480` 和连接 `link_675`、`link_676`；前沿 `node_154` 保持 `active`，其场景/时间、地点和对应引用分别为 `node_277`、`node_154`、`link_411`。所有引用均可回到既有已提交图版本。
+- 日志确认 `world.evolve.committed`，本轮 3 个图修订；编排累计 25 次模型调用、12,059,797 输入 Token、14,511 输出 Token。数据库作用域提交序号为 46，任务无错误残留。
+- 最新全量复验为 45 个测试文件、340 项测试通过，类型检查和完整工作区构建通过；`git diff --check` 无空白错误，仅有 Windows 换行符提示。
 
 ## 3. 当前总览
 
-截至 2026-08-14，正文单轮、分步图治理、容量治理、Source 返回、后台演化恢复和提交闭环已经分别获得真实证据，但跨越长期压缩召回、复杂世界线切换、多时间流和持续后台影响的完整产品闭环仍未达到 `verified`。不能用单轮成功替代长期产品验收。
+截至 2026-08-17，正文单轮、分步图治理、容量治理、Source 返回、后台演化恢复和提交闭环已经分别获得真实证据，但图治理降本与正文时间断言仍缺三组有效真实 A/B，跨越长期压缩召回、复杂世界线切换、多时间流和持续后台影响的完整产品闭环也未达到 `verified`。不能用单轮成功或局部自动化替代长期产品验收。
 
 | 能力 | 权威设计 | 状态 | 当前证据 | 下一代码批次 |
 | --- | --- | --- | --- | --- |
@@ -98,9 +117,10 @@
 | 当前状态、历史演化与归档返回 | [system-design.md](system-design.md)、[spacetime-anchor-design.md](spacetime-anchor-design.md) | `design_complete_implemented` | 不可变图修订和归档原则已进入协议；长期状态投影尚未验收 | 验证旧事实、最新状态、归档出口和原文共同返回 |
 | 图结构只归档不物理删除，重构后旧含义仍可返回 | [system-design.md](system-design.md)、[backend-architecture.md](backend-architecture.md) | `design_complete_not_implemented` | 不可变修订可复用，但当前仍有 `retired` 基础设施，尚未证明所有语义归档都建立普通图出口 | 收敛归档提交协议并验证当前入口与历史入口同时可达 |
 | 选择性图与资料检索 | [dynamic-context-architecture.md](dynamic-context-architecture.md)、[rule-and-source-layers.md](rule-and-source-layers.md) | `design_complete_implemented` | exact、FTS、语义和邻域读取已有正式代码；召回质量、耗时和预算仍未达到产品验收 | 建立可重复召回基准并测量命中率、Token 和延迟 |
+| Evidence 事实版本复用、图治理阶段投影与正文时间断言 | [图治理降本与正文连续性审查设计](superpowers/specs/2026-08-14-graph-governance-cost-continuity-design.md) | `design_complete_implemented` | canonical 引用、四类投影、时间断言/结算/建议、UI 展示和自动验收已接入；真实 Pair 6 因 DeepSeek 402 未形成有效配对 | 完成至少三组同起点真实 A/B，并通过 Token、延迟、KV、语义和恢复汇总门禁 |
 | AI 自主查询规则与图重构后的真实验证探针 | [system-design.md](system-design.md)、[ai-phase-contracts.md](ai-phase-contracts.md)、[backend-architecture.md](backend-architecture.md) | `design_complete_implemented` | 探针定义权已完全归 AI；模型漏提时同阶段 Schema repair 要求补提，应用只执行、冻结和回传，逐探针游标及按 `probeIndex` 审核均已接入；第 23 章和后台演化均产生应用层真实执行及审核评估 | 继续验证压缩后当前/历史/原文多种探针的长期召回质量 |
 | 通用时空锚点、多时间流与动态空间 | [spacetime-anchor-design.md](spacetime-anchor-design.md) | `design_complete_implemented` | 契约和部分机械门禁已进入编排；尚无跨世界流速和动态空间端到端验收 | 增加多参照同步、未知对应和跨空间移动测试 |
-| 世界自洽演化、局部主体信息边界与演化前沿 | [world-emergence-rules.md](world-emergence-rules.md)、[system-design.md](system-design.md) | `design_complete_implemented` | 自动触发来源、前沿选择、正式演化任务、分步图治理和恢复已接入；验收项目存在 22 个自动任务，其中 18 个完成，最新恢复任务提交 6 个图修订 | 验证后台变化在较晚正文中被选择性召回并产生自然影响 |
+| 世界自洽演化、局部主体信息边界与演化前沿 | [world-emergence-rules.md](world-emergence-rules.md)、[system-design.md](system-design.md) | `design_complete_implemented` | 自动触发来源、前沿选择、正式演化任务、分步图治理和恢复已接入；任务 `b98addd2-a29a-404f-8276-b00e4b34beb9` 已从前沿契约失败恢复并提交 3 个图修订，同一前沿旧时空出口可安全复用 | 验证后台变化在较晚正文中被选择性召回并产生自然影响 |
 | 图直接入度/出度上限、预警和 AI 递归抽象治理 | [system-design.md](system-design.md)、[v1-freeze.md](v1-freeze.md)、[graph-governance-staged-design.md](graph-governance-staged-design.md) | `verified` | 代码机械检测双向容量，AI 只重构违规局部并重新检测；第 23 章真实重构后全图最高入度/出度均为 12，无超限，最终提案引用和提交结果一致 | 保持回归与性能观测，不扩展固定领域规则 |
 | 单一追加式模型上下文与 KV 前缀复用 | [context-and-kv-cache.md](context-and-kv-cache.md)、[2026-08-10-model-context-chain.md](superpowers/plans/2026-08-10-model-context-chain.md) | `design_complete_implemented` | SQLite 活动链、基础规则一次写入、增量追加、跨轮同链和正式章节引用已进入正式路径；尚未完成真实 KV 趋势验收 | 用 Flash/Pro 验证跨阶段公共前缀和 KV 命中趋势 |
 | 两阶段机械上下文压缩 | [context-and-kv-cache.md](context-and-kv-cache.md) | `design_complete_implemented` | 旧 AI 压缩阶段已移除；发送前 97%/50% 机械移出已接入并有保护项测试 | 在真实模型接近阈值时验证可见链、暂停和历史恢复 |

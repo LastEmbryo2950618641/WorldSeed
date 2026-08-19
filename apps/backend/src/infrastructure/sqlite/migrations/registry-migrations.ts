@@ -38,4 +38,9 @@ export const registryMigrations = Object.freeze([
   defineSqlMigration<RegistryDatabase>(4, "r004_model_context_window", [
     `ALTER TABLE model_profiles ADD COLUMN context_window_tokens INTEGER NOT NULL DEFAULT 1000000`,
   ]),
+  defineSqlMigration<RegistryDatabase>(5, "r005_model_api_protocol", [
+    `ALTER TABLE model_profiles ADD COLUMN api_protocol TEXT NOT NULL DEFAULT 'openai_chat_completions'`,
+    `ALTER TABLE model_profiles ADD COLUMN disable_response_storage INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE model_profiles ADD COLUMN service_tier TEXT NOT NULL DEFAULT 'auto'`,
+  ]),
 ])

@@ -35,11 +35,11 @@ describe("SQLite migrations", () => {
     const migrations = await first.selectFrom("schema_migrations").selectAll().execute()
 
     expect(tables.rows.map((row) => row.name)).toEqual(["model_profiles", "registered_projects", "schema_migrations"])
-    expect(migrations).toHaveLength(4)
+    expect(migrations).toHaveLength(5)
     await first.destroy()
 
     const reopened = await openRegistryDatabase(path)
-    expect(await reopened.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(4)
+    expect(await reopened.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(5)
     await reopened.destroy()
   })
 

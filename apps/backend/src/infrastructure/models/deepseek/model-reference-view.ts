@@ -143,13 +143,17 @@ function createModelInput(value: unknown): unknown {
     readEvidence,
     retrievalGaps,
     verificationProbeExecutions,
+    validationArtifacts: ignoredValidationArtifacts,
+    stageProjection,
     ...semanticInput
   } = value
   void ignoredSourceId
   void ignoredSourceUnitIds
   void ignoredPhaseRunIds
+  void ignoredValidationArtifacts
   return {
     ...semanticInput,
+    ...(stageProjection === undefined ? {} : { stageProjection: createModelStageProjection(stageProjection) }),
     ...(Array.isArray(readEvidence)
       ? { readEvidence: readEvidence.map(createModelReadEvidence) }
       : readEvidence === undefined ? {} : { readEvidence }),
@@ -162,6 +166,22 @@ function createModelInput(value: unknown): unknown {
     ...(isRecord(workspaceCatalog)
       ? { workspaceCatalog: { entries: workspaceCatalog.entries } }
       : workspaceCatalog === undefined ? {} : { workspaceCatalog }),
+  }
+}
+
+function createModelStageProjection(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  const pendingScope = isRecord(value.pendingScope) ? value.pendingScope : undefined
+  const verificationProbeExecutions = Array.isArray(value.verificationProbeExecutions)
+    ? value.verificationProbeExecutions.map(createModelVerificationProbeExecution)
+    : undefined
+  const modelPendingScope = pendingScope === undefined
+    ? undefined
+    : Object.fromEntries(Object.entries(pendingScope).filter(([key]) => key !== "scopeId"))
+  return {
+    ...value,
+    ...(modelPendingScope === undefined ? {} : { pendingScope: modelPendingScope }),
+    ...(verificationProbeExecutions === undefined ? {} : { verificationProbeExecutions }),
   }
 }
 
@@ -182,6 +202,8 @@ function createModelReadEvidence(value: unknown): unknown {
   const {
     revisionId: ignoredRevisionId,
     sourceRefs: ignoredSourceRefs,
+    canonicalReadId: ignoredCanonicalReadId,
+    readIdAliases: ignoredReadIdAliases,
     ownerId,
     ownerKind,
     relatedOwnerRefs,
@@ -189,6 +211,8 @@ function createModelReadEvidence(value: unknown): unknown {
   } = value
   void ignoredRevisionId
   void ignoredSourceRefs
+  void ignoredCanonicalReadId
+  void ignoredReadIdAliases
   const modelRelatedOwnerRefs = Array.isArray(relatedOwnerRefs)
     ? relatedOwnerRefs.flatMap((relatedOwner) => {
       if (!isRecord(relatedOwner)

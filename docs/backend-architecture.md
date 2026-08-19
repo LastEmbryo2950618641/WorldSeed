@@ -4,6 +4,8 @@
 
 本文把 [底层动态图设计](system-design.md) 转换为可实现的后端代码结构。它定义进程边界、模块职责、依赖方向、端口接口、持久化布局、执行管线、并发策略和测试边界，不重新定义世界语义。所有后端实现还必须遵守 [后端编码原则](backend-coding-principles.md)，该文档规定复用边界、业务隔离、依赖方向、契约版本和架构测试要求。V1 的冻结值、Migration、DeepSeek 配置和编码入口见 [V1 编码前冻结基线](v1-freeze.md)。单轮上下文、选择性读取和 DeepSeek KV 缓存复用见 [单轮上下文与 KV 缓存设计](context-and-kv-cache.md)，阶段 JSON 契约见 [AI 阶段契约](ai-phase-contracts.md)，场景、多时间流和动态空间见 [通用时空锚点设计](spacetime-anchor-design.md)，任意异常后的检查点、用户确认、续时和进程恢复见 [推演中断、确认与恢复设计](turn-interruption-recovery.md)，长期保存、返回历史状态、世界线分叉和内部 Git 隔离见 [推演历史、世界线与版本恢复设计](world-history-versioning.md)。
 
+通用查询计划、修改计划和多记忆后端的适配边界见 [通用记忆计划与多后端整合设计](memory-plan-and-backend-integration.md)。
+
 后端只负责机械能力：
 
 - 保存、读取和索引任意可规范序列化的节点、连接及其修订；

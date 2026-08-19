@@ -6,17 +6,23 @@ import { idSchema } from "./ids.js"
 import { graphObjectIdSchema } from "./persistent-id.js"
 import { resettableRuntimeMetricIdSchema } from "./runtime-metrics.js"
 
-export const deepSeekReasoningEffortSchema = z.enum(["low", "high", "max"])
+export const modelApiProtocolSchema = z.enum(["openai_chat_completions", "openai_responses"])
+export const modelReasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+export const deepSeekReasoningEffortSchema = modelReasoningEffortSchema
+export const modelServiceTierSchema = z.enum(["auto", "default", "flex", "priority", "fast"])
 
 export const modelSelectionSchema = z.object({
   baseUrl: z.url(),
   model: z.string().trim().min(1).max(200),
   credentialRef: z.string().trim().min(1).max(300),
+  apiProtocol: modelApiProtocolSchema.default("openai_chat_completions"),
   contextWindowTokens: z.number().int().positive().max(2_000_000).default(1_000_000),
   apiKey: z.string().trim().min(1).max(4096).optional(),
   thinkingModeEnabled: z.boolean().default(true),
   reasoningEffort: deepSeekReasoningEffortSchema.default("high"),
   jsonModeEnabled: z.boolean().default(false),
+  disableResponseStorage: z.boolean().default(true),
+  serviceTier: modelServiceTierSchema.default("auto"),
 })
 export type ModelSelection = z.infer<typeof modelSelectionSchema>
 
@@ -170,10 +176,13 @@ export const modelProfileSchema = z.object({
   baseUrl: z.url(),
   model: z.string().trim().min(1).max(200),
   credentialRef: z.string().trim().min(1).max(300),
+  apiProtocol: modelApiProtocolSchema.default("openai_chat_completions"),
   contextWindowTokens: z.number().int().positive().max(2_000_000).default(1_000_000),
   thinkingModeEnabled: z.boolean().default(true),
   reasoningEffort: deepSeekReasoningEffortSchema.default("high"),
   jsonModeEnabled: z.boolean().default(false),
+  disableResponseStorage: z.boolean().default(true),
+  serviceTier: modelServiceTierSchema.default("auto"),
 })
 export type ModelProfile = z.infer<typeof modelProfileSchema>
 

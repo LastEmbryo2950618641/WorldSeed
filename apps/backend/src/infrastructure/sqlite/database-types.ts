@@ -26,6 +26,7 @@ export type ModelProfileRow = {
   base_url: string
   model: string
   credential_ref: string
+  api_protocol: string
   context_window_tokens: number
   is_active: number
   position: number
@@ -34,6 +35,8 @@ export type ModelProfileRow = {
   thinking_mode_enabled: number
   reasoning_effort: string
   json_mode_enabled: number
+  disable_response_storage: number
+  service_tier: string
 }
 
 export type RegistryDatabase = {

@@ -12,18 +12,22 @@ import {
 } from "@worldseed/contracts"
 import {
   assertFrontierSettlementCoversReview,
+  assertCommitReviewCoversTemporalClaims,
   assertGraphSpacetimeSettlementCoverage,
   assertPhaseReferenceContract,
   assertSemanticReviewCoversGovernance,
   assertSpacetimeGovernanceCoverage,
+  assertTemporalClaimCoverage,
   graphGovernanceArtifactSchema,
   graphStructurePlanArtifactSchema,
+  frontierSettlementProjectionSchema,
   semanticReviewArtifactSchema,
   phaseArtifactJsonSchema,
   parsePhaseArtifact,
 } from "@worldseed/prompt-contracts"
 
 import {
+  canonicalizeEvidenceReadId,
   completeGraphSettlementRecords,
   VerificationProbeCoordinator,
   type TurnPhaseInput,
@@ -63,14 +67,24 @@ export function assembleModelPhaseResult(
   request: PhaseRequestEnvelope,
   createId: () => string = randomUUID,
 ): PhaseResultEnvelope {
-  assertCitationsAreReadable(semantic.citedReadIds, request)
+  const input = request.input as TurnPhaseInput
+  const citedReadIds = semantic.citedReadIds.map((readId) => (
+    canonicalizeEvidenceReadId(readId, input.readEvidence)
+  ))
+  assertCitationsAreReadable(citedReadIds, request)
   const artifact = semantic.artifact === undefined
     ? undefined
     : normalizeArtifactReferences(
         request,
         completeAdvisoryDefaults(
           request,
-          parsePhaseArtifact(request.phase, normalizeOptionalModelFields(request.phase, semantic.artifact)),
+          parsePhaseArtifact(
+            request.phase,
+            normalizeOptionalModelFields(
+              request.phase,
+              normalizeEvidenceAliases(semantic.artifact, input.readEvidence),
+            ),
+          ),
           semantic.reason,
           semantic.selfReview,
         ),
@@ -110,7 +124,7 @@ export function assembleModelPhaseResult(
     outcome: semantic.outcome,
     artifact,
     requestedReads,
-    citedReadIds: semantic.citedReadIds,
+    citedReadIds,
     producedArtifactIds: [],
     decisionRecordIds: [],
     unresolvedDependencies: semantic.unresolvedDependencies.map((dependency) => ({
@@ -120,6 +134,16 @@ export function assembleModelPhaseResult(
     reason: semantic.reason,
     selfReview: semantic.selfReview,
   })
+}
+
+function normalizeEvidenceAliases(value: unknown, evidence: TurnPhaseInput["readEvidence"]): unknown {
+  if (typeof value === "string") return canonicalizeEvidenceReadId(value, evidence)
+  if (Array.isArray(value)) return value.map((item) => normalizeEvidenceAliases(item, evidence))
+  if (typeof value !== "object" || value === null) return value
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    normalizeEvidenceAliases(item, evidence),
+  ]))
 }
 
 function normalizeRequestedSourceKinds(
@@ -350,7 +374,7 @@ function normalizeGraphMutationReferences(
 function completeApprovedAffectedFrontiers(request: PhaseRequestEnvelope, artifact: unknown): unknown {
   const review = semanticReviewArtifactSchema.parse(artifact)
   const input = request.input as TurnPhaseInput
-  const governance = graphGovernanceArtifactSchema.parse(input.artifacts.graph_governance)
+  const governance = graphGovernanceArtifactSchema.parse(phaseArtifacts(input).graph_governance)
   if (!isCompleteApproval(review.approvedMutationIndexes, review.rejectedMutationIndexes, governance.mutations.length)
     || !isCompleteApproval(
       review.approvedSpacetimeBindingIndexes,
@@ -388,49 +412,65 @@ function assertCrossPhaseArtifactContract(
   finalArtifact: boolean,
 ): void {
   const input = request.input as TurnPhaseInput
+  const artifacts = phaseArtifacts(input)
   if (request.phase === "graph_spacetime_settlement"
     && finalArtifact
-    && input.artifacts.dependency_audit !== undefined
-    && input.artifacts.graph_structure_plan !== undefined) {
+    && artifacts.dependency_audit !== undefined
+    && artifacts.graph_structure_plan !== undefined) {
     assertGraphSpacetimeSettlementCoverage(
-      input.artifacts.dependency_audit,
-      input.artifacts.graph_structure_plan,
+      artifacts.dependency_audit,
+      artifacts.graph_structure_plan,
       artifact,
       input.sourceUnitIds.length,
     )
   }
-  if (request.phase === "graph_governance" && input.artifacts.dependency_audit !== undefined) {
-    assertSpacetimeGovernanceCoverage(input.artifacts.dependency_audit, artifact, input.sourceUnitIds.length)
+  if (request.phase === "graph_governance" && artifacts.dependency_audit !== undefined) {
+    assertSpacetimeGovernanceCoverage(artifacts.dependency_audit, artifact, input.sourceUnitIds.length)
   }
   if (request.phase === "semantic_review") {
-    assertSemanticReviewCoversGovernance(input.artifacts.graph_governance, artifact)
+    assertSemanticReviewCoversGovernance(artifacts.graph_governance, artifact)
+  }
+  if (request.phase === "graph_governance_review"
+    && finalArtifact
+    && artifacts.dependency_audit !== undefined
+    && artifacts.graph_spacetime_settlement !== undefined) {
+    assertTemporalClaimCoverage(artifacts.dependency_audit, artifacts.graph_spacetime_settlement, artifact)
   }
   if ((request.phase === "semantic_review" || request.phase === "graph_governance_review") && finalArtifact) {
     verificationProbeCoordinator.assertAssessments(artifact, input.verificationProbeExecutions ?? [])
   }
   if (request.phase === "frontier_settlement") {
     assertFrontierSettlementCoversReview(
-      input.artifacts.semantic_review,
+      artifacts.semantic_review,
       artifact,
-      input.artifacts.graph_governance,
+      artifacts.graph_governance,
+      input.stageProjection,
     )
+  }
+  if (request.phase === "commit_review" && artifacts.graph_governance_review !== undefined) {
+    assertCommitReviewCoversTemporalClaims(artifacts.graph_governance_review, artifact)
   }
 }
 
 function assertArtifactReferences(request: PhaseRequestEnvelope, artifact: unknown): void {
   if (artifact === undefined) return
   const input = request.input as TurnPhaseInput
-  const governance = input.artifacts.graph_governance === undefined
+  const artifacts = phaseArtifacts(input)
+  const governance = artifacts.graph_governance === undefined
     ? undefined
-    : graphGovernanceArtifactSchema.parse(input.artifacts.graph_governance)
-  const structure = input.artifacts.graph_structure_plan === undefined
+    : graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
+  const structure = artifacts.graph_structure_plan === undefined
     ? undefined
-    : graphStructurePlanArtifactSchema.parse(input.artifacts.graph_structure_plan)
+    : graphStructurePlanArtifactSchema.parse(artifacts.graph_structure_plan)
+  const readableGraphIds = new Set(input.readEvidence
+    .filter((evidence) => evidence.ownerKind === "node" || evidence.ownerKind === "link")
+    .map((evidence) => evidence.ownerId))
+  if (request.phase === "frontier_settlement" && input.stageProjection !== undefined) {
+    for (const reference of frontierProjectionGraphReferences(input.stageProjection)) readableGraphIds.add(reference)
+  }
   assertPhaseReferenceContract(request.phase, artifact, {
     readableEvidenceIds: new Set(input.readEvidence.map((evidence) => evidence.readId)),
-    readableGraphIds: new Set(input.readEvidence
-      .filter((evidence) => evidence.ownerKind === "node" || evidence.ownerKind === "link")
-      .map((evidence) => evidence.ownerId)),
+    readableGraphIds,
     readableWorkspacePaths: new Set(input.readEvidence
       .filter((evidence) => evidence.ownerKind.startsWith("workspace:"))
       .map((evidence) => evidence.ownerId)),
@@ -438,6 +478,36 @@ function assertArtifactReferences(request: PhaseRequestEnvelope, artifact: unkno
       mutation.operation === "create_node" || mutation.operation === "create_link" ? [mutation.ref] : []
     )) ?? []),
   })
+}
+
+function frontierProjectionGraphReferences(value: unknown): string[] {
+  const projection = frontierSettlementProjectionSchema.parse(value)
+  return [...new Set([
+    ...projection.affectedFrontierRefs,
+    ...projection.archiveOutletRefs,
+    ...projection.correspondenceRefs,
+    ...projection.approvedSceneBindings.flatMap((binding) => [
+      binding.sceneAnchorRef,
+      ...binding.temporalReferenceRefs,
+      ...binding.timeAnchorRefs,
+      ...binding.spatialReferenceRefs,
+      ...binding.locationAnchorRefs,
+      ...binding.predecessorSceneAnchorRefs,
+      ...binding.transitionPathRefs,
+      ...binding.correspondenceRefs,
+    ]),
+    ...projection.priorFrontierStates.flatMap((state) => [
+      state.frontierAnchorRef,
+      ...state.lastSceneAnchorRefs,
+      ...state.lastTimeAnchorRefs,
+      ...state.lastLocationAnchorRefs,
+      ...state.correspondenceRefs,
+    ]),
+  ])]
+}
+
+function phaseArtifacts(input: TurnPhaseInput): Partial<Record<AIPhase, unknown>> {
+  return input.validationArtifacts ?? input.artifacts
 }
 
 function assertCitationsAreReadable(citedReadIds: readonly string[], request: PhaseRequestEnvelope): void {

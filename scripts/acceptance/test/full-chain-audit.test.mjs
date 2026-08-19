@@ -7,6 +7,7 @@ import {
   auditCompletedTurn,
   auditPhaseCompletion,
   auditPromptPrefix,
+  auditStageProjectionProfiles,
   collectTrackedIncompleteTasks,
 } from "../lib/full-chain-audit.mjs"
 
@@ -118,6 +119,33 @@ describe("full-chain acceptance audit", () => {
     expect(result.evidence.recoveredRunningAttempts).toEqual([
       { phase: "graph_governance_review", attempt: 5, status: "running" },
     ])
+  })
+
+  it("accepts self-contained stage projection profiles for every review phase", () => {
+    const phases = ["graph_governance_review", "settlement_review", "frontier_settlement", "commit_review"]
+    const result = auditStageProjectionProfiles(phases.map((phase, index) => ({
+      component: "deepseek-model",
+      event: "completion.prompt_profiled",
+      taskId: "task-1",
+      phase,
+      modelRequestSections: {
+        stageProjectionKind: phase,
+        stageProjectionDigest: String(index).repeat(64),
+        stageProjectionCharacters: 120 + index,
+        deduplicatedEvidenceCharacters: 40 + index,
+      },
+    })), "task-1")
+
+    expect(result.status).toBe("pass")
+    expect(result.evidence.coveredPhases).toEqual(phases)
+    expect(result.evidence.deduplicatedEvidenceCharacters).toBe(166)
+  })
+
+  it("rejects a review phase whose stage projection is missing", () => {
+    const result = auditStageProjectionProfiles([], "task-1")
+
+    expect(result.status).toBe("fail")
+    expect(result.evidence.missingPhases).toContain("commit_review")
   })
 })
 

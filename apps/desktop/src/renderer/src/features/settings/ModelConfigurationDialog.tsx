@@ -11,12 +11,15 @@ export type ModelProfile = Readonly<{
   baseUrl: string
   model: string
   credentialRef: string
+  apiProtocol: "openai_chat_completions" | "openai_responses"
   contextWindowTokens: number
   apiKey: string
   hasApiKey: boolean
   thinkingModeEnabled: boolean
-  reasoningEffort: "low" | "high" | "max"
+  reasoningEffort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
   jsonModeEnabled: boolean
+  disableResponseStorage: boolean
+  serviceTier: "auto" | "default" | "flex" | "priority" | "fast"
 }>
 
 type Props = Readonly<{
@@ -137,12 +140,15 @@ export function ModelConfigurationDialog({ profiles, activeProfileId, onClose, o
       baseUrl: "https://api.deepseek.com",
       model: "",
       credentialRef: `model-profile:${crypto.randomUUID()}`,
+      apiProtocol: "openai_responses",
       contextWindowTokens: 1_000_000,
       apiKey: "",
       hasApiKey: false,
       thinkingModeEnabled: true,
       reasoningEffort: "high",
       jsonModeEnabled: false,
+      disableResponseStorage: true,
+      serviceTier: "auto",
     }
     setDrafts((current) => [...current, profile])
     setSelectedId(profile.id)
@@ -236,6 +242,12 @@ export function ModelConfigurationDialog({ profiles, activeProfileId, onClose, o
               <input value={selectedProfile.name} onChange={(event) => { updateSelected({ name: event.target.value }); }} placeholder="例如：DeepSeek 主账号" spellCheck={false} />
             </label>
             <label className="model-field">
+              <span>API 协议<small>按服务能力选择，不依赖供应商品牌</small></span>
+              <select className="model-enum-select" value={selectedProfile.apiProtocol} onChange={(event) => { updateSelected({ apiProtocol: event.target.value as ModelProfile["apiProtocol"] }); }}>
+                <option value="openai_responses">OpenAI Responses</option><option value="openai_chat_completions">OpenAI Chat Completions</option>
+              </select>
+            </label>
+            <label className="model-field">
               <span>Base URL<small>模型服务的 API 根地址</small></span>
               <input value={selectedProfile.baseUrl} onChange={(event) => { updateSelected({ baseUrl: event.target.value }); }} placeholder="https://api.deepseek.com" spellCheck={false} />
             </label>
@@ -258,15 +270,25 @@ export function ModelConfigurationDialog({ profiles, activeProfileId, onClose, o
               <input type="number" value={selectedProfile.contextWindowTokens} min={1} max={2_000_000} step={1000} onChange={(event) => { updateSelected({ contextWindowTokens: Number(event.target.value) }); }} />
             </label>
             <div className="model-field">
-              <span>深度思考<small>控制 DeepSeek 是否返回原生 reasoning_content</small></span>
+              <span>深度思考<small>使用当前协议支持的原生推理能力</small></span>
               <button className={`model-toggle ${selectedProfile.thinkingModeEnabled ? "enabled" : ""}`} type="button" role="switch" aria-checked={selectedProfile.thinkingModeEnabled} onClick={() => { updateSelected({ thinkingModeEnabled: !selectedProfile.thinkingModeEnabled }); }}><i /><strong>{selectedProfile.thinkingModeEnabled ? "已开启" : "已关闭"}</strong></button>
             </div>
             <label className="model-field">
-              <span>思考强度<small>DeepSeek 官方支持 low、high 和 max</small></span>
+              <span>思考强度<small>可选值取决于模型与兼容服务</small></span>
               <select className="model-enum-select" value={selectedProfile.reasoningEffort} disabled={!selectedProfile.thinkingModeEnabled} onChange={(event) => { updateSelected({ reasoningEffort: event.target.value as ModelProfile["reasoningEffort"] }); }}>
-                <option value="low">低</option><option value="high">高</option><option value="max">最大</option>
+                <option value="none">无</option><option value="minimal">最小</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="max">最大</option>
               </select>
             </label>
+            <label className="model-field">
+              <span>服务等级<small>兼容服务不支持时使用自动</small></span>
+              <select className="model-enum-select" value={selectedProfile.serviceTier} onChange={(event) => { updateSelected({ serviceTier: event.target.value as ModelProfile["serviceTier"] }); }}>
+                <option value="auto">自动</option><option value="default">默认</option><option value="flex">Flex</option><option value="priority">Priority</option><option value="fast">Fast</option>
+              </select>
+            </label>
+            <div className="model-field">
+              <span>服务端响应存储<small>关闭后仅保留 Worldseed 本地历史</small></span>
+              <button className={`model-toggle ${selectedProfile.disableResponseStorage ? "" : "enabled"}`} type="button" role="switch" aria-checked={!selectedProfile.disableResponseStorage} onClick={() => { updateSelected({ disableResponseStorage: !selectedProfile.disableResponseStorage }); }}><i /><strong>{selectedProfile.disableResponseStorage ? "已关闭" : "已开启"}</strong></button>
+            </div>
             <div className="model-field">
               <span>JSON Mode<small>默认关闭；输出仍由业务 Schema 校验</small></span>
               <button className={`model-toggle ${selectedProfile.jsonModeEnabled ? "enabled" : ""}`} type="button" role="switch" aria-checked={selectedProfile.jsonModeEnabled} onClick={() => { updateSelected({ jsonModeEnabled: !selectedProfile.jsonModeEnabled }); }}><i /><strong>{selectedProfile.jsonModeEnabled ? "已开启" : "已关闭"}</strong></button>

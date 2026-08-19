@@ -17,6 +17,7 @@ import {
 import {
   auditAutomaticEvolution,
   auditCompletedTurn as auditStoredCompletedTurn,
+  auditStageProjectionProfiles,
   collectTrackedIncompleteTasks,
 } from "./lib/full-chain-audit.mjs"
 
@@ -38,6 +39,7 @@ const requireAutomaticEvolution = process.env.WORLDSEED_ACCEPTANCE_REQUIRE_AUTO_
 const minimumEffectiveKvRate = readRatioEnvironment("WORLDSEED_ACCEPTANCE_MIN_EFFECTIVE_KV", 0.95)
 const minimumRecentKvRate = readRatioEnvironment("WORLDSEED_ACCEPTANCE_MIN_RECENT_KV", 0.98)
 const reportPath = resolve(process.env.WORLDSEED_ACCEPTANCE_FULL_REPORT ?? ".worldseed-data/acceptance/current/full-chain.json")
+const logPath = resolve(requiredEnvironment("WORLDSEED_ACCEPTANCE_LOG"))
 const queryCheckpoints = new Set([10, 20, targetChapters].filter((value) => value <= targetChapters))
 const auditOnly = process.argv.includes("--audit-only")
 const existingReport = auditOnly ? await readAuditReport(reportPath) : await readExistingReport(reportPath)
@@ -53,6 +55,7 @@ const report = existingReport ?? {
   cdpUrl,
   targetChapters,
   requireAutomaticEvolution,
+  logPath,
   turns: [],
   queries: [],
   automaticEvolutions: [],
@@ -370,15 +373,30 @@ function finalMechanicalChecks(database, currentProjectId, minimumChapters, curr
   const queryFailures = currentReport.queries.filter((query) => !query.exactSentenceReturned || query.evidenceCount === 0)
   const invalidEvolution = currentReport.automaticEvolutions.filter((evolution) => !evolution.mechanical.passed)
   const invalidTurnKv = currentReport.turns.filter((turn) => !turn.mechanical.kv?.passed)
+  const runtimeEvents = readRuntimeEventsSync(logPath)
+  const stageProjectionAudits = currentReport.turns.map((turn) => auditStageProjectionProfiles(runtimeEvents, turn.taskId))
+  for (const [index, turn] of currentReport.turns.entries()) {
+    turn.stageProjectionAudit = stageProjectionAudits[index]
+  }
   return [
     check("minimum_long_run_chapters", chapterCount >= minimumChapters, { chapterCount, minimumChapters }),
     check("single_context_chain", chainCount === 1, { chainCount }),
     check("single_chain_high_kv", invalidTurnKv.length === 0, { invalidTurnKv: invalidTurnKv.map((turn) => turn.taskId) }),
+    check("stage_projection_profiles", stageProjectionAudits.every((audit) => audit.status === "pass"), { audits: stageProjectionAudits }),
     check("all_recorded_turns_closed", currentReport.turns.every((turn) => turn.mechanical.passed), { turns: currentReport.turns.length }),
     check("historical_source_queries", queryFailures.length === 0 && currentReport.queries.length === queryCheckpoints.size, { queryCount: currentReport.queries.length, failures: queryFailures }),
     check("automatic_background_evolution", !requireAutomaticEvolution || (invalidEvolution.length === 0 && hasOneEvolutionPerTurn(currentReport)), { evolutionCount: currentReport.automaticEvolutions.length, invalidEvolution }),
     check("no_incomplete_tasks", incompleteTasks.length === 0, { incompleteTasks }),
   ]
+}
+
+function readRuntimeEventsSync(path) {
+  const content = require("node:fs").readFileSync(path, "utf8")
+  return content.split(/\r?\n/u).flatMap((line) => {
+    const start = line.indexOf("{")
+    if (start < 0) return []
+    try { return [JSON.parse(line.slice(start))] } catch { return [] }
+  })
 }
 
 function auditCompletedTurnResult(database, taskId, expectedChapterSequence) {

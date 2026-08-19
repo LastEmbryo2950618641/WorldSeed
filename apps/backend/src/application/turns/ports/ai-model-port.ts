@@ -11,6 +11,7 @@ import type {
 } from "@worldseed/contracts"
 
 import type { GraphDegreeEntry } from "./graph-repository.js"
+import type { StageProjection } from "@worldseed/prompt-contracts"
 
 export type PhaseModelUsage = Readonly<{
   modelCalls?: number
@@ -80,6 +81,7 @@ export type TurnPhaseInput = Readonly<{
   sourceUnitIds: readonly string[]
   phaseRunIds: readonly string[]
   readEvidence: readonly TurnReadEvidence[]
+  resurfacedReadIds?: readonly string[]
   retrievalGaps: readonly TurnRetrievalGap[]
   verificationProbeExecutions?: readonly VerificationProbeExecution[]
   workspaceCatalog?: WorkspaceCatalogSnapshot
@@ -110,6 +112,8 @@ export type TurnPhaseInput = Readonly<{
     reason: string
     selfReview: string
   }>
+  stageProjection?: StageProjection
+  validationArtifacts?: Partial<Record<AIPhase, unknown>>
   artifacts: Partial<Record<AIPhase, unknown>>
 }>
 

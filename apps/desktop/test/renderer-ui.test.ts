@@ -260,6 +260,47 @@ describe("right rail process UI contract", () => {
     expect(html).toContain("尚未进入该阶段")
   })
 
+  it("shows advisory continuity results collapsed without changing the completed task state", () => {
+    const html = renderToStaticMarkup(React.createElement(RightRail, {
+      graphSlice: undefined,
+      task: {
+        status: "completed",
+        lastPhase: "commit_review",
+        phaseRuns: [{
+          phaseRunId: "phase-commit",
+          phase: "commit_review",
+          status: "completed",
+          attempt: 1,
+          result: {
+            artifact: {
+              recommendation: "commit",
+              continuityAdvice: [{
+                claimRef: "claim:one",
+                proseExcerpt: "昨天留下的痕迹仍在。",
+                verdict: "conflict",
+                summary: "相对时间与当前场景入口不一致",
+                evidenceRefs: ["evidence_1"],
+                suggestedDirection: "改成与当前场景时间一致的表达。",
+              }],
+              finalSelfReview: "建议不阻断提交",
+            },
+          },
+          usage: {},
+          startedAtMs: 1,
+          finishedAtMs: 2,
+        }],
+      },
+    }))
+
+    expect(html).toContain("连续性建议")
+    expect(html).toContain("昨天留下的痕迹仍在。")
+    expect(html).toContain("冲突")
+    expect(html).toContain("改成与当前场景时间一致的表达。")
+    expect(html).toContain("completed")
+    expect(html).not.toContain("class=\"task-error\"")
+    expect(html).not.toContain("<details class=\"continuity-advice\" open=\"\"")
+  })
+
   it("updates live usage totals when another phase run is returned", () => {
     const baseTask = {
       status: "running",

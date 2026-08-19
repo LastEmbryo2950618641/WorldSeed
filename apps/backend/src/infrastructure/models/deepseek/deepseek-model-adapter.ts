@@ -24,6 +24,8 @@ import {
 import { createModelReferenceView, type ModelReferenceView } from "./model-reference-view.js"
 import { errorDetails, runtimeLog } from "../../diagnostics/index.js"
 
+const OPENAI_COMPATIBLE_USER_AGENT = "Worldseed/0.1"
+
 export type SecretProvider = Readonly<{
   getSecret(reference: string): Promise<string>
 }>
@@ -39,7 +41,7 @@ export type DeepSeekCompletionInput = Readonly<{
   maxTokens?: number
   signal?: AbortSignal
   thinking?: { type: "enabled" | "disabled" }
-  reasoningEffort?: "low" | "high" | "max"
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
 }>
 
 export type DeepSeekMessage = Readonly<{
@@ -179,7 +181,7 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
       envelopeId: request.envelopeId,
       totalCharacters: promptSnapshot.serialized.length,
       messages: profileMessages(messages),
-      modelRequestSections: profileModelRequestSections(modelRequest),
+      modelRequestSections: profileModelRequestSections(modelRequest, referenceView.request),
       outputReminderCharacters: outputReminder.length,
       ...promptContinuity,
     })
@@ -383,11 +385,41 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
       baseURL: this.config.baseUrl,
       timeout: this.config.timeoutMs,
       maxRetries: 0,
+      defaultHeaders: { "User-Agent": OPENAI_COMPATIBLE_USER_AGENT },
       ...(dispatcher === undefined ? {} : { fetchOptions: { dispatcher } }),
     } as unknown as ConstructorParameters<typeof OpenAI>[0]
     const client = new OpenAI(clientOptions)
     return {
       complete: async (input) => {
+        if (this.config.apiProtocol === "openai_responses") {
+          const response = await client.responses.create({
+            model: input.model,
+            input: input.messages.map((message) => ({ role: message.role, content: message.content })),
+            store: !this.config.disableResponseStorage,
+            ...(this.config.serviceTier === "auto" ? {} : { service_tier: this.config.serviceTier }),
+            ...(input.responseFormat === undefined ? {} : { text: { format: input.responseFormat } }),
+            ...(input.maxTokens === undefined ? {} : { max_output_tokens: input.maxTokens }),
+            ...(input.thinking?.type === "enabled"
+              ? { reasoning: { effort: input.reasoningEffort, summary: "detailed" as const } }
+              : {}),
+          } as Parameters<typeof client.responses.create>[0], input.signal === undefined ? undefined : { signal: input.signal })
+          const responseRecord = asRecord(response)
+          const incompleteDetails = asRecord(responseRecord.incomplete_details)
+          const responseId = readString(responseRecord.id)
+          const responseStatus = readString(responseRecord.status)
+          const incompleteReason = readString(incompleteDetails.reason)
+          const finishReason = incompleteReason ?? responseStatus
+          const reasoningContent = readResponsesReasoning(responseRecord.output)
+          const usage = normalizeResponsesUsage(responseRecord.usage)
+          return {
+            content: readString(responseRecord.output_text) ?? null,
+            ...(finishReason === undefined ? {} : { finishReason }),
+            ...(responseId === undefined ? {} : { responseId }),
+            messageFieldNames: Object.keys(responseRecord),
+            ...(reasoningContent === undefined ? {} : { reasoningContent }),
+            ...(usage === undefined ? {} : { usage }),
+          }
+        }
         const requestBody = {
           model: input.model,
           messages: [...input.messages],
@@ -440,6 +472,37 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
   }
 }
 
+function readResponsesReasoning(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return undefined
+  const sections = value.flatMap((item) => {
+    const record = asRecord(item)
+    if (record.type !== "reasoning") return []
+    return [...readTextParts(record.summary), ...readTextParts(record.content)]
+  })
+  return sections.length === 0 ? undefined : sections.join("\n\n")
+}
+
+function readTextParts(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    const text = asRecord(item).text
+    return typeof text === "string" && text.trim().length > 0 ? [text] : []
+  })
+}
+
+function normalizeResponsesUsage(value: unknown): Record<string, unknown> | undefined {
+  const usage = asRecord(value)
+  if (Object.keys(usage).length === 0) return undefined
+  const inputDetails = asRecord(usage.input_tokens_details)
+  const outputDetails = asRecord(usage.output_tokens_details)
+  return {
+    prompt_tokens: usage.input_tokens,
+    completion_tokens: usage.output_tokens,
+    prompt_tokens_details: { cached_tokens: inputDetails.cached_tokens },
+    completion_tokens_details: { reasoning_tokens: outputDetails.reasoning_tokens },
+  }
+}
+
 function normalizeContextMessages(
   contextMessages: readonly { role: "system" | "user" | "assistant"; content: string }[],
 ): DeepSeekMessage[] {
@@ -456,6 +519,8 @@ function mergeExecutionSignals(executionSignal: AbortSignal | undefined, timeout
 }
 
 function buildModelResultRules(request: PhaseRequestEnvelope, referenceView: ModelReferenceView): string {
+  const requestInput = asRecord(request.input)
+  const stageProjection = asRecord(requestInput.stageProjection)
   const declaredLocalReferences = collectDeclaredLocalReferences(request)
   const mayDeclareLocalReferences = request.phase === "graph_governance"
     || request.phase === "graph_structure_plan"
@@ -472,13 +537,18 @@ function buildModelResultRules(request: PhaseRequestEnvelope, referenceView: Mod
     || request.phase === "graph_retrieval_design"
     || request.phase === "graph_governance_review"
     ? [
-        "- The complete graph_governance JSON must finish below the provider's configured output limit. Keep every reason, explanation, selfReview, semanticText, content, and metadata value concise; do not repeat source prose across fields.",
+        request.phase === "graph_governance_review"
+          ? "- Review only the supplied stageProjection. Do not reproduce the complete graph_governance candidate in the result."
+          : "- The current graph stage result must finish below the provider's configured output limit. Keep every reason, explanation, selfReview, semanticText, content, and metadata value concise; do not repeat source prose across fields.",
         "- In graph_governance, graph reference fields accept only node_*/link_* permanent IDs, legacy node-*/link-* aliases, or a local:* handle declared by a create mutation. Never put evidence_*/read-* in a graph reference field.",
         "- predecessorRevisionReadRefs is the exception: it accepts only revision-bearing evidence_*/read-* references, never node or link identities.",
         `- Revision-bearing evidence aliases available here: ${referenceView.revisionReadTokens.join(", ") || "none"}.`,
       ].join("\n")
     : "- evidence_*/read-* references identify evidence; node_*/link_* or legacy node-*/link-* references identify existing graph objects. Do not substitute one role for the other."
   const crossPhaseChecklist = buildCrossPhaseChecklist(request)
+  const stageProjectionRule = Object.keys(stageProjection).length === 0
+    ? "- This request has no stageProjection; use the declared phase artifacts and visible evidence."
+    : `- input.stageProjection (${String(stageProjection.kind)}) is the complete authoritative business input for this phase. Do not request or reconstruct a full graph_governance copy; inspect the projection directly and return only this phase's result.`
   return [
     "Model result rules:",
     "- Treat the model-facing request as read-only input. Do not copy, restate, summarize, or serialize the request, read evidence, catalog, prior artifacts, or schemas into the result unless the phase schema explicitly requires that value.",
@@ -490,6 +560,7 @@ function buildModelResultRules(request: PhaseRequestEnvelope, referenceView: Mod
     "- Use outcome=request_read if and only if requestedReads is non-empty. Every other outcome requires requestedReads=[].",
     localReferenceRule,
     graphGovernanceReferenceRule,
+    stageProjectionRule,
     crossPhaseChecklist,
     "- Do not emit technical UUID fields. The backend creates technical IDs for chapters, sources, revisions, projections, settlements, decisions, and other records.",
     "- For an existing graph identity, copy only the exact reference present in this request's readable evidence. Never invent an existing graph reference.",
@@ -498,6 +569,7 @@ function buildModelResultRules(request: PhaseRequestEnvelope, referenceView: Mod
     "- sourceKinds source means the internal committed immutable source-unit projection. It is not a request to read Markdown from the workspace chapter directory, so a workspace chapter-read prohibition does not exclude source projections.",
     "- For an exact quotation, title, or other exact persisted wording, provide exactKeys. When the same request searches graph or revision evidence, include source as well; summaries and semanticTexts must not impersonate exact source wording.",
     "- Source evidence may expose relatedOwnerRefs with bounded graph projection summaries: these are the graph owners mechanically linked to that exact immutable source unit by settlement. Use those summaries first when reconstructing the source unit's time, place, state, or causal context; do not replace them with an unrelated graph candidate that merely has similar wording, and do not request every related owner again unless the summary is insufficient.",
+    "- input.resurfacedReadIds means your immediately preceding read request matched Evidence already visible in this context chain. The matching readEvidence entries are deliberately repeated in this delta; use them now and finish the current phase instead of requesting the same Evidence again.",
     "- Source evidence exposes sourcePosition from immutable source order. isEnd=true identifies the last persisted unit of that source; isEnd=false means the unit must not be described as that source's ending. sequence and source boundaries are storage order, not story time.",
     "- When continuation requires the end of an identified source and visible evidence is not isEnd=true, request sourceKinds=[source], copy its sourcePosition.sourceRef into sourceIds, and set sourceBoundary=end. Use sourceBoundary=start only when the beginning is required. Do not guess a source boundary from semantic similarity.",
     "- For conflicting current graph evidence owned by different nodes or links, a larger committedSequence means a later committed world state and should be preferred over an older plan or local state. committedSequence is not story time; explicit story-time anchors and evolution relations still determine in-world chronology.",
@@ -510,7 +582,9 @@ function buildModelResultRules(request: PhaseRequestEnvelope, referenceView: Mod
 
 function collectDeclaredLocalReferences(request: PhaseRequestEnvelope): string[] {
   const input = asRecord(request.input)
-  const artifacts = asRecord(input.artifacts)
+  const artifacts = Object.keys(asRecord(input.validationArtifacts)).length === 0
+    ? asRecord(input.artifacts)
+    : asRecord(input.validationArtifacts)
   const governance = asRecord(artifacts.graph_governance)
   const structure = asRecord(artifacts.graph_structure_plan)
   const structureProposals = Array.isArray(structure.proposals) ? structure.proposals : []
@@ -530,7 +604,9 @@ function collectDeclaredLocalReferences(request: PhaseRequestEnvelope): string[]
 
 function buildCrossPhaseChecklist(request: PhaseRequestEnvelope): string {
   const input = asRecord(request.input)
-  const artifacts = asRecord(input.artifacts)
+  const artifacts = Object.keys(asRecord(input.validationArtifacts)).length === 0
+    ? asRecord(input.artifacts)
+    : asRecord(input.validationArtifacts)
   if (request.phase === "dependency_audit") {
     const workflow = input.workflow === "evolution" ? "evolution" : input.workflow === "query" ? "query" : "turn"
     const sourceUnitIds = Array.isArray(input.sourceUnitIds) ? input.sourceUnitIds : []
@@ -542,6 +618,7 @@ function buildCrossPhaseChecklist(request: PhaseRequestEnvelope): string {
           ? "- This background evolution has no narrative source units. sceneContinuity may be empty only when the evolution artifact itself contains no spacetime-distinct scene that requires continuity auditing."
           : "- No narrative source units are present. Do not invent draft scenes; include sceneContinuity entries only for actual phase content that requires spacetime continuity auditing.",
       "- A newly inferred person, place, event, object, or other thing does not make a scene unsupported. Audit whether its time, place, prior evolution, and current state are continuous; do not omit the scene merely because some contents are newly created this turn.",
+      "- When the draft states a specific past action, continuing state, or existing result, supporting evidence must directly cover the same subject, action or state, and result. A nearby place, related entity, or similar theme is insufficient; request a bounded read when direct support is absent, and otherwise retain uncertainty without rejecting the whole turn.",
     ].join("\n")
   }
   if (request.phase === "rule_assembly") {
@@ -585,16 +662,69 @@ function buildCrossPhaseChecklist(request: PhaseRequestEnvelope): string {
     const verificationProbeIndexes = verificationProbeExecutions.flatMap((execution) => (
       typeof execution.probeIndex === "number" ? [execution.probeIndex] : []
     ))
+    const temporalEvidenceRule = "- temporalClaimAssessments[].evidenceRefs accepts only evidence_*/read-* IDs present in this request's readEvidence. Never put node_*, link_*, proposal:* or local:* there; when a claim is supported only by current-turn artifacts or proposal-overlay results, leave evidenceRefs empty and explain that support in narrativeContext and reason."
     return verificationProbeIndexes.length === 0
-      ? "- No application verification probe has been executed yet. You must return outcome=request_read with at least one AI-defined requestedReads[].verificationProbe; do not finish the review and do not fabricate an assessment."
+      ? [
+          "- No application verification probe has been executed yet. You must return outcome=request_read with at least one AI-defined requestedReads[].verificationProbe; do not finish the review and do not fabricate an assessment.",
+          temporalEvidenceRule,
+        ].join("\n")
       : [
           `- input.verificationProbeExecutions contains application-executed results for probe indexes: ${verificationProbeIndexes.join(", ")}. These are real execution records, not plans or model-generated claims.`,
           ...verificationProbeExecutions.map(formatVerificationProbeExecution),
           "- Assess each execution from verificationProbeExecutions together with the same request's readEvidence, returnedReadRefs, returnedGraphRefs, returnedProposalRefs, and resultDigest. Return exactly one verificationProbeAssessment for each listed probe index and no other index.",
           "- Do not claim that probe execution results were not provided when these fields are present. A probe may still receive verdict=uncertain or verdict=fail when its actual returned evidence is insufficient.",
+          temporalEvidenceRule,
         ].join("\n")
   }
-  if (request.phase === "graph_governance" || request.phase === "graph_structure_plan") {
+  if (request.phase === "graph_spacetime_settlement") {
+    const dependency = asRecord(artifacts.dependency_audit)
+    const structure = asRecord(artifacts.graph_structure_plan)
+    const scenes = Array.isArray(dependency.sceneContinuity) ? dependency.sceneContinuity : []
+    const temporalClaims = Array.isArray(dependency.temporalClaims) ? dependency.temporalClaims : []
+    const proposals = Array.isArray(structure.proposals) ? structure.proposals : []
+    const sourceUnitIds = Array.isArray(input.sourceUnitIds) ? input.sourceUnitIds : []
+    const sceneIndexes = scenes.flatMap((value) => {
+      const sceneIndex = asRecord(value).sceneIndex
+      return typeof sceneIndex === "number" ? [sceneIndex] : []
+    })
+    return [
+      `- Required dependency-audit scene indexes are exactly: ${numberList(sceneIndexes)}. Return one sceneSpacetimeBinding for each listed index, with no missing, duplicate, or extra scene index.`,
+      `- Required narrative source unit indexes are exactly: ${indexList(sourceUnitIds.length)}. Their union across sceneSpacetimeBindings.sourceUnitIndexes must equal this list exactly once, with no missing, duplicate, negative, or extra index.`,
+      sourceUnitIds.length === 0
+        ? "- This is a background evolution with no narrative source units, so every sourceUnitIndexes array must be empty."
+        : "- Every dependency-audit scene in this turn is a narrative scene and must bind at least one source unit index.",
+      ...scenes.map((value, index) => {
+        const scene = asRecord(value)
+        const sceneIndex = typeof scene.sceneIndex === "number" ? scene.sceneIndex : index
+        const predecessorSceneIndexes = Array.isArray(scene.predecessorSceneIndexes)
+          ? scene.predecessorSceneIndexes.filter((item): item is number => typeof item === "number")
+          : []
+        const requirements = [
+          `Scene ${String(sceneIndex)}: predecessorSceneIndexes must equal [${predecessorSceneIndexes.join(", ")}]`,
+        ]
+        if (scene.predecessorRequired === true) {
+          if (predecessorSceneIndexes.length === 0) requirements.push("predecessorSceneAnchorRefs must be non-empty")
+          requirements.push("transitionPathRefs must be non-empty")
+        }
+        if (scene.correspondenceRequired === true) requirements.push("correspondenceRefs must be non-empty")
+        return `- ${requirements.join("; ")}.`
+      }),
+      `- proposalSettlements.proposalRefs must cover these proposal references exactly once: ${proposals.flatMap((value) => {
+        const proposalRef = asRecord(value).proposalRef
+        return typeof proposalRef === "string" ? [proposalRef] : []
+      }).join(", ") || "none"}.`,
+      `- temporalClaimSettlements must cover these temporal claims exactly once and preserve each claim's sceneIndex: ${temporalClaims.flatMap((value) => {
+        const claim = asRecord(value)
+        return typeof claim.claimRef === "string" && typeof claim.sceneIndex === "number"
+          ? [`${claim.claimRef}->scene ${String(claim.sceneIndex)}`]
+          : []
+      }).join(", ") || "none"}.`,
+      "- When predecessorRequired is true but predecessorSceneIndexes is empty, the predecessor is outside this turn. Bind it through predecessorSceneAnchorRefs and provide the actual transitionPathRefs that connect the prior state to this scene.",
+      "- A predecessorSceneRef may already be a graph or declared local reference; reuse it exactly when valid. When a predecessorSceneRef is evidence, convert it through the supplied evidence-to-graph-owner map before placing it in predecessorSceneAnchorRefs or transitionPathRefs. Never copy an evidence ID into a graph-owner field or invent a graph ID.",
+      "- historicalReturnRefs are graph paths only: use node_*/link_* permanent IDs, legacy node-*/link-* aliases, or declared local:* handles; never use evidence_*/read-*.",
+    ].join("\n")
+  }
+  if (request.phase === "graph_governance") {
     const dependency = asRecord(artifacts.dependency_audit)
     const scenes = Array.isArray(dependency.sceneContinuity) ? dependency.sceneContinuity : []
     const sourceUnitIds = Array.isArray(input.sourceUnitIds) ? input.sourceUnitIds : []
@@ -614,17 +744,48 @@ function buildCrossPhaseChecklist(request: PhaseRequestEnvelope): string {
       "- edit_node.next must contain the complete latest current projection after applying this turn: preserve stable identity, descriptions, and retrieval information that remain true. Do not return only the changed fragment; revision history already preserves the previous projection.",
     ].join("\n")
   }
+  if (request.phase === "graph_structure_plan") {
+    return [
+      "- Return only structural proposals, affected frontiers, archive outlets, and their decision records. Do not emit scene bindings, retrieval projections, or spacetime settlements in this phase.",
+      "- Give every proposal one unique stable proposalRef and reuse it in decisionRecords; do not replace proposal references with mutation array indexes.",
+      "- edit_node.next must contain the complete latest current projection after applying this turn: preserve stable identity, descriptions, and retrieval information that remain true. Do not return only the changed fragment; revision history already preserves the previous projection.",
+    ].join("\n")
+  }
   if (request.phase === "frontier_settlement") {
+    const projection = asRecord(input.stageProjection)
     const review = asRecord(artifacts.semantic_review)
-    const approvedFrontiers = Array.isArray(review.approvedAffectedFrontierRefs)
+    const approvedFrontiers = Array.isArray(projection.affectedFrontierRefs)
+      ? projection.affectedFrontierRefs.filter((value): value is string => typeof value === "string")
+      : Array.isArray(review.approvedAffectedFrontierRefs)
       ? review.approvedAffectedFrontierRefs.filter((value): value is string => typeof value === "string")
+      : []
+    const approvedSceneBindings = Array.isArray(projection.approvedSceneBindings)
+      ? projection.approvedSceneBindings.map(asRecord)
+      : []
+    const priorFrontierStates = Array.isArray(projection.priorFrontierStates)
+      ? projection.priorFrontierStates.map(asRecord)
       : []
     return [
       `- frontier_settlement must settle each approved frontier exactly once. Exact frontier list: ${approvedFrontiers.join(", ") || "none"}.`,
+      `- Approved frontier count: ${String(approvedFrontiers.length)}. ${approvedFrontiers.length === 0
+        ? "artifact.frontiers must be an empty array."
+        : `artifact.frontiers length must be exactly ${String(approvedFrontiers.length)} and must not be empty.`}`,
+      ...approvedFrontiers.map((reference, index) => (
+        `- artifact.frontiers[${String(index)}].frontierAnchorRef must be exactly ${JSON.stringify(reference)}.`
+      )),
       "- A frontier is an independently resumable and discoverable local continuation boundary. It is not a mutation index and not a list of every node or link touched by graph governance; multiple mutations may belong to one frontier.",
       "- Do not manufacture one frontier per mutation or copy the same spacetime anchors into many frontier records. If the approved list is empty, return an empty frontiers array.",
       "- For every non-archived approved frontier, return that frontier's own last scene, time, and location anchors plus a non-empty revisitCondition. Use graph or local references already established in this request; do not invent technical IDs.",
-      "- Choose scene, time, and location anchors only from the corresponding anchors already approved in graph_governance sceneSpacetimeBindings. Do not promote another readable object to an anchor in this final settlement phase.",
+      approvedSceneBindings.length > 0
+        ? "- This turn has approved scene bindings. Choose scene, time, and location anchors only from their corresponding approved anchors; do not promote another readable object to an anchor in this final settlement phase."
+        : "- This background evolution has no approved scene binding. Reuse only each frontier's own prior anchors listed below; do not borrow another frontier's anchors or promote another readable object to an anchor.",
+      ...priorFrontierStates.map((state) => [
+        `- Prior anchors for frontier ${String(state.frontierAnchorRef)}:`,
+        `lastSceneAnchorRefs=${formatReferenceList(state.lastSceneAnchorRefs)}`,
+        `lastTimeAnchorRefs=${formatReferenceList(state.lastTimeAnchorRefs)}`,
+        `lastLocationAnchorRefs=${formatReferenceList(state.lastLocationAnchorRefs)}`,
+        `correspondenceRefs=${formatReferenceList(state.correspondenceRefs)}.`,
+      ].join("; ")),
     ].join("\n")
   }
   return "- Preserve every exact cross-phase checklist item supplied in the model-facing request."
@@ -649,18 +810,24 @@ function indexList(length: number): string {
   return length === 0 ? "none" : Array.from({ length }, (_, index) => String(index)).join(", ")
 }
 
+function numberList(values: readonly number[]): string {
+  return values.length === 0 ? "none" : values.join(", ")
+}
+
 function buildOutputReminder(request: PhaseRequestEnvelope, referenceView: ModelReferenceView): string {
+  const phaseRules = buildModelResultRules(request, referenceView)
   return [
     "MANDATORY OUTPUT CONTRACT - this is the final and highest-priority instruction for this request:",
-    buildModelResultRules(request, referenceView),
     "The response must match this complete model-facing result schema:",
     JSON.stringify(phaseModelResultJsonSchema(request.phase)),
     "Only outcome, artifact, requestedReads, citedReadIds, unresolvedDependencies, reason, and selfReview may appear at the top level.",
     "Use outcome=request_read if and only if requestedReads is non-empty; otherwise requestedReads must be an empty array.",
     `All ${request.phase} phase fields defined by the schema must be nested inside artifact.`,
     "Return one JSON object only. Do not add Markdown fences, commentary, or a custom outcome value.",
-    "FINAL OUTPUT DISCIPLINE: Treat all request data as read-only input; never echo or enumerate it. Return only the smallest valid phase result, with no duplicate array items or repeated prose. Close the one JSON object and stop immediately.",
     'Required top-level shape: {"outcome":"continue","artifact":{},"requestedReads":[],"citedReadIds":[],"unresolvedDependencies":[],"reason":"...","selfReview":"..."}',
+    "FINAL OUTPUT DISCIPLINE: Treat all request data as read-only input; never echo or enumerate it. Return only the smallest valid phase result, with no duplicate array items or repeated prose. Close the one JSON object and stop immediately.",
+    `FINAL PHASE-SPECIFIC REQUIREMENTS FOR ${request.phase}:`,
+    phaseRules,
   ].join("\n")
 }
 
@@ -778,10 +945,12 @@ function readUsage(value: unknown): {
   const usage = asRecord(value)
   const promptTokens = readNumber(usage.prompt_tokens) ?? readNumber(usage.input_tokens) ?? 0
   const completionTokens = readNumber(usage.completion_tokens) ?? readNumber(usage.output_tokens) ?? 0
+  const promptTokenDetails = asRecord(usage.prompt_tokens_details)
   const completionTokenDetails = asRecord(usage.completion_tokens_details)
   const reasoningTokens = readNumber(completionTokenDetails.reasoning_tokens)
-  const cacheHit = readNumber(usage.prompt_cache_hit_tokens)
-  const cacheMiss = readNumber(usage.prompt_cache_miss_tokens)
+  const cacheHit = readNumber(usage.prompt_cache_hit_tokens) ?? readNumber(promptTokenDetails.cached_tokens)
+  const explicitCacheMiss = readNumber(usage.prompt_cache_miss_tokens)
+  const cacheMiss = explicitCacheMiss ?? (cacheHit === undefined ? undefined : Math.max(0, promptTokens - cacheHit))
   return {
     inputTokens: promptTokens,
     outputTokens: completionTokens,
@@ -811,15 +980,17 @@ function profileMessages(messages: readonly DeepSeekMessage[]): readonly Record<
   }))
 }
 
-function profileModelRequestSections(value: unknown): Record<string, unknown> {
+function profileModelRequestSections(value: unknown, fullValue: unknown): Record<string, unknown> {
   const request = asRecord(value)
   const input = asRecord(request.input)
+  const fullInput = asRecord(asRecord(fullValue).input)
   const {
     readEvidence,
     retrievalGaps,
     workspaceCatalog,
     artifacts,
     projectSettings,
+    stageProjection,
     ...coreInput
   } = input
   const { input: ignoredInput, ...envelope } = request
@@ -831,12 +1002,21 @@ function profileModelRequestSections(value: unknown): Record<string, unknown> {
     workspaceCatalogCharacters: serializedLength(workspaceCatalog),
     readEvidenceCharacters: serializedLength(readEvidence),
     readEvidenceCount: Array.isArray(readEvidence) ? readEvidence.length : 0,
+    visibleEvidenceCharacters: serializedLength(fullInput.readEvidence),
+    visibleEvidenceCount: Array.isArray(fullInput.readEvidence) ? fullInput.readEvidence.length : 0,
+    deduplicatedEvidenceCharacters: Math.max(
+      0,
+      serializedLength(fullInput.readEvidence) - serializedLength(readEvidence),
+    ),
     retrievalGapCharacters: serializedLength(retrievalGaps),
     retrievalGapCount: Array.isArray(retrievalGaps) ? retrievalGaps.length : 0,
     artifactCharacters: serializedLength(artifacts),
     artifactCount: typeof artifacts === "object" && artifacts !== null && !Array.isArray(artifacts)
       ? Object.keys(artifacts).length
       : 0,
+    stageProjectionCharacters: serializedLength(stageProjection),
+    stageProjectionKind: asRecord(stageProjection).kind,
+    stageProjectionDigest: asRecord(stageProjection).projectionDigest,
   }
 }
 

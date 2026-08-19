@@ -170,7 +170,7 @@ effectiveKvHitRate = cacheHitInputTokens / reusablePrefixTokens
 - 项目级 `node/link/source/evidence/revision` 计数器不小于已持久化最大编号，历史恢复不回退。
 - 完整上下文消息日志序号连续，链头消息计数等于完整日志数量；链头 Token 估算只等于当前可见消息 Token 总和。历史快照必须同时恢复完整日志、隐藏状态和当前可见链，系统规则只出现一次。
 - 每次非冷启动请求都必须复用紧邻上一次正式请求的完整前缀；审计报告合并时不得覆盖其他报告中的失败证据。
-- 所有图治理验证探针都有应用层执行记录和返回摘要；验收只统计关联有效 `completed` 阶段的探针，最新有效 `graph_governance_review` 必须按 `probeIndex` 无遗漏、无重复、无额外项地逐一审核，已 `superseded` 的旧探针不得计入通过证据。
+- 所有已执行的图治理验证探针都有应用层执行记录和返回摘要；验收只统计关联有效 `completed` 阶段的探针，最新有效 `graph_governance_review` 必须按 `probeIndex` 无遗漏、无重复、无额外项地逐一审核，已 `superseded` 的旧探针不得计入通过证据。达到检索轮次上限的未执行探针只能作为 `system:retrieval-gap` 审计，不得当作通过证据。
 - 失败恢复不产生重复阶段、章节、节点、连接、Source 或历史入口。
 
 ## 6. 结果分类

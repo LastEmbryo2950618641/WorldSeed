@@ -72,6 +72,10 @@ type AutomaticEvolutionTrigger = Readonly<{
   model?: ModelSelection
 }>
 
+export type BackendFacadeOptions = Readonly<{
+  automaticEvolutionEnabled?: boolean
+}>
+
 export class BackendFacade {
   private readonly tasks = new Map<string, TaskRecord>()
   private readonly automaticEvolutionTasks = new Set<string>()
@@ -80,7 +84,10 @@ export class BackendFacade {
   private readonly pendingAutomaticEvolutionByProject = new Map<string, AutomaticEvolutionTrigger[]>()
   private closed = false
 
-  public constructor(private readonly container: BackendContainer) {}
+  public constructor(
+    private readonly container: BackendContainer,
+    private readonly options: BackendFacadeOptions = {},
+  ) {}
 
   public async handle(raw: unknown): Promise<ClientResponse> {
     const rawProtocolVersion = readStringProperty(raw, "protocolVersion")
@@ -552,10 +559,13 @@ export class BackendFacade {
       baseUrl: selection.baseUrl,
       model: selection.model,
       apiKey: requireResolvedApiKey(selection.apiKey),
+      apiProtocol: selection.apiProtocol,
       contextWindowTokens: selection.contextWindowTokens,
       thinkingModeEnabled: selection.thinkingModeEnabled,
       reasoningEffort: selection.reasoningEffort,
       jsonModeEnabled: selection.jsonModeEnabled,
+      disableResponseStorage: selection.disableResponseStorage,
+      serviceTier: selection.serviceTier,
     })
   }
 
@@ -614,17 +624,20 @@ export class BackendFacade {
     }
   }
 
-  private async resumeTurn(payload: { taskId: string; mode: "continue" | "retry_phase"; resetMetricIds: readonly ("model_calls" | "input_tokens" | "output_tokens" | "wall_time")[]; model?: { baseUrl: string; model: string; credentialRef: string; apiKey?: string | undefined; contextWindowTokens: number; thinkingModeEnabled?: boolean; reasoningEffort?: "low" | "high" | "max"; jsonModeEnabled?: boolean } | undefined; maxModelCalls?: number | undefined; deadlineMs?: number | undefined; maxRetrievalRounds?: number | undefined }): Promise<TaskHandle> {
+  private async resumeTurn(payload: { taskId: string; mode: "continue" | "retry_phase"; resetMetricIds: readonly ("model_calls" | "input_tokens" | "output_tokens" | "wall_time")[]; model?: ModelSelection | undefined; maxModelCalls?: number | undefined; deadlineMs?: number | undefined; maxRetrievalRounds?: number | undefined }): Promise<TaskHandle> {
     const selectedModel = payload.model === undefined
       ? undefined
       : this.container.createModelFromSelection({
         baseUrl: payload.model.baseUrl,
         model: payload.model.model,
         apiKey: requireResolvedApiKey(payload.model.apiKey),
+        apiProtocol: payload.model.apiProtocol,
         contextWindowTokens: payload.model.contextWindowTokens,
         ...(payload.model.thinkingModeEnabled === undefined ? {} : { thinkingModeEnabled: payload.model.thinkingModeEnabled }),
         ...(payload.model.reasoningEffort === undefined ? {} : { reasoningEffort: payload.model.reasoningEffort }),
         ...(payload.model.jsonModeEnabled === undefined ? {} : { jsonModeEnabled: payload.model.jsonModeEnabled }),
+        disableResponseStorage: payload.model.disableResponseStorage,
+        serviceTier: payload.model.serviceTier,
       })
     const loadedRecord = await this.loadResumableTask(payload.taskId, selectedModel)
     const record = payload.model === undefined
@@ -746,7 +759,7 @@ export class BackendFacade {
       })
       return
     }
-    if (this.closed || !defaultWorldEvolutionProfile.enabled) return
+    if (this.closed || !defaultWorldEvolutionProfile.enabled || this.options.automaticEvolutionEnabled === false) return
     const queue = this.pendingAutomaticEvolutionByProject.get(input.projectId) ?? []
     queue.push({
       projectId: input.projectId,
@@ -759,7 +772,7 @@ export class BackendFacade {
   }
 
   private async drainAutomaticEvolution(projectId: ProjectId): Promise<void> {
-    if (this.closed || this.hasActiveForegroundWriter(projectId)) return
+    if (this.closed || this.options.automaticEvolutionEnabled === false || this.hasActiveForegroundWriter(projectId)) return
     if (this.activeAutomaticEvolutionByProject.has(projectId)) return
     const paused = this.pausedAutomaticEvolutionByProject.get(projectId)
     const pausedTaskId = paused?.shift()

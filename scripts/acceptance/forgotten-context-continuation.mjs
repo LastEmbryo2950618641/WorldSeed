@@ -5,8 +5,10 @@ import { createRequire } from "node:module"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import process from "node:process"
+import { setTimeout as delay } from "node:timers/promises"
 
 import { connectElectron, invokeBackend, readActiveModel, runTurn } from "./lib/electron-backend.mjs"
+import { deduplicateEvidenceByVersion, readEvidenceProjectionText } from "./lib/evidence-audit.mjs"
 
 if (process.env.WORLDSEED_ACCEPTANCE_REAL !== "1") {
   throw new Error("Real forgotten-context continuation is disabled. Set WORLDSEED_ACCEPTANCE_REAL=1 explicitly.")
@@ -22,7 +24,7 @@ const cdpUrl = process.env.WORLDSEED_ACCEPTANCE_CDP_URL ?? "http://127.0.0.1:923
 const outputPath = resolve(process.env.WORLDSEED_ACCEPTANCE_FORGOTTEN_REPORT
   ?? ".worldseed-data/acceptance/current/forgotten-context-continuation.json")
 const timeoutMs = Number(process.env.WORLDSEED_ACCEPTANCE_TURN_TIMEOUT_MS ?? 7_200_000)
-const database = new Database(databasePath, { readonly: true, fileMustExist: true })
+const database = new Database(databasePath, { fileMustExist: true })
 const { browser, page } = await connectElectron(cdpUrl, workspace)
 const startedAt = new Date().toISOString()
 const startedAtMs = Date.now()
@@ -30,6 +32,8 @@ let restoreEntry
 let originalSettings
 let originalProfiles
 let historyRestored = false
+let baselineContextState
+let acceptanceTaskId
 
 try {
   originalSettings = await invokeBackend(page, "project.settings.read", { projectId, workspaceRootRef: workspace })
@@ -37,10 +41,8 @@ try {
   const active = originalProfiles.profiles.find((profile) => profile.id === originalProfiles.activeProfileId)
   if (active === undefined) throw new Error(`Active model profile is missing: ${originalProfiles.activeProfileId}`)
   const before = stateSnapshot(database)
+  baselineContextState = contextStateSnapshot(database)
   if (before.chapterCount < 20) throw new Error(`Strict continuation requires at least 20 chapters, found ${String(before.chapterCount)}`)
-  if (before.visibleCanonicalChapterCount !== 0) {
-    throw new Error(`Old canonical chapters are still visible before strict continuation: ${String(before.visibleCanonicalChapterCount)}`)
-  }
 
   restoreEntry = await invokeBackend(page, "history.saveManual", {
     projectId,
@@ -49,6 +51,12 @@ try {
     name: `严格遗忘续写验收前 ${new Date().toISOString()}`,
     note: "Restore the 20-chapter world after strict graph continuity acceptance.",
   })
+
+  const forgottenContext = hideVisibleContextMessages(database)
+  const afterForgetting = stateSnapshot(database)
+  if (forgottenContext.hiddenMessageCount === 0 || afterForgetting.visibleOldMessageIds.length !== 0) {
+    throw new Error("The acceptance fixture did not remove the inherited activity chain from model visibility")
+  }
 
   const strictContextWindowTokens = Math.max(100_000, Math.min(
     active.contextWindowTokens,
@@ -89,6 +97,10 @@ try {
     presentation: { minimumWordCount: 2000, maximumWordCount: 3000 },
     model,
   }, { timeoutMs, autoRecover: true, maxRecoveries: 8 })
+  acceptanceTaskId = handle.taskId
+
+  const automaticHistory = await waitForAutomaticHistory(handle.taskId, Math.min(timeoutMs, 180_000))
+  await cancelAutomaticEvolutionForTrigger(page, handle.taskId)
 
   const chapterPath = snapshot.result?.chapterPath
   if (typeof chapterPath !== "string") throw new Error(`Turn ${handle.taskId} completed without a chapter path`)
@@ -98,22 +110,32 @@ try {
   const expectedFacts = expectedContinuityFacts()
   const evidenceText = audit.factualEvidence.map((item) => item.semanticText).join("\n")
   const opening = chapter.slice(0, Math.min(chapter.length, 1_500))
+  const completedActionMentioned = includesAny(chapter, ["灰船", "老码头"])
   const checks = [
+    check("fixture_removed_inherited_context", afterForgetting.visibleOldMessageIds.length === 0, {
+      forgottenContext,
+      afterForgetting,
+    }),
     check("context_forgotten", audit.visibleOldMessageCount === 0, audit.visibleOldMessages),
     check("workspace_chapter_evidence_absent", audit.workspaceChapterEvidenceCount === 0, audit.workspaceChapterEvidence),
     check("no_inherited_old_factual_evidence", audit.initialFactualEvidenceCount === 0, audit.initialFactualEvidence),
     check("graph_evidence_selected", audit.graphEvidenceCount > 0, { count: audit.graphEvidenceCount }),
-    check("source_evidence_selected", audit.sourceEvidenceCount > 0, { count: audit.sourceEvidenceCount }),
     check("current_state_recalled", includesAll(evidenceText, ["柳渡", "簿子", "空信封", "三张车票"]), { evidenceText }),
-    check("completed_action_recalled", includesAll(evidenceText, ["灰船", "老码头", "拴"]), { evidenceText }),
+    check("completed_action_supported_if_used", !completedActionMentioned || includesAll(evidenceText, ["灰船", "老码头", "拴"]), {
+      completedActionMentioned,
+      evidenceText,
+    }),
     check("new_chapter_committed", after.chapterCount === before.chapterCount + 1 && snapshot.status === "completed", {
       before: before.chapterCount,
       after: after.chapterCount,
       taskStatus: snapshot.status,
     }),
     check("new_graph_committed", audit.committedGraphRevisionCount > 0, { count: audit.committedGraphRevisionCount }),
-    check("location_continuity_visible", opening.includes("柳渡") && !includesAny(opening, ["东全渡口", "候船棚"]), {
-      expected: "开篇延续柳渡，不得回退到东全渡口",
+    check("location_continuity_visible", (
+      opening.includes("柳渡")
+      || (includesAll(evidenceText, ["柳渡", "镇口候车亭"]) && includesAny(opening, ["镇口", "候车亭"]))
+    ) && !includesAny(opening, ["东全渡口", "候船棚"]), {
+      expected: "开篇延续柳渡镇口候车亭，不得回退到东全渡口；正文可使用已读局部名称而不重复行政地名",
       opening,
     }),
     check("completed_action_continuity_visible", !includesAny(chapter, [
@@ -142,7 +164,15 @@ try {
     chapterPath,
     userInput,
     strictContextWindowTokens,
+    forgottenContext,
+    automaticHistory,
+    visibleCanonicalChaptersBeforeCompaction: before.visibleCanonicalChapterCount,
     expectedFacts,
+    sourcePolicy: {
+      exactSourceRequired: false,
+      reason: "This continuation asks for current state, not verbatim historical wording.",
+      selectedSourceEvidenceCount: audit.sourceEvidenceCount,
+    },
     checks,
     audit,
     chapter,
@@ -162,14 +192,40 @@ try {
   process.stderr.write(`${JSON.stringify(report, null, 2)}\n`)
   process.exitCode = 1
 } finally {
-  await cancelActiveTasks(page).catch(() => undefined)
+  if (acceptanceTaskId !== undefined) {
+    await cancelAutomaticEvolutionForTrigger(page, acceptanceTaskId).catch(() => undefined)
+  }
   if (restoreEntry !== undefined && !historyRestored) {
     await invokeBackend(page, "history.restore", {
       projectId,
       workspaceRootRef: workspace,
       operationId: randomUUID(),
       entryId: restoreEntry.entryId,
-    }).then(() => { historyRestored = true }).catch(async (error) => {
+    }).then(async () => {
+      historyRestored = true
+      if (acceptanceTaskId !== undefined) {
+        await cancelAutomaticEvolutionForTrigger(page, acceptanceTaskId).catch(() => undefined)
+      }
+      const restoredContextState = contextStateSnapshot(database)
+      const automaticEvolutionTaskCount = acceptanceTaskId === undefined
+        ? 0
+        : automaticEvolutionTasksForTrigger(database, acceptanceTaskId).length
+      const restoration = {
+        status: JSON.stringify(restoredContextState) === JSON.stringify(baselineContextState)
+          && automaticEvolutionTaskCount === 0 ? "pass" : "fail",
+        entryId: restoreEntry.entryId,
+        automaticEvolutionTaskCount,
+        baselineContextState,
+        restoredContextState,
+      }
+      const existing = JSON.parse(await readFile(outputPath, "utf8"))
+      await persist({
+        ...existing,
+        status: existing.status === "pass" && restoration.status === "pass" ? "pass" : "fail",
+        restoration,
+      })
+      if (restoration.status !== "pass") process.exitCode = 1
+    }).catch(async (error) => {
       const restoration = { status: "fail", entryId: restoreEntry.entryId, error: errorValue(error) }
       const existing = JSON.parse(await readFile(outputPath, "utf8"))
       await persist({ ...existing, status: "fail", restoration })
@@ -205,6 +261,62 @@ function stateSnapshot(databaseHandle) {
   }
 }
 
+function hideVisibleContextMessages(databaseHandle) {
+  return databaseHandle.transaction(() => {
+    const chain = databaseHandle.prepare(`
+      select id from model_context_chains where project_id = ? order by updated_at desc limit 1
+    `).get(projectId)
+    if (chain === undefined) throw new Error(`No model context chain exists for project ${projectId}`)
+    const messages = databaseHandle.prepare(`
+      select id, kind, token_estimate from model_context_messages
+      where chain_id = ? and hidden_at is null and kind <> 'system_rules'
+      order by sequence_no
+    `).all(chain.id)
+    const hiddenAtMs = Date.now()
+    const removedTokens = messages.reduce((total, message) => total + message.token_estimate, 0)
+    if (messages.length > 0) {
+      const update = databaseHandle.prepare(`
+        update model_context_messages set hidden_at = ? where chain_id = ? and id = ? and hidden_at is null
+      `)
+      for (const message of messages) update.run(hiddenAtMs, chain.id, message.id)
+    }
+    const visibleTokens = databaseHandle.prepare(`
+      select coalesce(sum(token_estimate), 0) token_estimate
+      from model_context_messages where chain_id = ? and hidden_at is null
+    `).get(chain.id).token_estimate
+    databaseHandle.prepare(`
+      update model_context_chains set token_estimate = ?, updated_at = ? where id = ?
+    `).run(visibleTokens, hiddenAtMs, chain.id)
+    return {
+      chainId: chain.id,
+      hiddenAtMs,
+      hiddenMessageCount: messages.length,
+      hiddenCanonicalChapterCount: messages.filter((message) => message.kind === "canonical_chapter").length,
+      removedTokens,
+      visibleTokens,
+    }
+  }).immediate()
+}
+
+function contextStateSnapshot(databaseHandle) {
+  const chain = databaseHandle.prepare(`
+    select id, message_count, token_estimate from model_context_chains
+    where project_id = ? order by updated_at desc limit 1
+  `).get(projectId)
+  if (chain === undefined) return undefined
+  const messages = databaseHandle.prepare(`
+    select id, sequence_no, kind, token_estimate, hidden_at
+    from model_context_messages where chain_id = ? order by sequence_no
+  `).all(chain.id)
+  return {
+    chain,
+    messages,
+    visibleTokenEstimate: messages
+      .filter((message) => message.hidden_at === null)
+      .reduce((total, message) => total + message.token_estimate, 0),
+  }
+}
+
 function auditTask(databaseHandle, taskId, oldMessageIds) {
   const parse = (value) => {
     try { return JSON.parse(value) } catch { return undefined }
@@ -213,10 +325,10 @@ function auditTask(databaseHandle, taskId, oldMessageIds) {
     select id, phase, attempt, request_json, result_json from phase_runs
     where task_id = ? order by started_at, id
   `).all(taskId).map((row) => ({ ...row, request: parse(row.request_json), result: parse(row.result_json) }))
-  const evidence = deduplicateEvidence(runs.flatMap((run) => run.request?.input?.readEvidence ?? []))
+  const evidence = deduplicateEvidenceByVersion(runs.flatMap((run) => run.request?.input?.readEvidence ?? []))
   const initialEvidence = runs.find((run) => run.phase === "interpret")?.request?.input?.readEvidence ?? []
   const factualEvidence = evidence.filter((item) => ["node", "link", "source", "revision"].includes(item.ownerKind))
-    .map((item) => ({ ...item, semanticText: projectionText(databaseHandle, item) }))
+    .map((item) => ({ ...item, semanticText: readEvidenceProjectionText(databaseHandle, projectId, item) }))
   const visibleOldMessages = oldMessageIds.length === 0 ? [] : databaseHandle.prepare(`
     select id, kind, task_id from model_context_messages where id in (${oldMessageIds.map(() => "?").join(",")}) and hidden_at is null
   `).all(...oldMessageIds)
@@ -241,18 +353,6 @@ function auditTask(databaseHandle, taskId, oldMessageIds) {
   }
 }
 
-function projectionText(databaseHandle, evidence) {
-  return databaseHandle.prepare(`
-    select semantic_text from retrieval_projections
-    where project_id = ? and owner_kind = ? and owner_id = ? and visibility = 'committed'
-    order by rowid desc limit 1
-  `).get(projectId, evidence.ownerKind, evidence.ownerId)?.semantic_text ?? evidence.semanticText ?? ""
-}
-
-function deduplicateEvidence(evidence) {
-  return [...new Map(evidence.map((item) => [item.readId, item])).values()]
-}
-
 function expectedContinuityFacts() {
   return {
     currentLocation: "柳渡",
@@ -264,12 +364,40 @@ function expectedContinuityFacts() {
   }
 }
 
-async function cancelActiveTasks(pageHandle) {
-  const active = database.prepare(`
-    select id from tasks where status in ('created', 'running', 'committing', 'awaiting_user_decision', 'paused')
-    order by created_at desc
-  `).all()
-  for (const task of active) await invokeBackend(pageHandle, "turn.cancel", { taskId: task.id }).catch(() => undefined)
+async function cancelAutomaticEvolutionForTrigger(pageHandle, triggerTaskId) {
+  const tasks = automaticEvolutionTasksForTrigger(database, triggerTaskId)
+  for (const task of tasks) {
+    if (["created", "running", "committing", "awaiting_user_decision", "paused"].includes(task.status)) {
+      await invokeBackend(pageHandle, "turn.cancel", { taskId: task.id }).catch(() => undefined)
+    }
+  }
+}
+
+function automaticEvolutionTasksForTrigger(databaseHandle, triggerTaskId) {
+  return databaseHandle.prepare(`
+    select id, status, config_snapshot_json from tasks where kind = 'evolution' order by created_at
+  `).all().filter((task) => {
+    try {
+      const origin = JSON.parse(task.config_snapshot_json).executionOrigin
+      return origin?.kind === "automatic_evolution" && origin.triggerTaskId === triggerTaskId
+    } catch {
+      return false
+    }
+  })
+}
+
+async function waitForAutomaticHistory(taskId, historyTimeoutMs) {
+  const deadline = Date.now() + historyTimeoutMs
+  while (Date.now() < deadline) {
+    const entry = database.prepare(`
+      select id, status from history_entries where task_id = ? and kind = 'automatic'
+      order by created_at desc limit 1
+    `).get(taskId)
+    if (entry?.status === "ready") return { entryId: entry.id, status: entry.status }
+    if (entry?.status === "failed") throw new Error(`Automatic history failed for acceptance task ${taskId}`)
+    await delay(250)
+  }
+  throw new Error(`Automatic history did not finish for acceptance task ${taskId}`)
 }
 
 async function saveProfiles(pageHandle, value) {

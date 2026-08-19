@@ -136,6 +136,12 @@ button { color: inherit; }
 .sub-panel-summary { cursor: pointer; color: #2b7666; font-weight: 600; }
 .sub-panel-summary::before { content: "▸"; display: inline-block; width: 16px; }
 .phase-details details[open] > .sub-panel-summary::before { content: "▾"; }
+.continuity-advice-list { margin-top: 6px; }
+.continuity-advice-item { padding: 7px 8px; border-left: 2px solid #b88c38; background: #fffdf7; color: #4f565b; }
+.continuity-advice-item + .continuity-advice-item { margin-top: 6px; }
+.continuity-advice-item blockquote { margin: 0 0 5px; color: #293238; }
+.continuity-advice-item p:last-child { margin-bottom: 0; }
+.continuity-advice-item small { color: #737c83; word-break: break-all; }
 .graph-governance-group { background: #fbfcfc; }
 .governance-step-list { margin: 0 8px 8px 28px; border-left: 1px solid #d7dcdf; }
 .governance-step { border-bottom: 1px solid #edf0f2; }

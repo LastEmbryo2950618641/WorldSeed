@@ -9,7 +9,9 @@ export async function startStandaloneBackend(): Promise<StdioTransport> {
   const applicationDataRoot = resolve(process.env.WORLDSEED_APP_DATA_ROOT ?? join(process.cwd(), ".worldseed-data"))
   const promptPackageRoot = resolve(process.env.WORLDSEED_PROMPT_ROOT ?? join(process.cwd(), "packages", "prompt-contracts"))
   const container = await BackendContainer.open({ applicationDataRoot, promptPackageRoot })
-  const transport = new StdioTransport(new BackendFacade(container))
+  const transport = new StdioTransport(new BackendFacade(container, {
+    automaticEvolutionEnabled: process.env.WORLDSEED_AUTOMATIC_EVOLUTION_ENABLED !== "false",
+  }))
   transport.attach()
   return transport
 }

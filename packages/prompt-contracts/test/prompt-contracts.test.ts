@@ -76,6 +76,7 @@ describe("prompt contracts", () => {
     const semanticReview = readResource(promptDefinitions.semantic_review.resourcePath)
     const settlementReview = readResource(promptDefinitions.settlement_review.resourcePath)
     const commitReview = readResource(promptDefinitions.commit_review.resourcePath)
+    const dependencyAudit = readResource(promptDefinitions.dependency_audit.resourcePath)
     const draft = readResource(promptDefinitions.draft.resourcePath)
     const ruleAssembly = readResource(promptDefinitions.rule_assembly.resourcePath)
 
@@ -100,13 +101,22 @@ describe("prompt contracts", () => {
     expect(graphRetrievalDesign).toContain("每个 Source 单元必须具有非空图返回路径")
     expect(graphGovernanceReview).toContain("自包含的最新当前投影")
     expect(graphGovernanceReview).toContain("仅因节点可读、相关或在场景中出现而充当锚点")
-    expect(frontierSettlement).toContain("不能因为某个节点可读")
+    expect(frontierSettlement).toContain("不能因为某个无关节点可读")
     expect(semanticReview).toContain("不是修改项、节点或连接的逐项清单")
     expect(draft).toContain("不得输出“等待读取资料")
     expect(semanticReview).toContain("有限预算内")
     expect(semanticReview).toContain("可精确复述或再次指代的正文片段")
     expect(settlementReview).toContain("演化过程与当前有效状态")
     expect(commitReview).toContain("准确恢复相关当前状态、历史过程和原文")
+    expect(dependencyAudit).toContain("AI 自主提炼")
+    expect(dependencyAudit).toContain("不使用固定时间词表")
+    expect(dependencyAudit).toContain("`temporalClaims`")
+    expect(dependencyAudit).toContain("主体、动作或状态以及结果")
+    expect(graphSpacetimeSettlement).toContain("`temporalClaimSettlements`")
+    expect(graphSpacetimeSettlement).toContain("恰好覆盖")
+    expect(graphGovernanceReview).toContain("`temporalClaimAssessments`")
+    expect(commitReview).toContain("`continuityAdvice`")
+    expect(commitReview).toContain("不能阻断提交")
     expect(ruleAssembly).toContain("这些内容只作为判断输入，绝不能复制到输出")
     expect(ruleAssembly).toContain("本阶段没有正文或长文本字段")
     expect(ruleAssembly).toContain("不要为了表示“已完整阅读”而重复路径")
@@ -364,6 +374,78 @@ describe("prompt contracts", () => {
       .toThrow("time anchors must come from approved spacetime bindings")
   })
 
+  it("allows a background frontier to reuse only its own previously read anchors", () => {
+    const review = {
+      approvedMutationIndexes: [],
+      rejectedMutationIndexes: [],
+      approvedSpacetimeBindingIndexes: [],
+      rejectedSpacetimeBindingIndexes: [],
+      approvedMutationSpacetimeSettlementIndexes: [],
+      rejectedMutationSpacetimeSettlementIndexes: [],
+      approvedAffectedFrontierRefs: ["local:frontier"],
+      rejectedAffectedFrontierRefs: [],
+      verificationProbeAssessments: [],
+      sceneInventoryComplete: true,
+      graphStillDiscoverable: true,
+      graphStillConcise: true,
+      continuityPreserved: true,
+      spacetimeContinuityPreserved: true,
+    }
+    const governance = {
+      mutations: [],
+      retrievalProjections: [],
+      settlementRecords: [],
+      mutationSpacetimeSettlements: [],
+      sceneSpacetimeBindings: [],
+      affectedFrontierRefs: ["local:frontier"],
+      archiveOutletRefs: [],
+      decisionRecords: [],
+    }
+    const projection = {
+      kind: "frontier_settlement",
+      version: 1,
+      sourceArtifactDigests: {
+        graph_governance: "digest-governance",
+        semantic_review: "digest-review",
+        settlement_review: "digest-settlement",
+      },
+      pendingScope: { scopeId: "scope_1", candidateDigest: "digest-scope" },
+      projectionDigest: "digest-projection",
+      unresolvedIssues: [],
+      affectedFrontierRefs: ["local:frontier"],
+      approvedSceneBindings: [],
+      archiveOutletRefs: [],
+      correspondenceRefs: [],
+      priorFrontierStates: [{
+        frontierAnchorRef: "local:frontier",
+        lastSceneAnchorRefs: ["local:old-scene"],
+        lastTimeAnchorRefs: ["local:old-time"],
+        lastLocationAnchorRefs: ["local:old-place"],
+        correspondenceRefs: [],
+      }],
+    }
+    const settlement = {
+      frontiers: [{
+        frontierAnchorRef: "local:frontier",
+        disposition: "active",
+        lastSceneAnchorRefs: ["local:old-scene"],
+        lastTimeAnchorRefs: ["local:old-time"],
+        lastLocationAnchorRefs: ["local:old-place"],
+        correspondenceRefs: [],
+        reason: "continue later",
+        revisitCondition: "when local pressure changes",
+      }],
+    }
+
+    expect(() => assertFrontierSettlementCoversReview(review, settlement, governance, projection)).not.toThrow()
+    expect(() => assertFrontierSettlementCoversReview(review, {
+      frontiers: [{
+        ...settlement.frontiers[0],
+        lastTimeAnchorRefs: ["local:unrelated-time"],
+      }],
+    }, governance, projection)).toThrow("previously read anchors")
+  })
+
   it("rejects duplicate narrative source coverage across scene bindings", () => {
     const dependency = {
       missingDependencies: [],
@@ -382,6 +464,7 @@ describe("prompt contracts", () => {
         crossReferenceContinuity: "pass",
         reason: "continuous",
       }],
+      temporalClaims: [],
       informationBoundary: "pass",
     }
     const governance = {
@@ -419,6 +502,7 @@ describe("prompt contracts", () => {
   it("rejects staged world effects without an effective scene", () => {
     expect(() => graphSpacetimeSettlementArtifactSchema.parse({
       sceneSpacetimeBindings: [],
+      temporalClaimSettlements: [],
       proposalSettlements: [{
         proposalRefs: ["proposal:world-effect"],
         effectDisposition: "world_effect",

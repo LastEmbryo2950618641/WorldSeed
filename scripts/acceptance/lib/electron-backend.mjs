@@ -47,6 +47,7 @@ export async function runTurn(page, input, options = {}) {
   const snapshot = await waitForTask(page, handle.taskId, {
     timeoutMs: options.timeoutMs,
     autoRecover: options.autoRecover,
+    maxRecoveries: options.maxRecoveries,
     model: input.model,
   })
   return { handle, snapshot }
@@ -57,6 +58,7 @@ export async function runQuery(page, input, options = {}) {
   const snapshot = await waitForTask(page, handle.taskId, {
     timeoutMs: options.timeoutMs,
     autoRecover: options.autoRecover,
+    maxRecoveries: options.maxRecoveries,
     model: input.model,
   })
   return { handle, snapshot }

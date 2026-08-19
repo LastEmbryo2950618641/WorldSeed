@@ -122,5 +122,5 @@ function sumTokens(messages: readonly ModelContextMessage[]): number {
 }
 
 export function estimateModelMessageTokens(content: string): number {
-  return Math.max(1, Math.ceil(new TextEncoder().encode(content).length / 4) + MODEL_MESSAGE_OVERHEAD_TOKENS)
+  return Math.max(1, Math.ceil(new TextEncoder().encode(content).length / 3) + MODEL_MESSAGE_OVERHEAD_TOKENS)
 }

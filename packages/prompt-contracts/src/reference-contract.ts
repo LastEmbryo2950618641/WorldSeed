@@ -1,10 +1,12 @@
 import type { AIPhase } from "@worldseed/contracts"
 
 import {
+  commitReviewArtifactSchema,
   dependencyAuditArtifactSchema,
   emergencePlanningArtifactSchema,
   frontierSettlementArtifactSchema,
   graphGovernanceArtifactSchema,
+  graphGovernanceReviewArtifactSchema,
   graphRetrievalDesignArtifactSchema,
   graphSpacetimeSettlementArtifactSchema,
   graphStructurePlanArtifactSchema,
@@ -12,6 +14,7 @@ import {
   semanticReviewArtifactSchema,
   type GraphGovernanceArtifact,
 } from "./phase-schemas/artifacts.js"
+import { frontierSettlementProjectionSchema } from "./stage-projections.js"
 
 export type PhaseReferenceVisibility = Readonly<{
   readableGraphIds: ReadonlySet<string>
@@ -43,6 +46,19 @@ export function assertPhaseReferenceContract(
       ...decision.informationBoundaryRefs,
     ])
     assertReadableGraphReferences(graphReferences, visibility.readableGraphIds)
+    return
+  }
+
+  if (phase === "dependency_audit") {
+    const dependency = dependencyAuditArtifactSchema.parse(artifact)
+    assertReadableEvidenceReferences(
+      dependency.temporalClaims.flatMap((claim) => claim.evidenceRefs),
+      visibility.readableEvidenceIds,
+    )
+    assertReadableGraphReferences(
+      dependency.temporalClaims.flatMap((claim) => [...claim.referenceRefs, ...claim.timelineRefs]),
+      visibility.readableGraphIds,
+    )
     return
   }
 
@@ -88,6 +104,13 @@ export function assertPhaseReferenceContract(
         ...entry.currentEntryRefs,
         ...entry.historicalReturnRefs,
       ]),
+      ...settlement.temporalClaimSettlements.flatMap((entry) => [
+        ...entry.referenceRefs,
+        ...entry.timeAnchorRefs,
+        ...entry.timelineRefs,
+        ...entry.correspondenceRefs,
+        ...entry.historicalReturnRefs,
+      ]),
     ], readableGraphIds)
     assertReadableEvidenceReferences(
       settlement.proposalSettlements.flatMap((entry) => entry.predecessorRevisionReadRefs),
@@ -117,6 +140,25 @@ export function assertPhaseReferenceContract(
 
   if (phase === "semantic_review") {
     semanticReviewArtifactSchema.parse(artifact)
+    return
+  }
+
+
+  if (phase === "graph_governance_review") {
+    const review = graphGovernanceReviewArtifactSchema.parse(artifact)
+    assertReadableEvidenceReferences(
+      review.temporalClaimAssessments.flatMap((assessment) => assessment.evidenceRefs),
+      visibility.readableEvidenceIds,
+    )
+    return
+  }
+
+  if (phase === "commit_review") {
+    const review = commitReviewArtifactSchema.parse(artifact)
+    assertReadableEvidenceReferences(
+      review.continuityAdvice.flatMap((advice) => advice.evidenceRefs),
+      visibility.readableEvidenceIds,
+    )
     return
   }
 
@@ -220,6 +262,60 @@ export function assertGraphSpacetimeSettlementCoverage(
   for (const entry of settlement.proposalSettlements) {
     assertIndexesInRange(entry.effectiveSceneBindingIndexes, settlement.sceneSpacetimeBindings.length, "Effective scene binding")
   }
+  assertExactReferenceSet(
+    settlement.temporalClaimSettlements.map((entry) => entry.claimRef),
+    dependency.temporalClaims.map((claim) => claim.claimRef),
+    "Temporal claim settlements",
+  )
+  assertTemporalClaimSceneIndexes(dependency.temporalClaims, settlement.temporalClaimSettlements)
+}
+
+export function assertTemporalClaimCoverage(
+  dependencyInput: unknown,
+  settlementInput: unknown,
+  reviewInput: unknown,
+): void {
+  const dependency = dependencyAuditArtifactSchema.parse(dependencyInput)
+  const settlement = graphSpacetimeSettlementArtifactSchema.parse(settlementInput)
+  const review = graphGovernanceReviewArtifactSchema.parse(reviewInput)
+  const claimRefs = dependency.temporalClaims.map((claim) => claim.claimRef)
+  assertExactReferenceSet(
+    settlement.temporalClaimSettlements.map((entry) => entry.claimRef),
+    claimRefs,
+    "Temporal claim settlements",
+  )
+  assertTemporalClaimSceneIndexes(dependency.temporalClaims, settlement.temporalClaimSettlements)
+  assertExactReferenceSet(
+    review.temporalClaimAssessments.map((entry) => entry.claimRef),
+    claimRefs,
+    "Temporal claim assessments",
+  )
+}
+
+function assertTemporalClaimSceneIndexes(
+  claims: ReturnType<typeof dependencyAuditArtifactSchema.parse>["temporalClaims"],
+  settlements: ReturnType<typeof graphSpacetimeSettlementArtifactSchema.parse>["temporalClaimSettlements"],
+): void {
+  const expectedByClaim = new Map(claims.map((claim) => [claim.claimRef, claim.sceneIndex]))
+  for (const settlement of settlements) {
+    const expectedSceneIndex = expectedByClaim.get(settlement.claimRef)
+    if (expectedSceneIndex !== undefined && settlement.sceneIndex !== expectedSceneIndex) {
+      throw new Error(`Temporal claim ${settlement.claimRef} requires scene index ${String(expectedSceneIndex)}; received ${String(settlement.sceneIndex)}`)
+    }
+  }
+}
+
+export function assertCommitReviewCoversTemporalClaims(
+  governanceReviewInput: unknown,
+  commitReviewInput: unknown,
+): void {
+  const governanceReview = graphGovernanceReviewArtifactSchema.parse(governanceReviewInput)
+  const commitReview = commitReviewArtifactSchema.parse(commitReviewInput)
+  assertExactReferenceSet(
+    commitReview.continuityAdvice.map((advice) => advice.claimRef),
+    governanceReview.temporalClaimAssessments.map((assessment) => assessment.claimRef),
+    "Commit continuity advice",
+  )
 }
 
 function assertSceneSpacetimeCoverage(
@@ -306,6 +402,7 @@ export function assertFrontierSettlementCoversReview(
   reviewInput: unknown,
   settlementInput: unknown,
   governanceInput?: unknown,
+  projectionInput?: unknown,
 ): void {
   const review = semanticReviewArtifactSchema.parse(reviewInput)
   const settlement = frontierSettlementArtifactSchema.parse(settlementInput)
@@ -320,10 +417,33 @@ export function assertFrontierSettlementCoversReview(
   const allowedSceneAnchors = new Set(approvedSceneBindings.map((binding) => binding?.sceneAnchorRef).filter(isString))
   const allowedTimeAnchors = new Set(approvedSceneBindings.flatMap((binding) => binding?.timeAnchorRefs ?? []))
   const allowedLocationAnchors = new Set(approvedSceneBindings.flatMap((binding) => binding?.locationAnchorRefs ?? []))
+  const priorFrontierStates = projectionInput === undefined
+    ? []
+    : frontierSettlementProjectionSchema.parse(projectionInput).priorFrontierStates
+  const priorStateByFrontier = new Map(priorFrontierStates.map((state) => [state.frontierAnchorRef, state]))
   for (const frontier of settlement.frontiers) {
-    assertReferencesBelongTo(frontier.lastSceneAnchorRefs, allowedSceneAnchors, "Frontier scene anchors must come from approved spacetime bindings")
-    assertReferencesBelongTo(frontier.lastTimeAnchorRefs, allowedTimeAnchors, "Frontier time anchors must come from approved spacetime bindings")
-    assertReferencesBelongTo(frontier.lastLocationAnchorRefs, allowedLocationAnchors, "Frontier location anchors must come from approved spacetime bindings")
+    const priorState = priorStateByFrontier.get(frontier.frontierAnchorRef)
+    assertReferencesBelongTo(
+      frontier.lastSceneAnchorRefs,
+      approvedSceneBindings.length === 0 ? new Set(priorState?.lastSceneAnchorRefs ?? []) : allowedSceneAnchors,
+      approvedSceneBindings.length === 0
+        ? "Frontier scene anchors must reuse this frontier's previously read anchors"
+        : "Frontier scene anchors must come from approved spacetime bindings",
+    )
+    assertReferencesBelongTo(
+      frontier.lastTimeAnchorRefs,
+      approvedSceneBindings.length === 0 ? new Set(priorState?.lastTimeAnchorRefs ?? []) : allowedTimeAnchors,
+      approvedSceneBindings.length === 0
+        ? "Frontier time anchors must reuse this frontier's previously read anchors"
+        : "Frontier time anchors must come from approved spacetime bindings",
+    )
+    assertReferencesBelongTo(
+      frontier.lastLocationAnchorRefs,
+      approvedSceneBindings.length === 0 ? new Set(priorState?.lastLocationAnchorRefs ?? []) : allowedLocationAnchors,
+      approvedSceneBindings.length === 0
+        ? "Frontier location anchors must reuse this frontier's previously read anchors"
+        : "Frontier location anchors must come from approved spacetime bindings",
+    )
   }
 }
 
