@@ -30,5 +30,7 @@ export interface DocumentRepository {
   stageSourceUnits(units: readonly SourceUnit[]): Promise<void>
   listSourceUnits(projectId: ProjectId, sourceId: string): Promise<readonly SourceUnit[]>
   findVersion(projectId: ProjectId, sourceId: string, pendingScopeId?: ScopeId): Promise<DocumentVersion | undefined>
+  findStoredVersion(projectId: ProjectId, sourceId: string): Promise<DocumentVersion | undefined>
+  findCurrentChapter(projectId: ProjectId, chapterId: string): Promise<DocumentVersion | undefined>
   listCommittedChapters(projectId: ProjectId): Promise<readonly DocumentVersion[]>
 }

@@ -727,4 +727,87 @@ export const projectMigrations = Object.freeze([
   defineSqlMigration<ProjectDatabase>(23, "023_settlement_records_are_authoritative", [
     "ALTER TABLE source_units DROP COLUMN settlement_status",
   ]),
+  defineSqlMigration<ProjectDatabase>(24, "024_chapter_revisions", [
+    `CREATE TABLE chapter_revision_tasks (
+      id TEXT PRIMARY KEY REFERENCES tasks(id),
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      chapter_id TEXT NOT NULL,
+      base_source_id TEXT NOT NULL,
+      proposed_source_id TEXT NOT NULL,
+      predecessor_source_id TEXT,
+      content_ref TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      submission_mode TEXT CHECK (submission_mode IN ('direct', 'reviewed')),
+      decision TEXT NOT NULL CHECK (decision IN ('pending', 'submit', 'abandon')),
+      review_id TEXT,
+      graph_sync_status TEXT NOT NULL CHECK (graph_sync_status IN ('not_started', 'pending', 'running', 'completed', 'failed')),
+      status TEXT NOT NULL CHECK (status IN (
+        'editing', 'reviewing', 'ready_to_submit', 'committing_content',
+        'content_committed', 'chapter_published', 'chapter_registered',
+        'graph_sync_pending', 'graph_sync_running', 'completed', 'retired',
+        'failed', 'awaiting_user_decision'
+      )),
+      content_scope_id TEXT REFERENCES artifact_scopes(id),
+      graph_sync_scope_id TEXT REFERENCES artifact_scopes(id),
+      decision_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
+    "CREATE INDEX chapter_revision_tasks_project_status ON chapter_revision_tasks(project_id, status, updated_at)",
+    "CREATE UNIQUE INDEX chapter_revision_tasks_active_base ON chapter_revision_tasks(project_id, chapter_id, base_source_id) WHERE status NOT IN ('retired', 'completed', 'failed')",
+    `CREATE TABLE chapter_revision_reviews (
+      id TEXT PRIMARY KEY,
+      revision_task_id TEXT NOT NULL REFERENCES chapter_revision_tasks(id),
+      proposed_source_id TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      issues_json TEXT NOT NULL,
+      recommendation TEXT NOT NULL CHECK (recommendation IN ('no_issue', 'review_suggested', 'material_conflict')),
+      created_at INTEGER NOT NULL
+    )`,
+    "CREATE INDEX chapter_revision_reviews_task_created ON chapter_revision_reviews(revision_task_id, created_at DESC)",
+    `CREATE TABLE chapter_revision_decisions (
+      id TEXT PRIMARY KEY,
+      revision_task_id TEXT NOT NULL REFERENCES chapter_revision_tasks(id),
+      proposed_source_id TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      mode TEXT NOT NULL CHECK (mode IN ('direct', 'reviewed')),
+      action TEXT NOT NULL CHECK (action IN ('submit', 'abandon')),
+      forced INTEGER NOT NULL CHECK (forced IN (0, 1)),
+      reason TEXT NOT NULL CHECK (reason IN ('user_forced_edit', 'user_reviewed_edit')),
+      review_id TEXT REFERENCES chapter_revision_reviews(id),
+      note TEXT,
+      created_at INTEGER NOT NULL
+    )`,
+    "CREATE INDEX chapter_revision_decisions_task_created ON chapter_revision_decisions(revision_task_id, created_at DESC)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(25, "025_chapter_revision_base_digest", [
+    "ALTER TABLE chapter_revision_tasks ADD COLUMN base_content_digest TEXT NOT NULL DEFAULT ''",
+  ]),
+  defineSqlMigration<ProjectDatabase>(26, "026_chapter_revision_graph_task", [
+    "ALTER TABLE chapter_revision_tasks ADD COLUMN graph_sync_task_id TEXT",
+    "CREATE UNIQUE INDEX chapter_revision_tasks_graph_sync_task ON chapter_revision_tasks(graph_sync_task_id) WHERE graph_sync_task_id IS NOT NULL",
+  ]),
+  defineSqlMigration<ProjectDatabase>(27, "027_chapter_revision_finalizations", [
+    `CREATE TABLE chapter_revision_finalizations (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      revision_task_id TEXT NOT NULL UNIQUE REFERENCES chapter_revision_tasks(id),
+      proposed_source_id TEXT NOT NULL,
+      content_scope_id TEXT NOT NULL REFERENCES artifact_scopes(id),
+      graph_sync_task_id TEXT,
+      content_digest TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN (
+        'prepared', 'content_committed', 'chapter_published', 'chapter_registered',
+        'graph_sync_pending', 'graph_sync_running', 'completed'
+      )),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
+    "CREATE INDEX chapter_revision_finalizations_project_status ON chapter_revision_finalizations(project_id, status, updated_at)",
+    "CREATE UNIQUE INDEX chapter_revision_finalizations_graph_task ON chapter_revision_finalizations(graph_sync_task_id) WHERE graph_sync_task_id IS NOT NULL",
+  ]),
+  defineSqlMigration<ProjectDatabase>(28, "028_chapter_revision_headings", [
+    "ALTER TABLE chapter_revision_tasks ADD COLUMN heading TEXT NOT NULL DEFAULT ''",
+    "UPDATE chapter_revision_tasks SET heading = COALESCE((SELECT heading FROM document_versions WHERE document_versions.source_id = chapter_revision_tasks.base_source_id ORDER BY document_versions.created_at DESC LIMIT 1), '未命名章节') WHERE heading = ''",
+  ]),
 ])

@@ -232,12 +232,11 @@ type InternalDraftArtifact = {
 type ChapterNamingArtifact = {
   chapterNumberText: string
   heading: string
-  filename: string
   continuityEvidenceRefs: string[]
 }
 ```
 
-`heading` 必须与 Markdown 第一行一致；`filename` 必须等于合法化后的同一标题加 `.md`。
+模型只输出独立的纯文本 `heading`，不得输出 Markdown 标记、文件名或发布路径。应用层使用同一个 `heading` 机械派生文件名和发布路径，并在正式提交边界装配 Markdown 第一行 `# <heading>`；正文输入不包含标题行。
 
 ### 5.8 dependency_audit
 
@@ -490,6 +489,14 @@ type CommitReviewArtifact = {
 `commit_review` 是 AI自动执行的最终建议阶段，不是人工确认按钮，也不拥有拒绝提交的权限。`recommendation`、`finalSelfReview` 和修订目标只作为连续性与一致性建议持久化并展示，不属于阶段 `outcome`，也不能触发通用 `revise/reject/retire` 停止语义。只要结构、图修订、原文结算、检索投影和时空连续性门禁完整，代码就直接提升作用域并发布章节；用户后续是否编辑正文不改变本轮已提交事实。
 
 一句话可以是世界生成的起点，而不是资料完整性检查。正文中首次出现的新事物可以没有旧图证据。资料不存在、设定未定义或需要补全时，AI必须依据已读上下文、规则和用户输入进行最小一致推演，降低确定性、缩小范围或保留不确定性，但不能直接拒绝正文。正文出现的万事万物都必须由本轮图治理建立或复用图表达。审查应检查它是否具有本轮建立的时间和地点连续锚点，以及是否与已提交世界的演化链和当前状态矛盾；不能把“未在旧资料中找到”本身当作拒绝提交理由。只有正文把内容当作过去已经存在、正在延续或被再次指代时，才要求旧身份召回；新内容应由本轮图治理建立局部身份、原文来源和查询入口。
+
+### 5.15 revision_review
+
+`revision_review` 只用于用户编辑已提交章节后的连续性建议，不是提交审批阶段。它必须读取修订前后的正文版本、当前有效图、相关图修订、必要的时空绑定和用户规则快照，并输出绑定到新正文 digest 的问题列表。问题至少包含正文位置、相关证据、影响范围、建议处理方式以及是否需要图同步。AI可以指出时间、空间、状态、历史路径、后续章节或检索可达性风险，但不能输出或触发“拒绝提交”。
+
+用户点击“直接提交”时不执行 `revision_review`；用户点击“审核后提交”时执行该阶段。用户修改正文后，前一次 `revision_review` 结果立即失效，必须基于新的 `proposedSourceId` 和 digest 重新审核。用户可以忽略任何建议并提交，应用层记录 `user_forced_edit`；AI的 `recommendation` 不能替代 `UserRevisionDecision`。
+
+章节修订的正文提交和图同步不在同一个语义阶段：正文提交先创建新的正式正文版本，随后图治理以该版本作为最高优先级事实生成新的图修订。图同步错误按任务检查点协议恢复，不能撤销已经由用户提交的正文。
 
 ## 6. 阶段流转
 

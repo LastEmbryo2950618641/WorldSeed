@@ -28,6 +28,13 @@ export interface WorkspacePort {
   readMarkdown(workspaceRootRef: string, relativePath: string): Promise<string>
   saveUserMarkdown(workspaceRootRef: string, relativePath: string, content: string): Promise<void>
   publishChapter(workspaceRootRef: string, relativePath: string, content: string): Promise<void>
+  replacePublishedChapter(
+    workspaceRootRef: string,
+    currentRelativePath: string,
+    nextRelativePath: string,
+    expectedDigest: string,
+    content: string,
+  ): Promise<void>
   importMarkdownFiles(workspaceRootRef: string, destination: string, sourcePaths: readonly string[]): Promise<number>
   importMarkdownFolder(workspaceRootRef: string, destination: string, sourceFolder: string): Promise<number>
 }

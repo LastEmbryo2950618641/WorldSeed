@@ -118,6 +118,49 @@ export class SqliteTurnPersistence implements TurnPersistencePort {
     })
   }
 
+  public async appendChapterRevisionMessage(input: Readonly<{
+    chainId: string
+    projectId: string
+    messageId: string
+    taskId: string
+    contentRef: string
+    contentDigest: string
+    tokenEstimate: number
+    createdAtMs: number
+  }>): Promise<void> {
+    await this.database.transaction().execute(async (transaction) => {
+      const existing = await transaction.selectFrom("model_context_messages").select("id")
+        .where("id", "=", input.messageId).executeTakeFirst()
+      if (existing !== undefined) return
+      const chain = await transaction.selectFrom("model_context_chains").selectAll()
+        .where("id", "=", input.chainId).executeTakeFirstOrThrow()
+      await transaction.insertInto("model_context_messages").values({
+        id: input.messageId,
+        project_id: input.projectId,
+        chain_id: input.chainId,
+        sequence_no: chain.message_count,
+        role: "assistant",
+        kind: "chapter_revision",
+        task_id: input.taskId,
+        turn_id: null,
+        phase: null,
+        content_text: null,
+        content_ref: input.contentRef,
+        content_digest: input.contentDigest,
+        token_estimate: input.tokenEstimate,
+        origin_phase_run_id: null,
+        origin_index: null,
+        hidden_at: null,
+        created_at: input.createdAtMs,
+      }).executeTakeFirstOrThrow()
+      await transaction.updateTable("model_context_chains").set({
+        message_count: chain.message_count + 1,
+        token_estimate: chain.token_estimate + input.tokenEstimate,
+        updated_at: input.createdAtMs,
+      }).where("id", "=", input.chainId).executeTakeFirstOrThrow()
+    })
+  }
+
   public async listModelContextMessages(chainId: string): Promise<readonly ModelContextMessage[]> {
     const rows = await this.database.selectFrom("model_context_messages").selectAll()
       .where("chain_id", "=", chainId).where("hidden_at", "is", null).orderBy("sequence_no").execute()

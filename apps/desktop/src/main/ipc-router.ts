@@ -1,6 +1,8 @@
 import { dialog, ipcMain, type BrowserWindow } from "electron"
 import { randomUUID } from "node:crypto"
 import {
+  chapterReviewRevisionPayloadSchema,
+  chapterSubmitRevisionPayloadSchema,
   clientRequestSchema,
   modelCatalogRequestSchema,
   modelProfilesDraftSavePayloadSchema,
@@ -17,6 +19,7 @@ import {
 import type { BackendProcess } from "./backend-process.js"
 import type { DesktopModelProfiles } from "../preload/worldseed-bridge.js"
 import type { FileCredentialVault } from "./credential-vault.js"
+import { resolveModelCredential } from "./model-credential-resolution.js"
 import { errorDetails, runtimeLog } from "@worldseed/backend"
 
 export function registerIpcRouter(backend: BackendProcess, window: BrowserWindow, vault: FileCredentialVault): void {
@@ -117,31 +120,27 @@ async function listModels(backend: BackendProcess, vault: FileCredentialVault, r
 async function resolveRequest(request: ClientRequest, vault: FileCredentialVault): Promise<ClientRequest> {
   if (request.method === "turn.start") {
     const payload = turnStartPayloadSchema.parse(request.payload)
-    if (payload.model === undefined || payload.model.apiKey !== undefined) return request
-    const apiKey = await vault.get(payload.model.credentialRef)
-    if (apiKey === undefined || apiKey.trim().length === 0) throw new Error("DeepSeek API Key is not configured")
-    return { ...request, payload: { ...payload, model: { ...payload.model, apiKey } } }
+    return { ...request, payload: await resolveModelCredential(payload, vault) }
   }
   if (request.method === "turn.resume") {
     const payload = turnResumePayloadSchema.parse(request.payload)
-    if (payload.model === undefined || payload.model.apiKey !== undefined) return request
-    const apiKey = await vault.get(payload.model.credentialRef)
-    if (apiKey === undefined || apiKey.trim().length === 0) throw new Error("DeepSeek API Key is not configured")
-    return { ...request, payload: { ...payload, model: { ...payload.model, apiKey } } }
+    return { ...request, payload: await resolveModelCredential(payload, vault) }
   }
   if (request.method === "world.query") {
     const payload = worldQueryPayloadSchema.parse(request.payload)
-    if (payload.model === undefined || payload.model.apiKey !== undefined) return request
-    const apiKey = await vault.get(payload.model.credentialRef)
-    if (apiKey === undefined || apiKey.trim().length === 0) throw new Error("DeepSeek API Key is not configured")
-    return { ...request, payload: { ...payload, model: { ...payload.model, apiKey } } }
+    return { ...request, payload: await resolveModelCredential(payload, vault) }
   }
   if (request.method === "world.evolve") {
     const payload = worldEvolvePayloadSchema.parse(request.payload)
-    if (payload.model === undefined || payload.model.apiKey !== undefined) return request
-    const apiKey = await vault.get(payload.model.credentialRef)
-    if (apiKey === undefined || apiKey.trim().length === 0) throw new Error("DeepSeek API Key is not configured")
-    return { ...request, payload: { ...payload, model: { ...payload.model, apiKey } } }
+    return { ...request, payload: await resolveModelCredential(payload, vault) }
+  }
+  if (request.method === "chapter.reviewRevision") {
+    const payload = chapterReviewRevisionPayloadSchema.parse(request.payload)
+    return { ...request, payload: await resolveModelCredential(payload, vault) }
+  }
+  if (request.method === "chapter.submitRevision") {
+    const payload = chapterSubmitRevisionPayloadSchema.parse(request.payload)
+    return { ...request, payload: await resolveModelCredential(payload, vault) }
   }
   return request
 }

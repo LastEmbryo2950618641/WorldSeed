@@ -1,4 +1,5 @@
 export * from "./sqlite-document-repository.js"
+export * from "./sqlite-chapter-revision-repository.js"
 export * from "./sqlite-evidence-store.js"
 export * from "./sqlite-graph-repository.js"
 export * from "./sqlite-history-repository.js"

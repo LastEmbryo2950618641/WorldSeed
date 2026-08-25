@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { writeFile as writeFileAsync } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -444,6 +445,344 @@ describe("backend utility runtime", () => {
       status: "ready",
       taskId,
     }])
+  })
+
+  it("commits a user chapter revision without mutating the original source", async () => {
+    const root = mkdtempSync(join(tmpdir(), "worldseed-chapter-revision-"))
+    temporaryDirectories.push(root)
+    const workspaceRootRef = join(root, "workspace")
+    const promptPackageRoot = fileURLToPath(new URL("../../../packages/prompt-contracts/", import.meta.url))
+    const facade = new BackendFacade(await BackendContainer.open({
+      applicationDataRoot: join(root, "application-data"),
+      promptPackageRoot,
+      model: new FakeAiModelAdapter(randomUUID),
+    }), { automaticEvolutionEnabled: false })
+    openFacades.push(facade)
+    const projectId = randomUUID()
+
+    await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "project.create",
+      payload: { projectId, displayName: "Chapter Revision", workspaceRootRef },
+    })
+    const started = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "turn.start",
+      payload: { projectId, workspaceRootRef, userInput: "世界从一盏灯开始。", chapterSequence: 1 },
+    })
+    await waitForTaskStatus(facade, readTaskId(started), "completed")
+
+    const listed = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.list",
+      payload: { projectId, workspaceRootRef },
+    })
+    expect(listed.ok).toBe(true)
+    if (!listed.ok || !Array.isArray(listed.data)) throw new Error("chapter.list did not return chapters")
+    const chapter = listed.data[0] as { chapterId: string; sourceId: string }
+    expect(chapter.chapterId).toBeTruthy()
+
+    const original = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.read",
+      payload: { projectId, workspaceRootRef, chapterId: chapter.chapterId },
+    })
+    expect(original.ok).toBe(true)
+    if (!original.ok) throw new Error(original.error.message)
+    const originalContent = (original.data as { content: string }).content
+    const revisedBody = `${originalContent.replace(/^#\s*第一章 世界种子\s*/u, "").trim()}\n\n用户明确修改的结尾。`
+    const revisedContent = `# 第一章 灯火新生\n\n${revisedBody}`
+
+    const revision = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.startRevision",
+      payload: {
+        projectId,
+        workspaceRootRef,
+        chapterId: chapter.chapterId,
+        baseSourceId: chapter.sourceId,
+        heading: "第一章 世界种子",
+        body: originalContent.replace(/^#\s*第一章 世界种子\s*/u, "").trim(),
+      },
+    })
+    expect(revision.ok).toBe(true)
+    if (!revision.ok) throw new Error(revision.error.message)
+    const revisionTaskId = (revision.data as { revisionTaskId: string }).revisionTaskId
+
+    const updated = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.updateRevision",
+      payload: { projectId, workspaceRootRef, revisionTaskId, heading: "第一章 灯火新生", body: revisedBody },
+    })
+    expect(updated.ok).toBe(true)
+
+    const submitted = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.submitRevision",
+      payload: { projectId, workspaceRootRef, revisionTaskId, mode: "direct", forced: true },
+    })
+    if (!submitted.ok) throw new Error(`${submitted.error.code}: ${submitted.error.message}`)
+    expect(submitted.ok && submitted.data).toMatchObject({
+      revisionTaskId,
+      decision: "submit",
+      graphSyncStatus: "pending",
+      status: "graph_sync_pending",
+    })
+    expect(await waitForChapterRevision(facade, {
+      projectId,
+      workspaceRootRef,
+      revisionTaskId,
+      graphSyncStatus: "completed",
+    })).toMatchObject({ status: "completed", graphSyncStatus: "completed" })
+
+    const current = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.read",
+      payload: { projectId, workspaceRootRef, chapterId: chapter.chapterId },
+    })
+    expect(current.ok).toBe(true)
+    if (!current.ok) throw new Error(current.error.message)
+    expect((current.data as { content: string }).content).toBe(revisedContent)
+    expect(current.data).toMatchObject({
+      heading: "第一章 灯火新生",
+      publishPath: "章节正文/第一章 灯火新生.md",
+    })
+    expect((current.data as { sourceId: string }).sourceId).not.toBe(chapter.sourceId)
+    expect(existsSync(join(workspaceRootRef, "章节正文", "第一章 世界种子.md"))).toBe(false)
+    expect(existsSync(join(workspaceRootRef, "章节正文", "第一章 灯火新生.md"))).toBe(true)
+
+    const duplicateSubmit = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.submitRevision",
+      payload: { projectId, workspaceRootRef, revisionTaskId, mode: "direct", forced: true },
+    })
+    expect(duplicateSubmit.ok).toBe(true)
+    expect(duplicateSubmit.data).toMatchObject({ revisionTaskId, status: "completed" })
+
+    const projectDatabase = new Database(join(root, "application-data", "projects", projectId, "project.sqlite"), {
+      readonly: true,
+      fileMustExist: true,
+    })
+    try {
+      expect(Number(projectDatabase.prepare(`
+        select count(*) count from model_context_messages
+        where task_id = ? and kind = 'chapter_revision'
+      `).get(revisionTaskId)?.count ?? 0)).toBe(1)
+      expect(Number(projectDatabase.prepare(`
+        select count(*) count from graph_revisions
+        where scope_id in (select scope_id from tasks where kind = 'revision' and id <> ?)
+      `).get(revisionTaskId)?.count ?? 0)).toBeGreaterThan(0)
+      expect(Number(projectDatabase.prepare(`
+        select count(*) count from settlement_records
+        where source_unit_id in (select id from source_units where source_id = ?)
+      `).get((current.data as { sourceId: string }).sourceId)?.count ?? 0)).toBeGreaterThan(0)
+    } finally {
+      projectDatabase.close()
+    }
+
+    const nextRevision = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.startRevision",
+      payload: {
+        projectId,
+        workspaceRootRef,
+        chapterId: chapter.chapterId,
+        baseSourceId: (current.data as { sourceId: string }).sourceId,
+        heading: "第一章 灯火新生",
+        body: (current.data as { body: string }).body,
+      },
+    })
+    expect(nextRevision.ok).toBe(true)
+    if (!nextRevision.ok) throw new Error(nextRevision.error.message)
+    const nextRevisionTaskId = (nextRevision.data as { revisionTaskId: string }).revisionTaskId
+    await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.updateRevision",
+      payload: { projectId, workspaceRootRef, revisionTaskId: nextRevisionTaskId, heading: "第一章 灯火新生", body: "用户的新版本。" },
+    })
+    const reviewedWithoutReview = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.submitRevision",
+      payload: { projectId, workspaceRootRef, revisionTaskId: nextRevisionTaskId, mode: "reviewed", forced: false },
+    })
+    expect(reviewedWithoutReview.ok).toBe(false)
+    if (reviewedWithoutReview.ok) throw new Error("Reviewed submission bypassed the review requirement")
+    expect(reviewedWithoutReview.error.code).toBe("revision_conflict")
+    const reviewResult = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.reviewRevision",
+      payload: { projectId, workspaceRootRef, revisionTaskId: nextRevisionTaskId },
+    })
+    expect(reviewResult.ok).toBe(true)
+    if (!reviewResult.ok) throw new Error(reviewResult.error.message)
+    const reviewId = (reviewResult.data as { review?: { reviewId: string } }).review?.reviewId
+    expect(reviewId).toBeTruthy()
+    await writeFileAsync(join(workspaceRootRef, "章节正文", "第一章 灯火新生.md"), "外部程序修改。", "utf8")
+    const externalConflict = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.submitRevision",
+      payload: { projectId, workspaceRootRef, revisionTaskId: nextRevisionTaskId, mode: "reviewed", forced: false, reviewId },
+    })
+    expect(externalConflict.ok).toBe(false)
+    if (externalConflict.ok) throw new Error("External workspace conflict was not rejected")
+    expect(externalConflict.error.code).toBe("storage_failure")
+  })
+
+  it("resumes failed revision graph synchronization without rolling back the committed prose", async () => {
+    const root = mkdtempSync(join(tmpdir(), "worldseed-chapter-revision-recovery-"))
+    temporaryDirectories.push(root)
+    const workspaceRootRef = join(root, "workspace")
+    const applicationDataRoot = join(root, "application-data")
+    const promptPackageRoot = fileURLToPath(new URL("../../../packages/prompt-contracts/", import.meta.url))
+    const fake = new FakeAiModelAdapter(randomUUID)
+    let failRevisionGraph = true
+    const facade = new BackendFacade(await BackendContainer.open({
+      applicationDataRoot,
+      promptPackageRoot,
+      model: {
+        info: fake.info,
+        execute: async (request, options) => {
+          const workflow = (request.input as { workflow?: string }).workflow
+          if (failRevisionGraph && workflow === "revision" && request.phase === "graph_structure_plan") {
+            throw new Error("simulated revision graph interruption")
+          }
+          const execution = await fake.execute(request, options)
+          if (workflow === "revision" && request.phase === "graph_governance") {
+            return {
+              ...execution,
+              result: {
+                ...execution.result,
+                artifact: {
+                  ...(execution.result.artifact as Record<string, unknown>),
+                  executionMode: "full_governance",
+                },
+              },
+            }
+          }
+          return execution
+        },
+      },
+    }), { automaticEvolutionEnabled: false })
+    openFacades.push(facade)
+    const projectId = randomUUID()
+    await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "project.create",
+      payload: { projectId, displayName: "Chapter Revision Recovery", workspaceRootRef },
+    })
+    const started = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "turn.start",
+      payload: { projectId, workspaceRootRef, userInput: "世界从一盏灯开始。", chapterSequence: 1 },
+    })
+    await waitForTaskStatus(facade, readTaskId(started), "completed")
+    const chapters = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.list",
+      payload: { projectId, workspaceRootRef },
+    })
+    if (!chapters.ok || !Array.isArray(chapters.data)) throw new Error("chapter.list did not return chapters")
+    const chapter = chapters.data[0] as { chapterId: string; sourceId: string }
+    const original = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.read",
+      payload: { projectId, workspaceRootRef, chapterId: chapter.chapterId },
+    })
+    if (!original.ok) throw new Error(original.error.message)
+    const revisedContent = `# 第一章 世界种子\n\n${(original.data as { body: string }).body}\n\n恢复测试修订。`
+    const revision = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.startRevision",
+      payload: { projectId, workspaceRootRef, chapterId: chapter.chapterId, baseSourceId: chapter.sourceId, heading: "第一章 世界种子", body: `${(original.data as { body: string }).body}\n\n恢复测试修订。` },
+    })
+    if (!revision.ok) throw new Error(revision.error.message)
+    const revisionTaskId = (revision.data as { revisionTaskId: string }).revisionTaskId
+    const accepted = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.submitRevision",
+      payload: { projectId, workspaceRootRef, revisionTaskId, mode: "direct", forced: true },
+    })
+    expect(accepted.ok && accepted.data).toMatchObject({
+      revisionTaskId,
+      decision: "submit",
+      graphSyncStatus: "pending",
+      status: "graph_sync_pending",
+    })
+    const persistedAfterFailure = await waitForChapterRevision(facade, {
+      projectId,
+      workspaceRootRef,
+      revisionTaskId,
+      graphSyncStatus: "failed",
+    })
+    expect(persistedAfterFailure).toMatchObject({
+      revisionTaskId,
+      decision: "submit",
+      graphSyncStatus: "failed",
+      status: "awaiting_user_decision",
+      finalization: {
+        revisionTaskId,
+        status: "graph_sync_pending",
+      },
+    })
+    const activeAfterFailure = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.findActiveRevision",
+      payload: { projectId, workspaceRootRef, chapterId: chapter.chapterId },
+    })
+    expect(activeAfterFailure.ok && activeAfterFailure.data).toMatchObject({ revisionTaskId })
+    const committedAfterFailure = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.read",
+      payload: { projectId, workspaceRootRef, chapterId: chapter.chapterId },
+    })
+    expect(committedAfterFailure.ok && (committedAfterFailure.data as { content: string }).content).toBe(revisedContent)
+
+    failRevisionGraph = false
+    const resumed = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.submitRevision",
+      payload: { projectId, workspaceRootRef, revisionTaskId, mode: "direct", forced: true },
+    })
+    if (!resumed.ok) throw new Error(`${resumed.error.code}: ${resumed.error.message}`)
+    expect(resumed.data).toMatchObject({ status: "graph_sync_pending", graphSyncStatus: "pending" })
+    expect(await waitForChapterRevision(facade, {
+      projectId,
+      workspaceRootRef,
+      revisionTaskId,
+      graphSyncStatus: "completed",
+    })).toMatchObject({ status: "completed", graphSyncStatus: "completed" })
+
+    const database = new Database(join(applicationDataRoot, "projects", projectId, "project.sqlite"), { readonly: true })
+      try {
+      expect(Number(database.prepare(`select count(*) count from model_context_messages where task_id = ? and kind = 'chapter_revision'`).get(revisionTaskId)?.count ?? 0)).toBe(1)
+        expect(Number(database.prepare(`select count(distinct graph_sync_task_id) count from chapter_revision_tasks where id = ?`).get(revisionTaskId)?.count ?? 0)).toBe(1)
+        expect(database.prepare(`select status from chapter_revision_finalizations where revision_task_id = ?`).get(revisionTaskId)).toEqual({ status: "completed" })
+      } finally {
+      database.close()
+    }
   })
 
   it("persists runtime metric windows and requires an explicit reset before resume", async () => {
@@ -1040,6 +1379,31 @@ async function waitForCompletedTask(facade: BackendFacade, taskId: string): Prom
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
   throw new Error("background turn did not complete")
+}
+
+async function waitForChapterRevision(
+  facade: BackendFacade,
+  input: Readonly<{
+    projectId: string
+    workspaceRootRef: string
+    revisionTaskId: string
+    graphSyncStatus: string
+  }>,
+): Promise<Record<string, unknown>> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const response = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      method: "chapter.readRevision",
+      payload: input,
+    })
+    if (response.ok && typeof response.data === "object" && response.data !== null
+      && "graphSyncStatus" in response.data && response.data.graphSyncStatus === input.graphSyncStatus) {
+      return response.data as Record<string, unknown>
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error(`chapter revision did not reach graph sync status ${input.graphSyncStatus}`)
 }
 
 async function waitForHistoryEntries(

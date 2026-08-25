@@ -12,6 +12,7 @@ import {
   assertSpacetimeGovernanceCoverage,
   graphStructurePlanArtifactSchema,
   graphSpacetimeSettlementArtifactSchema,
+  graphGovernanceArtifactSchema,
   isAllowedPhaseTransition,
   parsePhaseResult,
   phaseArtifactJsonSchema,
@@ -516,5 +517,23 @@ describe("prompt contracts", () => {
         selfReview: "No effective scene was established",
       }],
     })).toThrow("world_effect requires an effective scene")
+  })
+
+  it("requires no-change graph governance to contain no mutations", () => {
+    expect(() => graphGovernanceArtifactSchema.parse({
+      executionMode: "no_change",
+      mutations: [{
+        operation: "create_node",
+        ref: "local:new",
+        data: { content: "new fact" },
+      }],
+      retrievalProjections: [],
+      settlementRecords: [],
+      mutationSpacetimeSettlements: [],
+      sceneSpacetimeBindings: [],
+      affectedFrontierRefs: [],
+      archiveOutletRefs: [],
+      decisionRecords: [],
+    })).toThrow("no_change graph governance cannot contain mutations")
   })
 })

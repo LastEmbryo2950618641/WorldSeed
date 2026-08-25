@@ -121,7 +121,6 @@ export const internalDraftArtifactSchema = z.object({
 export const chapterNamingArtifactSchema = z.object({
   chapterNumberText: z.string().min(1),
   heading: z.string().min(1),
-  filename: z.string().regex(/\.md$/u),
   continuityEvidenceRefs: z.array(referenceSchema),
 })
 
@@ -356,6 +355,7 @@ export const graphGovernanceReviewArtifactSchema = z.object({
 })
 
 export const graphGovernanceArtifactSchema = z.object({
+  executionMode: z.enum(["no_change", "local_governance", "full_governance"]).default("full_governance"),
   mutations: z.array(graphMutationSchema),
   retrievalProjections: z.array(z.object({
     ownerKind: z.enum(["node", "link"]),
@@ -389,6 +389,14 @@ export const graphGovernanceArtifactSchema = z.object({
     payload: z.unknown(),
     selfReview: z.string().min(1),
   })),
+}).superRefine((artifact, context) => {
+  if (artifact.executionMode === "no_change" && artifact.mutations.length > 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["mutations"],
+      message: "no_change graph governance cannot contain mutations",
+    })
+  }
 })
 
 export const semanticReviewArtifactSchema = z.object({
@@ -453,6 +461,22 @@ export const commitReviewArtifactSchema = z.object({
   finalSelfReview: z.string().min(1),
 })
 
+export const revisionReviewArtifactSchema = z.object({
+  issues: z.array(z.object({
+    location: z.string().min(1),
+    category: z.string().min(1),
+    severity: z.enum(["suggestion", "notice"]),
+    evidenceRefs: z.array(z.string().min(1)),
+    description: z.string().min(1),
+    impact: z.string().min(1),
+    suggestion: z.string().min(1),
+    requiresGraphSync: z.boolean(),
+    affectsLaterChapters: z.boolean(),
+  })),
+  recommendation: z.enum(["no_issue", "review_suggested", "material_conflict"]),
+  finalSelfReview: z.string().min(1),
+})
+
 export const phaseArtifactSchemas: Record<AIPhase, z.ZodType> = {
   interpret: interpretArtifactSchema,
   rule_assembly: ruleAssemblyArtifactSchema,
@@ -473,6 +497,7 @@ export const phaseArtifactSchemas: Record<AIPhase, z.ZodType> = {
   settlement_review: settlementReviewArtifactSchema,
   frontier_settlement: frontierSettlementArtifactSchema,
   commit_review: commitReviewArtifactSchema,
+  revision_review: revisionReviewArtifactSchema,
 }
 
 export function phaseArtifactJsonSchema(phase: AIPhase): unknown {
@@ -498,3 +523,4 @@ export type SemanticReviewArtifact = z.infer<typeof semanticReviewArtifactSchema
 export type SettlementReviewArtifact = z.infer<typeof settlementReviewArtifactSchema>
 export type FrontierSettlementArtifact = z.infer<typeof frontierSettlementArtifactSchema>
 export type CommitReviewArtifact = z.infer<typeof commitReviewArtifactSchema>
+export type RevisionReviewArtifact = z.infer<typeof revisionReviewArtifactSchema>

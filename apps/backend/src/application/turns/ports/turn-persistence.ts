@@ -273,6 +273,16 @@ export type VerificationProbeCheckpoint = Readonly<{
 
 export interface TurnPersistencePort {
   ensureModelContextChain(input: EnsureModelContextChainInput): Promise<ModelContextChainRecord>
+  appendChapterRevisionMessage(input: Readonly<{
+    chainId: string
+    projectId: ProjectId
+    messageId: string
+    taskId: string
+    contentRef: string
+    contentDigest: string
+    tokenEstimate: number
+    createdAtMs: number
+  }>): Promise<void>
   listModelContextMessages(chainId: string): Promise<readonly ModelContextMessage[]>
   listVisibleModelContextEvidence(chainId: string): Promise<readonly TurnReadEvidence[]>
   hideModelContextMessages(chainId: string, messageIds: readonly string[], hiddenAtMs: number): Promise<void>

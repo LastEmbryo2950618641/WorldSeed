@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels"
 import { ChevronDown, Cloud, Cpu, FolderOpen, Menu, PanelLeftClose, PanelRightClose, Save, Settings2, Sprout } from "lucide-react"
 import type {
+  ChapterRevision,
+  ChapterRevisionReadResult,
+  ChapterSummary,
   HistoryCheckoutResult,
   HistoryOverview,
   HistoryRetentionPreview,
@@ -40,7 +43,11 @@ export function App(): React.JSX.Element {
   const [report, setReport] = useState<WorkspaceReport>({ inventory: [], issues: [] })
   const [selectedPath, setSelectedPath] = useState<string>()
   const [content, setContent] = useState("")
+  const [chapterBody, setChapterBody] = useState("")
   const [savedContent, setSavedContent] = useState("")
+  const [selectedChapter, setSelectedChapter] = useState<ChapterSummary>()
+  const [chapterRevision, setChapterRevision] = useState<ChapterRevision>()
+  const [chapterRevisionContent, setChapterRevisionContent] = useState<string>()
   const [prompt, setPrompt] = useState("")
   const [descriptionRule, setDescriptionRule] = useState("")
   const [proseRule, setProseRule] = useState("")
@@ -58,6 +65,7 @@ export function App(): React.JSX.Element {
   const [historyLoading, setHistoryLoading] = useState(false)
   const [modelProfiles, setModelProfiles] = useState<readonly ModelProfile[]>([])
   const [activeModelProfileId, setActiveModelProfileId] = useState("")
+  const monitoredChapterRevisionIds = useRef(new Set<string>())
   const activeModelProfile = modelProfiles.find((profile) => profile.id === activeModelProfileId)
   const parsedMinimumWordCount = parseWordCount(minimumWordCount)
   const parsedMaximumWordCount = parseWordCount(maximumWordCount)
@@ -167,17 +175,184 @@ export function App(): React.JSX.Element {
     }
     setError(undefined)
     try {
+      if (path.startsWith("章节正文/")) {
+        const chapters = await invokeBackend<readonly ChapterSummary[]>("chapter.list", {
+          projectId: project.projectId,
+          workspaceRootRef: project.workspaceRootRef,
+        })
+        const chapter = chapters.find((candidate) => candidate.publishPath === path)
+        if (chapter === undefined) throw new Error(`未找到章节登记：${path}`)
+        const result = await invokeBackend<ChapterSummary & { content: string; body: string }>("chapter.read", {
+          projectId: project.projectId,
+          workspaceRootRef: project.workspaceRootRef,
+          chapterId: chapter.chapterId,
+        })
+        setSelectedPath(path)
+        setSelectedChapter(chapter)
+        const activeRevision = await invokeBackend<ChapterRevisionReadResult | undefined>("chapter.findActiveRevision", {
+          projectId: project.projectId,
+          workspaceRootRef: project.workspaceRootRef,
+          chapterId: chapter.chapterId,
+        })
+        setChapterRevision(activeRevision)
+        setChapterRevisionContent(activeRevision?.proposedBody)
+        setContent(result.content)
+        setChapterBody(result.body)
+        setSavedContent(result.content)
+        if (activeRevision !== undefined && shouldMonitorChapterRevision(activeRevision.graphSyncStatus)) {
+          void monitorChapterRevision(activeRevision.revisionTaskId)
+        }
+        return
+      }
       const result = await invokeBackend<{ content: string }>("workspace.read", {
         projectId: project.projectId,
         workspaceRootRef: project.workspaceRootRef,
         relativePath: path,
       })
       setSelectedPath(path)
+      setSelectedChapter(undefined)
+      setChapterRevision(undefined)
+      setChapterRevisionContent(undefined)
       setContent(result.content)
+      setChapterBody("")
       setSavedContent(result.content)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
+  }
+
+  const startChapterRevision = async (heading: string, body: string): Promise<ChapterRevision> => {
+    if (project === undefined || selectedChapter === undefined) throw new Error("当前没有可修订章节")
+    const revision = await invokeBackend<ChapterRevision>("chapter.startRevision", {
+      projectId: project.projectId,
+      workspaceRootRef: project.workspaceRootRef,
+      chapterId: selectedChapter.chapterId,
+      baseSourceId: selectedChapter.sourceId,
+      heading,
+      body,
+    })
+    setChapterRevision(revision)
+    setChapterRevisionContent(body)
+    return revision
+  }
+
+  const updateChapterRevision = async (revisionTaskId: string, heading: string, body: string): Promise<ChapterRevision> => {
+    if (project === undefined) throw new Error("当前没有打开项目")
+    const revision = await invokeBackend<ChapterRevision>("chapter.updateRevision", {
+      projectId: project.projectId,
+      workspaceRootRef: project.workspaceRootRef,
+      revisionTaskId,
+      heading,
+      body,
+    })
+    setChapterRevision(revision)
+    setChapterRevisionContent(body)
+    return revision
+  }
+
+  const reviewChapterRevision = async (revisionTaskId: string): Promise<ChapterRevision> => {
+    if (project === undefined) throw new Error("当前没有打开项目")
+    setError(undefined)
+    try {
+      const revision = await invokeBackend<ChapterRevision>("chapter.reviewRevision", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        revisionTaskId,
+        ...(activeModelProfile === undefined ? {} : { model: modelSelection(activeModelProfile) }),
+      })
+      setChapterRevision(revision)
+      return revision
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      throw cause
+    }
+  }
+
+  const monitorChapterRevision = async (revisionTaskId: string): Promise<void> => {
+    if (project === undefined || monitoredChapterRevisionIds.current.has(revisionTaskId)) return
+    monitoredChapterRevisionIds.current.add(revisionTaskId)
+    try {
+      for (let attempt = 0; attempt < 1_200; attempt += 1) {
+        const current = await invokeBackend<ChapterRevisionReadResult>("chapter.readRevision", {
+          projectId: project.projectId,
+          workspaceRootRef: project.workspaceRootRef,
+          revisionTaskId,
+        })
+        setChapterRevision(current)
+        setChapterRevisionContent(current.proposedBody)
+        if (current.graphSyncStatus === "completed") {
+          setPostCommitNotice("章节修订、上下文登记与世界图同步已完成。")
+          await refreshHistory()
+          return
+        }
+        if (current.graphSyncStatus === "failed") {
+          setError("章节正文已提交，但世界图同步失败。可在章节顶部重试图同步。")
+          setPostCommitNotice("章节正文已保留，世界图同步停在可恢复检查点。")
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_000))
+      }
+      setError("世界图同步仍在运行，请稍后重新打开章节查看状态。")
+    } finally {
+      monitoredChapterRevisionIds.current.delete(revisionTaskId)
+    }
+  }
+
+  const submitChapterRevision = async (input: Readonly<{
+    revisionTaskId: string
+    mode: "direct" | "reviewed"
+    forced: boolean
+    reviewId?: string
+  }>): Promise<ChapterRevision> => {
+    if (project === undefined) throw new Error("当前没有打开项目")
+    setError(undefined)
+    let revision: ChapterRevision
+    try {
+      revision = await invokeBackend<ChapterRevision>("chapter.submitRevision", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        ...input,
+        ...(activeModelProfile === undefined ? {} : { model: modelSelection(activeModelProfile) }),
+      })
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      throw cause
+    }
+    const current = await invokeBackend<ChapterSummary & { content: string; body: string }>("chapter.read", {
+      projectId: project.projectId,
+      workspaceRootRef: project.workspaceRootRef,
+      chapterId: revision.chapterId,
+    })
+    setSelectedChapter(current)
+    setSelectedPath(current.publishPath)
+    setChapterRevision(revision)
+    setContent(current.content)
+    setChapterBody(current.body)
+    setSavedContent(current.content)
+    await refreshWorkspace()
+    setPostCommitNotice(revision.graphSyncStatus === "completed"
+      ? "章节修订、上下文登记与世界图同步已完成。"
+      : "章节正文已提交，世界图正在后台同步。")
+    if (revision.graphSyncStatus === "pending" || shouldMonitorChapterRevision(revision.graphSyncStatus)) {
+      void monitorChapterRevision(revision.revisionTaskId).catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : String(cause))
+      })
+    } else if (revision.graphSyncStatus === "completed") {
+      await refreshHistory()
+    }
+    return revision
+  }
+
+  const retireChapterRevision = async (revisionTaskId: string): Promise<ChapterRevision> => {
+    if (project === undefined) throw new Error("当前没有打开项目")
+    const revision = await invokeBackend<ChapterRevision>("chapter.retireRevision", {
+      projectId: project.projectId,
+      workspaceRootRef: project.workspaceRootRef,
+      revisionTaskId,
+    })
+    setChapterRevision(undefined)
+    setChapterRevisionContent(undefined)
+    return revision
   }
 
   const loadCommittedGraph = async (
@@ -372,8 +547,13 @@ export function App(): React.JSX.Element {
       entryId,
     })
     setSelectedPath(undefined)
+    setSelectedChapter(undefined)
+    setChapterRevision(undefined)
     setContent("")
+    setChapterBody("")
     setSavedContent("")
+    setChapterRevision(undefined)
+    setChapterRevisionContent(undefined)
     await Promise.all([refreshWorkspace(), refreshHistory(), loadHistoryGraph(result.graphAnchorIds)])
     const recoverable = await invokeBackend<RecoverableTaskList>("turn.recoverable.list", {
       projectId: project.projectId,
@@ -510,6 +690,15 @@ export function App(): React.JSX.Element {
           onMaximumWordCountChange={setMaximumWordCount}
           onSave={() => void saveFile()}
           onRun={() => void startTurn()}
+          chapter={selectedChapter}
+          chapterBody={chapterBody}
+          revision={chapterRevision}
+          revisionContent={chapterRevisionContent}
+          onStartRevision={startChapterRevision}
+          onUpdateRevision={updateChapterRevision}
+          onReviewRevision={reviewChapterRevision}
+          onSubmitRevision={submitChapterRevision}
+          onRetireRevision={retireChapterRevision}
         />
       </Panel>
       <PanelResizeHandle className="resize-handle"><PanelRightClose size={12} /></PanelResizeHandle>
@@ -559,6 +748,25 @@ function parseWordCount(value: string): number | undefined {
   if (!/^\d+$/.test(normalized)) return undefined
   const parsed = Number(normalized)
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
+}
+
+function modelSelection(profile: ModelProfile) {
+  return {
+    baseUrl: profile.baseUrl,
+    model: profile.model,
+    credentialRef: profile.credentialRef,
+    apiProtocol: profile.apiProtocol,
+    contextWindowTokens: profile.contextWindowTokens,
+    thinkingModeEnabled: profile.thinkingModeEnabled,
+    reasoningEffort: profile.reasoningEffort,
+    jsonModeEnabled: profile.jsonModeEnabled,
+    disableResponseStorage: profile.disableResponseStorage,
+    serviceTier: profile.serviceTier,
+  }
+}
+
+export function shouldMonitorChapterRevision(status: ChapterRevision["graphSyncStatus"]): boolean {
+  return status === "running"
 }
 
 function isWorkspaceFilePath(value: string | undefined): value is string {

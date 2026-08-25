@@ -70,7 +70,7 @@ export interface PromptResourcePort {
 }
 
 export type TurnPhaseInput = Readonly<{
-  workflow: "turn" | "query" | "evolution"
+  workflow: "turn" | "query" | "evolution" | "revision"
   userInput: string
   chapterSequence: number
   allowWorkspaceChapterReads: boolean

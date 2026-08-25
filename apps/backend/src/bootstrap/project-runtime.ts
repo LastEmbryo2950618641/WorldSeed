@@ -11,6 +11,7 @@ import type {
 
 import {
   TurnOrchestrator,
+  ChapterRevisionService,
   buildSourceUnitExactKeys,
   HistoryManifestBuilder,
   HistoryCheckoutService,
@@ -24,6 +25,7 @@ import { NodeWorkspaceAdapter, NodeWorkspaceCatalogAdapter, NodeWorkspaceSnapsho
 import { IsomorphicGitHistoryAdapter } from "../infrastructure/history-git/index.js"
 import {
   SqliteDocumentRepository,
+  SqliteChapterRevisionRepository,
   SqliteEvidenceStore,
   SqliteGraphRepository,
   SqliteHistoryRepository,
@@ -267,6 +269,76 @@ export class ProjectRuntime {
 
   public async saveMarkdown(relativePath: string, content: string): Promise<void> {
     await this.workspace.saveUserMarkdown(this.workspaceRootRef, relativePath, content)
+  }
+
+  public createChapterRevisionService(): ChapterRevisionService {
+    const persistence = new SqliteTurnPersistence(this.database, randomUUID)
+    const documents = new SqliteDocumentRepository(this.database)
+    return new ChapterRevisionService({
+      taskScopes: new SqliteTaskScopeRepository(this.database),
+      documents,
+      retrieval: new SqliteRetrievalRepository(this.database),
+      commit: new SqliteScopeCommitRepository(this.database),
+      revisions: new SqliteChapterRevisionRepository(this.database),
+      workspace: this.workspace,
+      internalStore: this.internalStorePort,
+      internalProjectStore: this.internalStore,
+      idAllocator: new SqliteProjectIdAllocator(this.database, Date.now),
+      createId: randomUUID,
+      now: Date.now,
+      prompts: this.createPromptResourcePort(),
+      appendChapterRevisionContext: async (input) => {
+        const baseRules = await this.createPromptResourcePort().loadBaseRules()
+        const chain = await persistence.ensureModelContextChain({
+          projectId: input.revision.projectId,
+          protocolVersion: "1.0",
+          systemRulesContent: baseRules.text,
+          systemRulesDigest: baseRules.digest,
+          createdAtMs: Date.now(),
+        })
+        await persistence.appendChapterRevisionMessage({
+          chainId: chain.chainId,
+          projectId: input.revision.projectId,
+          messageId: input.revision.revisionTaskId,
+          taskId: input.revision.revisionTaskId,
+          contentRef: input.contentRef,
+          contentDigest: input.contentDigest,
+          tokenEstimate: input.contentTokenEstimate,
+          createdAtMs: Date.now(),
+        })
+      },
+      runGraphSync: async (input) => {
+        const settings = await this.readSettings()
+        const chapters = await documents.listCommittedChapters(input.revision.projectId)
+        const chapterSequence = Math.max(1, chapters.findIndex((chapter) => chapter.chapterId === input.revision.chapterId) + 1)
+        const content = await this.internalStorePort.readDocument(input.revision.contentRef)
+        const orchestrator = this.createTurnOrchestrator(input.model, randomUUID, Date.now)
+        const orchestratorInput = {
+          workflow: "revision",
+          adaptiveGraphGovernance: true,
+          projectId: input.revision.projectId,
+          workspaceRootRef: input.workspaceRootRef,
+          internalStore: this.internalStore,
+          userInput: content,
+          chapterSequence,
+          sourceId: input.revision.proposedSourceId,
+          existingSourceUnitIds: input.sourceUnitIds,
+          taskId: input.graphSyncTaskId,
+          allowWorkspaceChapterReads: true,
+          maxModelCalls: settings.execution.maxModelCalls,
+          deadlineMs: settings.execution.maxWallTimeMs,
+          maxRetrievalRounds: settings.execution.maxRetrievalRounds,
+          projectSettings: settings,
+          executionOrigin: { kind: "user" },
+        } as const
+        const existingTask = await this.taskScopes.findTask(input.graphSyncTaskId)
+        if (existingTask === undefined) {
+          await orchestrator.execute(orchestratorInput)
+        } else {
+          await orchestrator.resume(orchestratorInput)
+        }
+      },
+    })
   }
 
   public async readGraphNeighborhood(input: {

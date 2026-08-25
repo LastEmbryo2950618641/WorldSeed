@@ -6,6 +6,7 @@ import {
   readFile,
   readdir,
   realpath,
+  unlink,
   writeFile,
 } from "node:fs/promises"
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path"
@@ -126,6 +127,47 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     }
   }
 
+  public async replacePublishedChapter(
+    workspaceRootRef: string,
+    currentRelativePath: string,
+    nextRelativePath: string,
+    expectedDigest: string,
+    content: string,
+  ): Promise<void> {
+    const root = await realpath(resolve(workspaceRootRef))
+    const currentNormalized = assertWorkspaceMutationAllowed(currentRelativePath, "file", "chapter_publisher")
+    const nextNormalized = assertWorkspaceMutationAllowed(nextRelativePath, "file", "chapter_publisher")
+    const currentPath = resolveInside(root, currentNormalized)
+    const nextPath = resolveInside(root, nextNormalized)
+    await assertParentChainContainsNoLinks(root, currentPath)
+    await assertParentChainContainsNoLinks(root, nextPath)
+    let currentContent: string | undefined
+    try {
+      currentContent = await readFile(currentPath, "utf8")
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error
+    }
+    let nextContent = currentPath === nextPath ? currentContent : undefined
+    if (currentPath !== nextPath) {
+      try {
+        nextContent = await readFile(nextPath, "utf8")
+      } catch (error) {
+        if (!isNotFoundError(error)) throw error
+      }
+    }
+    if (currentContent !== undefined && digest(currentContent) !== expectedDigest && currentContent !== content) {
+      throw new Error(`Published chapter changed outside the revision workflow: ${currentNormalized}`)
+    }
+    if (currentPath !== nextPath && nextContent !== undefined && nextContent !== content) {
+      throw new Error(`Chapter title conflicts with an existing file: ${nextNormalized}`)
+    }
+    if (currentContent === undefined && nextContent === undefined) {
+      throw new Error(`Published chapter is missing: ${currentNormalized}`)
+    }
+    if (nextContent !== content) await writeFile(nextPath, content, { encoding: "utf8" })
+    if (currentPath !== nextPath && currentContent !== undefined) await unlink(currentPath)
+  }
+
   public async importMarkdownFiles(
     workspaceRootRef: string,
     destination: string,
@@ -228,6 +270,10 @@ async function assertParentChainContainsNoLinks(root: string, target: string): P
     }
     current = resolve(current, "..")
   }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT"
 }
 
 async function scanWorkspace(root: string): Promise<{

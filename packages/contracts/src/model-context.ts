@@ -14,6 +14,7 @@ export const modelContextMessageKindValues = [
   "phase_request",
   "phase_response",
   "canonical_chapter",
+  "chapter_revision",
 ] as const
 export const modelContextMessageKindSchema = z.enum(modelContextMessageKindValues)
 export type ModelContextMessageKind = z.infer<typeof modelContextMessageKindSchema>

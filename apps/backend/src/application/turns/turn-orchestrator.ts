@@ -43,11 +43,14 @@ import {
 
 import {
   appendContextSegments,
+  assembleChapterDocument,
   assertCitationsWereRead,
   createTurnContext,
+  deriveChapterPublishPath,
   digest,
   inheritContextReads,
   recordContextRead,
+  normalizeChapterHeading,
   type GraphRevision,
 } from "../../core/index.js"
 import type {
@@ -99,6 +102,7 @@ import {
 import { applyGraphCapacityRewrite, assembleGraphGovernanceArtifact, replayGraphCapacityRewrites } from "./graph-governance-assembler.js"
 import { buildStageProjection, readPriorFrontierStates } from "./graph-governance-stage-projection.js"
 import { canonicalizeRetrievalProjections } from "./retrieval-projection-canonicalizer.js"
+import { decideAdaptiveGraphGovernance } from "./adaptive-graph-governance-coordinator.js"
 
 const turnModelPhases: readonly AIPhase[] = [
   "interpret",
@@ -149,6 +153,23 @@ const evolutionExecutionPhases: readonly AIPhase[] = [
   "commit_review",
 ]
 
+const revisionExecutionPhases: readonly AIPhase[] = [
+  "interpret",
+  "rule_assembly",
+  "source_retrieval",
+  "emergence_planning",
+  "emergence_review",
+  "dependency_audit",
+  "graph_structure_plan",
+  "graph_capacity_rewrite",
+  "graph_spacetime_settlement",
+  "graph_retrieval_design",
+  "graph_governance_review",
+  "settlement_review",
+  "frontier_settlement",
+  "commit_review",
+]
+
 const phaseInternalArtifactDependencies = {
   interpret: [],
   rule_assembly: ["interpret"],
@@ -169,6 +190,7 @@ const phaseInternalArtifactDependencies = {
   settlement_review: ["dependency_audit", "graph_governance", "semantic_review"],
   frontier_settlement: ["graph_governance", "semantic_review", "settlement_review"],
   commit_review: ["draft", "dependency_audit", "graph_governance", "graph_governance_review", "semantic_review", "settlement_review", "frontier_settlement"],
+  revision_review: [],
 } as const satisfies Record<AIPhase, readonly AIPhase[]>
 
 const phaseModelArtifactDependencies = {
@@ -181,18 +203,22 @@ const phaseModelArtifactDependencies = {
 
 const workspaceCatalogPhases = new Set<AIPhase>(["interpret", "rule_assembly", "source_retrieval"])
 
-export type WorldWorkflow = "turn" | "query" | "evolution"
+export type WorldWorkflow = "turn" | "query" | "evolution" | "revision"
 
-function executionPhasesFor(workflow: WorldWorkflow): readonly AIPhase[] {
+function executionPhasesFor(workflow: WorldWorkflow, includeAdaptiveRevisionRoute = false): readonly AIPhase[] {
   switch (workflow) {
     case "turn": return turnExecutionPhases
     case "query": return queryExecutionPhases
     case "evolution": return evolutionExecutionPhases
+    case "revision": return includeAdaptiveRevisionRoute
+      ? ["graph_governance", ...revisionExecutionPhases]
+      : revisionExecutionPhases
   }
 }
 
 export type TurnOrchestratorInput = Readonly<{
   workflow?: WorldWorkflow
+  adaptiveGraphGovernance?: boolean
   projectId: ProjectId
   workspaceRootRef: string
   internalStore: InternalProjectStore
@@ -209,6 +235,7 @@ export type TurnOrchestratorInput = Readonly<{
   scopeId?: string
   contextId?: string
   sourceId?: string
+  existingSourceUnitIds?: readonly string[]
   allowWorkspaceChapterReads?: boolean
   maxModelCalls?: number
   maxInputTokens?: number
@@ -473,17 +500,27 @@ export class TurnOrchestrator {
     await this.dependencies.persistence.updateTask(taskId, "running", undefined, createdAtMs)
     hooks?.onPrepared?.()
 
-    const artifacts: Partial<Record<AIPhase, unknown>> = {}
+    const artifacts: Partial<Record<AIPhase, unknown>> = workflow === "revision"
+      ? {
+          draft: {
+            contentMarkdown: input.userInput,
+            adoptedDecisionIndexes: [],
+            currentTimeAnchorRefs: [],
+            currentLocationAnchorRefs: [],
+            detectedUnplannedContent: [],
+          },
+        }
+      : {}
     const phaseRunIds: string[] = []
     const phaseRuns = new Map<AIPhase, string>()
-    const sourceUnitIds: string[] = []
+    const sourceUnitIds: string[] = [...(input.existingSourceUnitIds ?? [])]
     const readEvidence: TurnReadEvidence[] = [
       ...inheritedModelEvidence.map((evidence) => ({ ...evidence, visibility: "committed" as const })),
       ...mandatoryWorkspaceReads.evidence,
       ...evolutionFrontierReads.evidence,
     ]
     const retrievalGaps: TurnRetrievalGap[] = []
-    return this.continueExecution(input, {
+    const initialState: TurnExecutionState = {
       taskId,
       turnId,
       scopeId,
@@ -508,8 +545,157 @@ export class TurnOrchestrator {
       budget,
       startPhaseIndex: 0,
       queryDraftAuditRounds: 0,
+      ...(input.adaptiveGraphGovernance === true ? { adaptiveGraphGovernance: true } : {}),
       ...(hooks?.signal === undefined ? {} : { signal: hooks.signal }),
-    })
+    }
+    if (workflow === "revision" && input.adaptiveGraphGovernance === true) {
+      return this.executeAdaptiveRevisionGraphGovernance(input, initialState)
+    }
+    return this.continueExecution(input, initialState)
+  }
+
+  private async executeAdaptiveRevisionGraphGovernance(
+    input: TurnOrchestratorInput,
+    state: TurnExecutionState,
+  ): Promise<WorldEvolutionExecutionResult> {
+    const phase: AIPhase = "graph_governance"
+    const phaseRunId = this.dependencies.createId()
+    const attempt = (state.phaseAttempts.get(phase) ?? 0) + 1
+    state.phaseAttempts.set(phase, attempt)
+    state.phaseRunIds.push(phaseRunId)
+    state.phaseRuns.set(phase, phaseRunId)
+    try {
+      const result = await this.executePhase({
+        input,
+        inputScopeId: state.scopeId,
+        sourceId: state.sourceId,
+        sourceUnitIds: state.sourceUnitIds,
+        phase,
+        phaseRunId,
+        attempt,
+        phaseRunIds: state.phaseRunIds,
+        context: state.context,
+        artifacts: state.artifacts,
+        readEvidence: state.readEvidence,
+        visibleEvidence: state.visibleEvidence,
+        retrievalGaps: state.retrievalGaps,
+        verificationProbeCheckpoints: state.verificationProbeCheckpoints,
+        catalogSnapshot: state.catalogSnapshot,
+        modelContextChainId: state.modelContextChainId,
+        budget: state.budget,
+        usage: state.budgetWindowUsage,
+        ...(state.signal === undefined ? {} : { signal: state.signal }),
+      })
+      state.context = result.context
+      state.readEvidence = [...result.readEvidence]
+      state.visibleEvidence = [...result.visibleEvidence]
+      state.retrievalGaps = [...result.retrievalGaps]
+      state.artifacts.graph_governance = result.artifact
+      state.budgetWindowUsage = addPhaseUsage(state.budgetWindowUsage, result.usage)
+      state.totalUsage = addPhaseUsage(state.totalUsage, result.usage)
+      await this.dependencies.persistence.saveTaskCheckpoint({
+        projectId: input.projectId,
+        taskId: state.taskId,
+        phaseRunId: result.phaseRunId,
+        phase,
+        context: state.context,
+        modelContextChainId: state.modelContextChainId,
+        savedAtMs: this.dependencies.now(),
+      })
+
+      const decision = decideAdaptiveGraphGovernance(result.artifact, state.sourceUnitIds.length)
+      this.log("debug", "revision.graph_governance.adaptive_route", {
+        taskId: state.taskId,
+        phaseRunId: result.phaseRunId,
+        mode: decision.mode,
+        fallbackReason: decision.fallbackReason,
+        readRounds: attempt,
+        evidenceCount: state.visibleEvidence.length,
+        mutationCount: decision.artifact?.mutations.length ?? 0,
+        modelCalls: state.totalUsage.modelCalls,
+        inputTokens: state.totalUsage.inputTokens,
+        outputTokens: state.totalUsage.outputTokens,
+      })
+
+      if (decision.mode === "full_governance") {
+        delete state.artifacts.graph_governance
+        return this.continueExecution({ ...input, adaptiveGraphGovernance: false }, {
+          ...state,
+          startPhaseIndex: 0,
+          adaptiveGraphGovernance: false,
+        }) as Promise<WorldEvolutionExecutionResult>
+      }
+
+      if (decision.mode === "no_change") {
+        await this.dependencies.commit.retire(state.scopeId, this.dependencies.now())
+        await this.dependencies.persistence.updateTask(state.taskId, "completed", phase, this.dependencies.now())
+        this.log("info", "revision.graph_governance.no_change", {
+          taskId: state.taskId,
+          scopeId: state.scopeId,
+        })
+        return {
+          kind: "evolution",
+          taskId: state.taskId,
+          turnId: state.turnId,
+          scopeId: state.scopeId,
+          contextId: state.contextId,
+          graphAnchorIds: [],
+          graphMutationCount: 0,
+          modelCalls: state.totalUsage.modelCalls,
+          inputTokens: state.totalUsage.inputTokens,
+          outputTokens: state.totalUsage.outputTokens,
+          modelProvider: this.dependencies.model.info?.provider ?? "unknown",
+          modelName: this.dependencies.model.info?.model ?? "unknown",
+          ...cacheRateResult(state.totalUsage),
+        }
+      }
+
+      const graphAnchorIds = await this.stageGraphAndSettlement(
+        input,
+        state.taskId,
+        state.sourceId,
+        state.scopeId,
+        result.phaseRunId,
+        state.artifacts,
+        state.sourceUnitIds,
+        state.readEvidence,
+        state.createdAtMs,
+        "local",
+      )
+      await this.dependencies.commit.commit(state.scopeId)
+      await this.dependencies.persistence.updateTask(state.taskId, "completed", phase, this.dependencies.now())
+      this.log("info", "revision.graph_governance.local_committed", {
+        taskId: state.taskId,
+        scopeId: state.scopeId,
+        graphMutationCount: decision.artifact?.mutations.length ?? 0,
+        graphAnchorCount: graphAnchorIds.length,
+      })
+      return {
+        kind: "evolution",
+        taskId: state.taskId,
+        turnId: state.turnId,
+        scopeId: state.scopeId,
+        contextId: state.contextId,
+        graphAnchorIds,
+        graphMutationCount: decision.artifact?.mutations.length ?? 0,
+        modelCalls: state.totalUsage.modelCalls,
+        inputTokens: state.totalUsage.inputTokens,
+        outputTokens: state.totalUsage.outputTokens,
+        modelProvider: this.dependencies.model.info?.provider ?? "unknown",
+        modelName: this.dependencies.model.info?.model ?? "unknown",
+        ...cacheRateResult(state.totalUsage),
+      }
+    } catch (error) {
+      await this.dependencies.commit.resetPending(state.scopeId).catch(() => undefined)
+      await this.dependencies.persistence.updateTask(
+        state.taskId,
+        "awaiting_user_decision",
+        phase,
+        this.dependencies.now(),
+        createInterruptionRecord(error, phase, state.phaseRuns.get(phase), this.dependencies.now()),
+      )
+      throw error
+    }
   }
 
   private async compactInheritedModelContext(
@@ -565,7 +751,10 @@ export class TurnOrchestrator {
   public async resume(input: TurnOrchestratorInput, mode: "continue" | "retry_phase" = "continue", hooks?: TurnExecutionHooks): Promise<WorkflowExecutionResult> {
     throwIfExecutionCancelled(hooks?.signal)
     const workflow = input.workflow ?? "turn"
-    const executionPhases = executionPhasesFor(workflow)
+    const executionPhases = executionPhasesFor(
+      workflow,
+      workflow === "revision" && input.adaptiveGraphGovernance === true,
+    )
     if (input.taskId === undefined) throw new Error("A taskId is required to resume a turn")
     const task = await this.dependencies.taskScopes.findTask(input.taskId)
     if (task === undefined) throw new Error(`Cannot resume missing task: ${input.taskId}`)
@@ -692,7 +881,17 @@ export class TurnOrchestrator {
           : latestPhaseIndex
       }
     }
-    const artifacts: Partial<Record<AIPhase, unknown>> = {}
+    const artifacts: Partial<Record<AIPhase, unknown>> = workflow === "revision"
+      ? {
+          draft: {
+            contentMarkdown: latestInput.userInput,
+            adoptedDecisionIndexes: [],
+            currentTimeAnchorRefs: [],
+            currentLocationAnchorRefs: [],
+            detectedUnplannedContent: [],
+          },
+        }
+      : {}
     const phaseRuns = new Map<AIPhase, string>()
     const phaseAttempts = new Map<AIPhase, number>()
     for (const run of storedRuns) {
@@ -1111,6 +1310,7 @@ export class TurnOrchestrator {
       },
       startPhaseIndex,
       queryDraftAuditRounds: restoredQueryDraftAuditRounds,
+      ...(input.adaptiveGraphGovernance === true ? { adaptiveGraphGovernance: true } : {}),
       ...(queryRevisionFeedback === undefined ? {} : { queryRevisionFeedback }),
       ...(graphCapacityFeedback === undefined ? {} : { graphCapacityFeedback }),
       ...(hooks?.signal === undefined ? {} : { signal: hooks.signal }),
@@ -1119,7 +1319,7 @@ export class TurnOrchestrator {
 
   private async continueExecution(input: TurnOrchestratorInput, state: TurnExecutionState): Promise<WorkflowExecutionResult> {
     const workflow = input.workflow ?? "turn"
-    const executionPhases = executionPhasesFor(workflow)
+    const executionPhases = executionPhasesFor(workflow, state.adaptiveGraphGovernance === true)
     let {
       context,
       sourceUnitIds,
@@ -1338,7 +1538,7 @@ export class TurnOrchestrator {
       if (workflow === "query") {
         return await this.completeQuery(state, artifacts, readEvidence, totalUsage)
       }
-      if (workflow === "evolution") {
+      if (workflow === "evolution" || workflow === "revision") {
         return await this.completeEvolution(input, state, artifacts, phaseRuns, readEvidence, totalUsage)
       }
       return await this.completeTurn(input, state, artifacts, phaseRuns, sourceUnitIds, readEvidence, totalUsage)
@@ -1397,7 +1597,8 @@ export class TurnOrchestrator {
     readEvidence: readonly TurnReadEvidence[],
     totalUsage: PhaseUsage,
   ): Promise<TurnExecutionResult> {
-    const naming = chapterNamingArtifactSchema.parse(artifacts.chapter_naming)
+    const parsedNaming = chapterNamingArtifactSchema.parse(artifacts.chapter_naming)
+    const naming = { ...parsedNaming, heading: normalizeChapterHeading(parsedNaming.heading) }
     const draft = internalDraftArtifactSchema.parse(artifacts.draft)
     const commitReview = parsePhaseArtifact("commit_review", artifacts.commit_review) as { recommendation: string }
     this.log("debug", "turn.commit_review.advisory", {
@@ -1405,7 +1606,7 @@ export class TurnOrchestrator {
       recommendation: commitReview.recommendation,
       message: "AI commit review is advisory; structural and settlement gates decide whether the turn can be persisted",
     })
-    const chapterContent = ensureHeading(naming.heading, draft.contentMarkdown)
+    const chapterContent = assembleChapterDocument(naming.heading, draft.contentMarkdown)
     const contentRef = await this.dependencies.internalStore.writeImmutableDocument(input.internalStore, state.sourceId, chapterContent)
     await this.stageDocument(input, state.sourceId, state.scopeId, naming, contentRef, chapterContent, state.createdAtMs)
     const graphAnchorIds = await this.stageGraphAndSettlement(
@@ -1420,7 +1621,7 @@ export class TurnOrchestrator {
       state.createdAtMs,
     )
 
-    const chapterPath = `章节正文/${sanitizeFilename(naming.filename)}`
+    const chapterPath = deriveChapterPublishPath(naming.heading)
     const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
     const finalization: TurnFinalizationRecord = {
       finalizationId: this.dependencies.createId(),
@@ -1692,7 +1893,7 @@ export class TurnOrchestrator {
       state.scopeId,
       phaseRuns.get("graph_governance_review") ?? phaseRuns.get("graph_governance"),
       artifacts,
-      [],
+      state.sourceUnitIds,
       readEvidence,
       state.createdAtMs,
     )
@@ -3346,8 +3547,12 @@ export class TurnOrchestrator {
     artifacts: Partial<Record<AIPhase, unknown>>,
   ): Promise<string[]> {
     const draft = internalDraftArtifactSchema.parse(artifacts.draft)
-    const naming = artifacts.chapter_naming === undefined ? undefined : chapterNamingArtifactSchema.parse(artifacts.chapter_naming)
-    const content = naming === undefined ? draft.contentMarkdown : ensureHeading(naming.heading, draft.contentMarkdown)
+    const parsedNaming = artifacts.chapter_naming === undefined ? undefined : chapterNamingArtifactSchema.parse(artifacts.chapter_naming)
+    const naming = parsedNaming === undefined ? undefined : {
+      ...parsedNaming,
+      heading: normalizeChapterHeading(parsedNaming.heading),
+    }
+    const content = naming === undefined ? draft.contentMarkdown : assembleChapterDocument(naming.heading, draft.contentMarkdown)
     const units = splitSourceUnits(content)
     const sourceUnits = await Promise.all(units.map(async (contentMarkdown, sequence) => {
       const id = this.dependencies.createId()
@@ -3391,7 +3596,7 @@ export class TurnOrchestrator {
     content: string,
     createdAtMs: number,
   ): Promise<void> {
-    const publishPath = `章节正文/${sanitizeFilename(naming.filename)}`
+    const publishPath = deriveChapterPublishPath(naming.heading)
     const contentDigest = digest(content)
     const existing = await this.dependencies.documents.findVersion(input.projectId, sourceId, scopeId)
     if (existing !== undefined) {
@@ -3428,31 +3633,37 @@ export class TurnOrchestrator {
     sourceUnitIds: readonly string[],
     readEvidence: readonly TurnReadEvidence[],
     createdAtMs: number,
+    mode: "full" | "local" = "full",
   ): Promise<string[]> {
     const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
-    emergencePlanningArtifactSchema.parse(artifacts.emergence_planning)
-    emergenceReviewArtifactSchema.parse(artifacts.emergence_review)
-    const dependencyAudit = dependencyAuditArtifactSchema.parse(artifacts.dependency_audit)
-    assertSpacetimeGovernanceCoverage(dependencyAudit, governance, sourceUnitIds.length)
-    const semantic = semanticReviewArtifactSchema.parse(artifacts.semantic_review)
-    assertSemanticReviewCoversGovernance(governance, semantic)
-    this.log("debug", "turn.semantic_review.advisory", {
-      taskId,
-      graphStillDiscoverable: semantic.graphStillDiscoverable,
-      graphStillConcise: semantic.graphStillConcise,
-      continuityPreserved: semantic.continuityPreserved,
-      spacetimeContinuityPreserved: semantic.spacetimeContinuityPreserved,
-      sceneInventoryComplete: semantic.sceneInventoryComplete,
-      rejectedMutationIndexes: semantic.rejectedMutationIndexes,
-      rejectedSpacetimeBindingIndexes: semantic.rejectedSpacetimeBindingIndexes,
-      rejectedMutationSpacetimeSettlementIndexes: semantic.rejectedMutationSpacetimeSettlementIndexes,
-      rejectedAffectedFrontierRefs: semantic.rejectedAffectedFrontierRefs,
-      verificationProbeCount: semantic.verificationProbeAssessments.length,
-    })
+    if (mode === "full") {
+      emergencePlanningArtifactSchema.parse(artifacts.emergence_planning)
+      emergenceReviewArtifactSchema.parse(artifacts.emergence_review)
+      const dependencyAudit = dependencyAuditArtifactSchema.parse(artifacts.dependency_audit)
+      assertSpacetimeGovernanceCoverage(dependencyAudit, governance, sourceUnitIds.length)
+      const semantic = semanticReviewArtifactSchema.parse(artifacts.semantic_review)
+      assertSemanticReviewCoversGovernance(governance, semantic)
+      this.log("debug", "turn.semantic_review.advisory", {
+        taskId,
+        graphStillDiscoverable: semantic.graphStillDiscoverable,
+        graphStillConcise: semantic.graphStillConcise,
+        continuityPreserved: semantic.continuityPreserved,
+        spacetimeContinuityPreserved: semantic.spacetimeContinuityPreserved,
+        sceneInventoryComplete: semantic.sceneInventoryComplete,
+        rejectedMutationIndexes: semantic.rejectedMutationIndexes,
+        rejectedSpacetimeBindingIndexes: semantic.rejectedSpacetimeBindingIndexes,
+        rejectedMutationSpacetimeSettlementIndexes: semantic.rejectedMutationSpacetimeSettlementIndexes,
+        rejectedAffectedFrontierRefs: semantic.rejectedAffectedFrontierRefs,
+        verificationProbeCount: semantic.verificationProbeAssessments.length,
+      })
+    }
     const readableGraphIds = new Set(readEvidence
       .filter((evidence) => evidence.ownerKind === "node" || evidence.ownerKind === "link")
       .map((evidence) => evidence.ownerId))
-    for (const state of readPriorFrontierStates(readEvidence, semantic.approvedAffectedFrontierRefs)) {
+    const approvedAffectedFrontierRefs = mode === "full"
+      ? semanticReviewArtifactSchema.parse(artifacts.semantic_review).approvedAffectedFrontierRefs
+      : []
+    for (const state of readPriorFrontierStates(readEvidence, approvedAffectedFrontierRefs)) {
       for (const reference of [
         state.frontierAnchorRef,
         ...state.lastSceneAnchorRefs,
@@ -3735,6 +3946,18 @@ export class TurnOrchestrator {
       }))
       await this.dependencies.persistence.stageDecisionRecords(decisionRecords)
     }
+    if (mode === "local") {
+      return [...new Set(mutations.flatMap((mutation) => {
+        switch (mutation.operation) {
+          case "create_node": return [mutation.node.id]
+          case "edit_node": return [mutation.nodeId]
+          case "retire_node": return [mutation.nodeId]
+          case "create_link": return [mutation.link.fromNodeId, mutation.link.toNodeId]
+          case "edit_link": return [mutation.next.fromNodeId, mutation.next.toNodeId]
+          case "retire_link": return []
+        }
+      }))]
+    }
     const frontier = frontierSettlementArtifactSchema.parse(artifacts.frontier_settlement)
     await this.dependencies.persistence.stageFrontiers(frontier.frontiers
       .map((item) => ({
@@ -3945,6 +4168,7 @@ type TurnExecutionState = {
   budgetWindowUsage: PhaseUsage
   budget: ModelCallBudget
   startPhaseIndex: number
+  adaptiveGraphGovernance?: boolean
   graphCapacityFeedback?: GraphCapacityFeedback
   queryDraftAuditRounds: number
   queryRevisionFeedback?: TurnPhaseInput["revisionFeedback"]
@@ -4842,14 +5066,4 @@ function resolveEmbeddedGraphReferences(
 
 function splitSourceUnits(content: string): string[] {
   return content.split(/\n\s*\n/u).map((unit) => unit.trim()).filter((unit) => unit.length > 0)
-}
-
-function ensureHeading(heading: string, content: string): string {
-  const normalized = content.trim()
-  return normalized.startsWith(`${heading}\n`) || normalized === heading ? normalized : `${heading}\n\n${normalized}`
-}
-
-function sanitizeFilename(filename: string): string {
-  const base = filename.split(/[\\/]/u).at(-1) ?? filename
-  return base.replace(/[<>:"|?*]/gu, "_")
 }

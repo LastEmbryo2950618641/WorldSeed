@@ -991,7 +991,7 @@ describe("TurnOrchestrator", () => {
     expect(result.graphAnchorIds).toContain(occurrenceContent.locationRef)
     expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual(["第一章 世界种子.md"])
     const chapter = readFileSync(join(fixture.workspaceRoot, result.chapterPath), "utf8")
-    expect(chapter.split("\n", 1)[0]).toBe(result.chapterHeading)
+    expect(chapter.split("\n", 1)[0]).toBe(`# ${result.chapterHeading}`)
 
     expect(await fixture.documentRepository.listCommittedChapters(fixture.projectId)).toHaveLength(1)
     const headingHits = await fixture.retrievalRepository.searchExact(
@@ -1650,7 +1650,7 @@ describe("TurnOrchestrator", () => {
     }
     const storedRequest = JSON.parse(spacetimeRun.request_json as string) as { input: TurnPhaseInput }
     const chapterContent = [
-      "第21章 世界种子",
+      "# 第21章 世界种子",
       "最初没有宏大的宣告，只有一处尚未被命名的所在，在某个能够继续向前的时刻安静地显现。",
       input.userInput,
       "变化留下了可以再次返回的痕迹。此后发生的一切，都将从这些已经写下的依据继续生长。",
@@ -3786,6 +3786,91 @@ describe("TurnOrchestrator", () => {
       taskId,
       status: "awaiting_user_decision",
     })])
+  })
+
+  it("uses the adaptive route for a revision with no graph change", async () => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    const first = await fixture.createOrchestrator(fake, fixture.commit).execute({
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "先建立一章可供修订的正文。",
+      chapterSequence: 1,
+      allowWorkspaceChapterReads: false,
+    })
+    if (first.kind !== "turn") throw new Error("Expected a committed turn")
+    const chapter = (await fixture.documentRepository.listCommittedChapters(fixture.projectId))[0]
+    if (chapter === undefined) throw new Error("Expected a committed chapter")
+    const sourceUnits = await fixture.documentRepository.listSourceUnits(fixture.projectId, chapter.sourceId)
+    const observedPhases: string[] = []
+    const model: AIModelPort = {
+      info: fake.info,
+      execute: async (request, options) => {
+        observedPhases.push(request.phase)
+        return fake.execute(request, options)
+      },
+    }
+
+    const result = await fixture.createOrchestrator(model, fixture.commit).execute({
+      workflow: "revision",
+      adaptiveGraphGovernance: true,
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "# 第一章 修订版\n\n[no-change] 用户只修改排版。",
+      chapterSequence: 1,
+      existingSourceUnitIds: sourceUnits.map((unit) => unit.id),
+      allowWorkspaceChapterReads: false,
+    })
+
+    expect(result).toMatchObject({ kind: "evolution", graphMutationCount: 0 })
+    expect(observedPhases).toEqual(["graph_governance"])
+    expect(await fixture.database.selectFrom("tasks").select("status").where("id", "=", result.taskId).executeTakeFirstOrThrow())
+      .toEqual({ status: "completed" })
+  })
+
+  it("commits a self-contained local revision without the full governance chain", async () => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    const first = await fixture.createOrchestrator(fake, fixture.commit).execute({
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "先建立一章可供修订的正文。",
+      chapterSequence: 1,
+      allowWorkspaceChapterReads: false,
+    })
+    if (first.kind !== "turn") throw new Error("Expected a committed turn")
+    const chapter = (await fixture.documentRepository.listCommittedChapters(fixture.projectId))[0]
+    if (chapter === undefined) throw new Error("Expected a committed chapter")
+    const sourceUnits = await fixture.documentRepository.listSourceUnits(fixture.projectId, chapter.sourceId)
+    const observedPhases: string[] = []
+    const model: AIModelPort = {
+      info: fake.info,
+      execute: async (request, options) => {
+        observedPhases.push(request.phase)
+        return fake.execute(request, options)
+      },
+    }
+
+    const result = await fixture.createOrchestrator(model, fixture.commit).execute({
+      workflow: "revision",
+      adaptiveGraphGovernance: true,
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "# 第一章 修订版\n\n用户新增了一个局部事实。",
+      chapterSequence: 1,
+      existingSourceUnitIds: sourceUnits.map((unit) => unit.id),
+      allowWorkspaceChapterReads: false,
+    })
+
+    expect(result).toMatchObject({ kind: "evolution", graphMutationCount: 5 })
+    expect(observedPhases).toEqual(["graph_governance"])
+    expect(await fixture.database.selectFrom("graph_revisions").selectAll().execute()).toHaveLength(10)
+    expect(await fixture.database.selectFrom("tasks").select("status").where("id", "=", result.taskId).executeTakeFirstOrThrow())
+      .toEqual({ status: "completed" })
   })
 })
 

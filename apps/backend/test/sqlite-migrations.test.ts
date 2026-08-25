@@ -43,7 +43,7 @@ describe("SQLite migrations", () => {
     await reopened.destroy()
   })
 
-  it("applies project migrations 001 through 023 with required SQLite pragmas", async () => {
+  it("applies project migrations through 028 with required SQLite pragmas", async () => {
     const path = temporaryDatabasePath("project.sqlite")
     const database = await openProjectDatabase(path)
     const migrations = await database.selectFrom("schema_migrations").selectAll().orderBy("version").execute()
@@ -57,7 +57,7 @@ describe("SQLite migrations", () => {
     const frontierColumns = await sql<{ name: string }>`PRAGMA table_info(frontier_refs)`.execute(database)
     const sourceUnitColumns = await sql<{ name: string }>`PRAGMA table_info(source_units)`.execute(database)
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23])
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28])
     expect(tableNames).toEqual(expect.objectContaining(new Set([
       "projects",
       "project_manifests",
@@ -66,6 +66,10 @@ describe("SQLite migrations", () => {
       "artifact_scopes",
       "turn_finalizations",
       "canonical_chapter_messages",
+      "chapter_revision_tasks",
+      "chapter_revision_finalizations",
+      "chapter_revision_reviews",
+      "chapter_revision_decisions",
       "model_context_chains",
       "id_counters",
       "model_context_messages",

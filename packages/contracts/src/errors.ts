@@ -16,6 +16,10 @@ export const backendErrorCodeValues = [
   "history_corrupt",
   "history_not_found",
   "checkpoint_unavailable",
+  "chapter_not_found",
+  "revision_not_found",
+  "revision_conflict",
+  "revision_invalid_state",
 ] as const
 export const backendErrorCodeSchema = z.enum(backendErrorCodeValues)
 export type BackendErrorCode = z.infer<typeof backendErrorCodeSchema>

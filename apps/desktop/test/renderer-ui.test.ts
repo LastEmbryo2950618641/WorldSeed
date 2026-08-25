@@ -13,6 +13,7 @@ import { ProjectSettingsDialog } from "../src/renderer/src/features/settings/Pro
 import { ModelConfigurationDialog } from "../src/renderer/src/features/settings/ModelConfigurationDialog.js"
 import {
   mergeGraphSlices,
+  shouldMonitorChapterRevision,
 } from "../src/renderer/src/app/App.js"
 import {
   buildGraphLevelsForLayout,
@@ -42,6 +43,7 @@ function editorDefaults(overrides: Partial<React.ComponentProps<typeof EditorAre
   return {
     selectedPath: undefined,
     content: "",
+    chapterBody: "",
     dirty: false,
     readOnly: false,
     running: false,
@@ -105,6 +107,8 @@ describe("renderer workbench UI contract", () => {
     const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
       selectedPath: "章节正文/第一章 雨夜来信.md",
       content: "# 第一章 雨夜来信\n\n雨落在旧港的铁皮屋顶上。\n\n林序听见桥下有人喊他的名字。",
+      chapterBody: "雨落在旧港的铁皮屋顶上。\n\n林序听见桥下有人喊他的名字。",
+      chapter: { chapterId: "chapter-1", sourceId: "source-1", heading: "第一章 雨夜来信" },
       readOnly: true,
     })))
 
@@ -112,6 +116,75 @@ describe("renderer workbench UI contract", () => {
     expect(html).toContain("第一章 雨夜来信")
     expect(html).toContain("雨落在旧港的铁皮屋顶上。")
     expect(html).not.toContain("mock-monaco-editor")
+  })
+
+  it("places revision checks below the full-width editor", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      selectedPath: "章节正文/第一章 雨夜来信.md",
+      content: "# 第一章 雨夜来信\n\n正式正文。",
+      chapter: { chapterId: "chapter-1", sourceId: "source-1", heading: "第一章 雨夜来信" },
+      revision: {
+        revisionTaskId: "revision-1",
+        projectId: "project-1",
+        chapterId: "chapter-1",
+        baseSourceId: "source-1",
+        proposedSourceId: "source-2",
+        heading: "第一章 雨夜来信",
+        contentDigest: "digest-2",
+        decision: "pending",
+        graphSyncStatus: "not_started",
+        status: "editing",
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      },
+      chapterBody: "正式正文。",
+      revisionContent: "修改后的正文。",
+    })))
+
+    expect(html).toContain("class=\"revision-workspace\"")
+    expect(html).toContain("章节标题")
+    expect(html).toContain("value=\"第一章 雨夜来信\"")
+    expect(html).toContain("修改后的正文。")
+    expect(html).not.toContain("# 第一章 雨夜来信")
+    expect(html.indexOf("revision-source-pane")).toBeLessThan(html.indexOf("revision-review-pane"))
+    expect(html).not.toContain("<h1>第一章 雨夜来信</h1>")
+  })
+
+  it("does not expose editing controls after chapter content enters graph synchronization", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      selectedPath: "章节正文/第一章 雨夜来信.md",
+      content: "# 第一章 雨夜来信\n\n修改后的正文。",
+      chapterBody: "修改后的正文。",
+      chapter: { chapterId: "chapter-1", sourceId: "source-2", heading: "第一章 雨夜来信" },
+      revision: {
+        revisionTaskId: "revision-1",
+        projectId: "project-1",
+        chapterId: "chapter-1",
+        baseSourceId: "source-1",
+        proposedSourceId: "source-2",
+        heading: "第一章 雨夜来信",
+        contentDigest: "digest-2",
+        decision: "submit",
+        graphSyncStatus: "pending",
+        status: "graph_sync_pending",
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      },
+      revisionContent: "修改后的正文。",
+      readOnly: true,
+    })))
+
+    expect(html).toContain("继续图同步")
+    expect(html).not.toContain("图同步中")
+    expect(html).not.toContain("修订检查")
+    expect(html).not.toContain("审核后提交")
+  })
+
+  it("only monitors graph synchronization after the backend reports it running", () => {
+    expect(shouldMonitorChapterRevision("pending")).toBe(false)
+    expect(shouldMonitorChapterRevision("running")).toBe(true)
+    expect(shouldMonitorChapterRevision("completed")).toBe(false)
+    expect(shouldMonitorChapterRevision("failed")).toBe(false)
   })
 
   it("renders non-chapter Markdown through a read-only aware editor", () => {

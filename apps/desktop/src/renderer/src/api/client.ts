@@ -1,5 +1,7 @@
 import {
   PROTOCOL_VERSION,
+  type ChapterRevisionReadResult,
+  type ChapterSummary,
   type BackendMethod,
   type ClientRequest,
   type HistoryCheckoutResult,
@@ -205,6 +207,16 @@ const demoMarkdownByPath: Readonly<Record<string, string>> = {
 
 let demoTurnStatusPollCount = 0
 let demoTurnStartedAtMs = Date.now()
+let demoChapter: ChapterSummary = {
+  chapterId: "demo-chapter-1",
+  sourceId: "demo-source-1",
+  heading: "第一章 雨夜来信",
+  publishPath: "章节正文/第一章 雨夜来信.md",
+  digest: "demo-chapter-digest",
+  createdAtMs: Date.now() - 3_600_000,
+}
+let demoChapterContent = demoMarkdownByPath[demoChapter.publishPath] ?? "# 第一章 雨夜来信\n\n暂无正文。"
+let demoChapterRevision: ChapterRevisionReadResult | undefined
 
 const demoPhaseUsage = [
   { phase: "interpret", inputTokens: 1_100, outputTokens: 250, cacheHitInputTokens: 700, cacheMissInputTokens: 400 },
@@ -320,6 +332,75 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
     }
     case "workspace.save":
       return { saved: true }
+    case "chapter.list":
+      return [structuredClone(demoChapter)]
+    case "chapter.read":
+      return { ...structuredClone(demoChapter), content: demoChapterContent, body: demoChapterContent.replace(/^#\s+[^\n]+\n*/u, "").trim() }
+    case "chapter.findActiveRevision":
+      return demoChapterRevision === undefined ? undefined : structuredClone(demoChapterRevision)
+    case "chapter.readRevision":
+      if (demoChapterRevision === undefined) throw new Error("Browser demo has no active chapter revision")
+      return structuredClone(demoChapterRevision)
+    case "chapter.startRevision": {
+      const now = Date.now()
+      const heading = typeof payload === "object" && payload !== null && "heading" in payload ? String(payload.heading) : demoChapter.heading
+      const body = typeof payload === "object" && payload !== null && "body" in payload ? String(payload.body) : demoChapterContent.replace(/^#\s+[^\n]+\n*/u, "").trim()
+      const content = `# ${heading}\n\n${body}`
+      demoChapterRevision = {
+        revisionTaskId: "demo-revision-1",
+        projectId: browserDemoProject?.projectId ?? "11111111-1111-4111-8111-111111111111",
+        chapterId: demoChapter.chapterId,
+        baseSourceId: demoChapter.sourceId,
+        proposedSourceId: "demo-proposed-source-1",
+        heading,
+        contentDigest: "demo-proposed-digest",
+        decision: "pending",
+        graphSyncStatus: "not_started",
+        status: "editing",
+        createdAtMs: now,
+        updatedAtMs: now,
+        proposedContent: content,
+        proposedBody: body,
+      }
+      return structuredClone(demoChapterRevision)
+    }
+    case "chapter.updateRevision": {
+      if (demoChapterRevision === undefined) throw new Error("Browser demo has no active chapter revision")
+      const heading = typeof payload === "object" && payload !== null && "heading" in payload ? String(payload.heading) : demoChapterRevision.heading
+      const body = typeof payload === "object" && payload !== null && "body" in payload ? String(payload.body) : demoChapterRevision.proposedBody
+      const content = `# ${heading}\n\n${body}`
+      demoChapterRevision = { ...demoChapterRevision, heading, proposedContent: content, proposedBody: body, contentDigest: "demo-proposed-digest-updated", status: "editing", updatedAtMs: Date.now() }
+      return structuredClone(demoChapterRevision)
+    }
+    case "chapter.reviewRevision": {
+      if (demoChapterRevision === undefined) throw new Error("Browser demo has no active chapter revision")
+      demoChapterRevision = {
+        ...demoChapterRevision,
+        review: {
+          reviewId: "demo-review-1",
+          revisionTaskId: demoChapterRevision.revisionTaskId,
+          proposedSourceId: demoChapterRevision.proposedSourceId,
+          contentDigest: demoChapterRevision.contentDigest,
+          issues: [],
+          recommendation: "no_issue",
+          createdAtMs: Date.now(),
+        },
+        status: "ready_to_submit",
+        updatedAtMs: Date.now(),
+      }
+      return structuredClone(demoChapterRevision)
+    }
+    case "chapter.submitRevision": {
+      if (demoChapterRevision === undefined) throw new Error("Browser demo has no active chapter revision")
+      demoChapterContent = demoChapterRevision.proposedContent
+      demoChapter = { ...demoChapter, heading: demoChapterRevision.heading, publishPath: `章节正文/${demoChapterRevision.heading}.md` }
+      demoChapterRevision = { ...demoChapterRevision, decision: "submit", submissionMode: "direct", graphSyncStatus: "completed", status: "completed", updatedAtMs: Date.now() }
+      return structuredClone(demoChapterRevision)
+    }
+    case "chapter.retireRevision":
+      if (demoChapterRevision === undefined) return undefined
+      demoChapterRevision = { ...demoChapterRevision, decision: "abandon", status: "retired", updatedAtMs: Date.now() }
+      return structuredClone(demoChapterRevision)
     case "model.list":
       return {
         models: [

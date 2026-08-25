@@ -30,6 +30,15 @@ import {
   historyReturnPreviousRoundPayloadSchema,
   historyRetentionPreviewPayloadSchema,
   historySaveManualPayloadSchema,
+  chapterListPayloadSchema,
+  chapterReadPayloadSchema,
+  chapterReadRevisionPayloadSchema,
+  chapterFindActiveRevisionPayloadSchema,
+  chapterStartRevisionPayloadSchema,
+  chapterUpdateRevisionPayloadSchema,
+  chapterReviewRevisionPayloadSchema,
+  chapterSubmitRevisionPayloadSchema,
+  chapterRetireRevisionPayloadSchema,
   modelListPayloadSchema,
   modelProfilesReadPayloadSchema,
   modelProfilesSavePayloadSchema,
@@ -47,7 +56,15 @@ import {
   worldQueryPayloadSchema,
 } from "@worldseed/contracts"
 import { digest } from "../core/index.js"
-import { ProjectLifecycleError, TurnBudgetExceededError, TurnPauseRequestedError } from "../application/index.js"
+import {
+  ChapterNotFoundError,
+  ProjectLifecycleError,
+  RevisionConflictError,
+  RevisionInvalidStateError,
+  RevisionNotFoundError,
+  TurnBudgetExceededError,
+  TurnPauseRequestedError,
+} from "../application/index.js"
 import { DeepSeekModelError } from "../infrastructure/index.js"
 import { errorDetails, runtimeLog } from "../infrastructure/diagnostics/index.js"
 import type { StoredPhaseRun, TurnOrchestratorInput, WorkflowExecutionResult } from "../application/index.js"
@@ -258,6 +275,116 @@ export class BackendFacade {
         await runtime.saveMarkdown(payload.relativePath, payload.content)
         return { relativePath: payload.relativePath, saved: true }
       }
+      case "chapter.list": {
+        const payload = chapterListPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().list(payload.projectId)
+      }
+      case "chapter.read": {
+        const payload = chapterReadPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().read(payload.projectId, payload.chapterId)
+      }
+      case "chapter.readRevision": {
+        const payload = chapterReadRevisionPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().readRevision(payload.revisionTaskId)
+      }
+      case "chapter.findActiveRevision": {
+        const payload = chapterFindActiveRevisionPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().findActiveRevision(payload.projectId, payload.chapterId)
+      }
+      case "chapter.startRevision": {
+        const payload = chapterStartRevisionPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().start(payload)
+      }
+      case "chapter.updateRevision": {
+        const payload = chapterUpdateRevisionPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().update(payload.revisionTaskId, payload.heading, payload.body)
+      }
+      case "chapter.reviewRevision": {
+        const payload = chapterReviewRevisionPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().review({
+          revisionTaskId: payload.revisionTaskId,
+          ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
+          ...(payload.deadlineMs === undefined ? {} : { deadlineMs: payload.deadlineMs }),
+        }, this.resolveModel(payload.model))
+      }
+      case "chapter.submitRevision": {
+        const payload = chapterSubmitRevisionPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        const service = runtime.createChapterRevisionService()
+        const revision = await service.submit({
+          revisionTaskId: payload.revisionTaskId,
+          workspaceRootRef: payload.workspaceRootRef,
+          mode: payload.mode,
+          forced: payload.forced,
+          ...(payload.reviewId === undefined ? {} : { reviewId: payload.reviewId }),
+          ...(payload.note === undefined ? {} : { note: payload.note }),
+        })
+        if (revision.status === "graph_sync_pending") {
+          runtimeLog("debug", "backend-facade", "chapter.revision.graph-sync.scheduled", {
+            revisionTaskId: payload.revisionTaskId,
+          })
+          void service.submit({
+            revisionTaskId: payload.revisionTaskId,
+            workspaceRootRef: payload.workspaceRootRef,
+            mode: payload.mode,
+            forced: payload.forced,
+            model: this.resolveModel(payload.model),
+            ...(payload.reviewId === undefined ? {} : { reviewId: payload.reviewId }),
+            ...(payload.note === undefined ? {} : { note: payload.note }),
+          }).then(async (completedRevision) => {
+            if (completedRevision.status !== "completed") return
+            runtimeLog("info", "backend-facade", "chapter.revision.graph-sync.completed", {
+              revisionTaskId: completedRevision.revisionTaskId,
+            })
+            try {
+              await runtime.saveAutomaticHistory({
+                operationId: completedRevision.revisionTaskId,
+                name: `章节修订 ${completedRevision.chapterId}`,
+                taskId: completedRevision.revisionTaskId,
+                createdAtMs: this.container.now(),
+              })
+            } catch (error) {
+              runtimeLog("error", "backend-facade", "chapter.revision.history.failed", {
+                revisionTaskId: completedRevision.revisionTaskId,
+                error: errorDetails(error),
+              })
+            }
+          }).catch((error) => {
+            runtimeLog("error", "backend-facade", "chapter.revision.graph-sync.failed", {
+              revisionTaskId: payload.revisionTaskId,
+              error: errorDetails(error),
+            })
+          })
+        }
+        if (revision.status === "completed") {
+          try {
+            await runtime.saveAutomaticHistory({
+              operationId: revision.revisionTaskId,
+              name: `章节修订 ${revision.chapterId}`,
+              taskId: revision.revisionTaskId,
+              createdAtMs: this.container.now(),
+            })
+          } catch (error) {
+            runtimeLog("error", "backend-facade", "chapter.revision.history.failed", {
+              revisionTaskId: revision.revisionTaskId,
+              error: errorDetails(error),
+            })
+          }
+        }
+        return revision
+      }
+      case "chapter.retireRevision": {
+        const payload = chapterRetireRevisionPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().retire(payload.revisionTaskId)
+      }
       case "model.list": {
         const payload = modelListPayloadSchema.parse(request.payload)
         return this.container.modelCatalog.list(payload)
@@ -437,7 +564,7 @@ export class BackendFacade {
   }
 
   private async startWorkflow(input: Readonly<{
-    workflow: "turn" | "query" | "evolution"
+    workflow: "turn" | "query" | "evolution" | "revision"
     projectId: ProjectId
     workspaceRootRef: string
     userInput: string
@@ -716,13 +843,36 @@ export class BackendFacade {
     result: WorkflowExecutionResult,
     taskId: string,
     input: Readonly<{
-      workflow: "turn" | "query" | "evolution"
+      workflow: "turn" | "query" | "evolution" | "revision"
       projectId: ProjectId
       workspaceRootRef: string
       model?: ModelSelection
       executionOrigin?: TurnOrchestratorInput["executionOrigin"]
     }>,
   ): void {
+    if (input.workflow === "revision") {
+      void runtime.createChapterRevisionService().completeGraphSync(taskId).then(async (revision) => {
+        if (revision === undefined) return
+        try {
+          await runtime.saveAutomaticHistory({
+            operationId: taskId,
+            name: `章节修订 ${revision.chapterId}`,
+            taskId,
+            createdAtMs: this.container.now(),
+          })
+          runtimeLog("info", "backend-facade", "chapter.revision.history.completed", {
+            taskId,
+            revisionTaskId: revision.revisionTaskId,
+          })
+        } catch (error) {
+          runtimeLog("error", "backend-facade", "chapter.revision.history.failed", {
+            taskId,
+            error: errorDetails(error),
+          })
+        }
+      })
+      return
+    }
     if (result.kind === "evolution" && input.executionOrigin?.kind === "automatic_evolution") {
       this.handleAutomaticEvolutionStopped(input.projectId, taskId, true)
       return
@@ -979,6 +1129,14 @@ export class BackendFacade {
       code = "model_failure"
     } else if (error instanceof ProjectLifecycleError) {
       code = "workspace_failure"
+    } else if (error instanceof ChapterNotFoundError) {
+      code = "chapter_not_found"
+    } else if (error instanceof RevisionNotFoundError) {
+      code = "revision_not_found"
+    } else if (error instanceof RevisionConflictError) {
+      code = "revision_conflict"
+    } else if (error instanceof RevisionInvalidStateError) {
+      code = "revision_invalid_state"
     }
     return this.createError(code, message, recoverable)
   }
@@ -1028,9 +1186,9 @@ function toPublicTaskSnapshot(task: TaskRecord): Readonly<Record<string, unknown
 }
 
 function requireResolvedApiKey(apiKey: string | undefined): string {
-  if (apiKey === undefined) throw new Error("DeepSeek credential was not resolved by the desktop credential vault")
-  return apiKey
-}
+    if (apiKey === undefined) throw new Error("Model credential was not resolved by the desktop credential vault")
+    return apiKey
+  }
 
 function buildAutomaticEvolutionInstruction(triggerTaskId: string): string {
   return [

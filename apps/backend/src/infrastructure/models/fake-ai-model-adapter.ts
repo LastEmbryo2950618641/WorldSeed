@@ -156,7 +156,6 @@ export class FakeAiModelAdapter implements AIModelPort {
         return {
           chapterNumberText: `第${chineseNumber(input.chapterSequence)}章`,
           heading: `第${chineseNumber(input.chapterSequence)}章 世界种子`,
-          filename: `第${chineseNumber(input.chapterSequence)}章 世界种子.md`,
           continuityEvidenceRefs: [],
         }
       case "dependency_audit":
@@ -198,6 +197,12 @@ export class FakeAiModelAdapter implements AIModelPort {
           evidenceClosed: true,
           leaksUnobservedInformation: false,
           requiresWorkflowUpgrade: false,
+        }
+      case "revision_review":
+        return {
+          issues: [],
+          recommendation: "no_issue",
+          finalSelfReview: "The proposed revision was checked for continuity using only the supplied revision context.",
         }
       case "graph_governance":
         return this.createGraphGovernanceArtifact(input)
@@ -412,6 +417,27 @@ export class FakeAiModelAdapter implements AIModelPort {
 
   private createGraphGovernanceArtifact(input: TurnPhaseInput): GraphGovernanceArtifact {
     if (input.sourceId === undefined) throw new Error("Graph governance requires a persisted source")
+    const isRevision = input.workflow === "revision"
+    const requestedMode = input.userInput.includes("[no-change]")
+      ? "no_change" as const
+      : input.userInput.includes("[full-governance]")
+        ? "full_governance" as const
+        : isRevision
+          ? "local_governance" as const
+          : "full_governance" as const
+    if (requestedMode === "no_change") {
+      return {
+        executionMode: requestedMode,
+        mutations: [],
+        retrievalProjections: [],
+        settlementRecords: [],
+        mutationSpacetimeSettlements: [],
+        sceneSpacetimeBindings: [],
+        affectedFrontierRefs: [],
+        archiveOutletRefs: [],
+        decisionRecords: [],
+      }
+    }
     const mutations: GraphGovernanceArtifact["mutations"] = [
       {
         operation: "create_node",
@@ -430,6 +456,7 @@ export class FakeAiModelAdapter implements AIModelPort {
       { operation: "create_link", ref: "local:location-link", fromRef: "local:occurrence", toRef: "local:location", content: { note: "space entry" } },
     ]
     return {
+      executionMode: requestedMode,
       mutations,
       retrievalProjections: [{
         ownerKind: "node",
@@ -470,7 +497,7 @@ export class FakeAiModelAdapter implements AIModelPort {
         explanation: "The occurrence, time, and location nodes form the initial scene binding",
         selfReview: "The binding covers every source unit without inventing a domain schema",
       }],
-      affectedFrontierRefs: ["local:occurrence"],
+      affectedFrontierRefs: isRevision ? [] : ["local:occurrence"],
       archiveOutletRefs: [],
       decisionRecords: [{
         decisionKind: "initial_graph_governance",

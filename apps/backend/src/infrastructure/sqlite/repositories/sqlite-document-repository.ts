@@ -89,6 +89,25 @@ export class SqliteDocumentRepository implements DocumentRepository {
       .execute()
     return rows.map(mapDocumentVersion)
   }
+
+  public async findStoredVersion(projectId: ProjectId, sourceId: string): Promise<DocumentVersion | undefined> {
+    const row = await this.database.selectFrom("document_versions").selectAll()
+      .where("project_id", "=", projectId)
+      .where("source_id", "=", sourceId)
+      .orderBy("created_at", "desc")
+      .executeTakeFirst()
+    return row === undefined ? undefined : mapDocumentVersion(row)
+  }
+
+  public async findCurrentChapter(projectId: ProjectId, chapterId: string): Promise<DocumentVersion | undefined> {
+    const row = await this.database.selectFrom("active_document_heads")
+      .innerJoin("document_versions", "document_versions.id", "active_document_heads.document_version_id")
+      .selectAll("document_versions")
+      .where("active_document_heads.project_id", "=", projectId)
+      .where("active_document_heads.chapter_id", "=", chapterId)
+      .executeTakeFirst()
+    return row === undefined ? undefined : mapDocumentVersion(row)
+  }
 }
 
 async function assertPendingScope(

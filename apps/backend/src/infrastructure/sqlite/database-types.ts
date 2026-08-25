@@ -146,6 +146,67 @@ export type CanonicalChapterMessageRow = {
   created_at: Timestamp
 }
 
+export type ChapterRevisionTaskRow = {
+  id: string
+  project_id: string
+  chapter_id: string
+  base_source_id: string
+  proposed_source_id: string
+  predecessor_source_id: string | null
+  heading: string
+  content_ref: string
+  content_digest: string
+  base_content_digest: string
+  submission_mode: "direct" | "reviewed" | null
+  decision: "pending" | "submit" | "abandon"
+  review_id: string | null
+  graph_sync_status: "not_started" | "pending" | "running" | "completed" | "failed"
+  status: string
+  content_scope_id: string | null
+  graph_sync_scope_id: string | null
+  graph_sync_task_id: string | null
+  decision_id: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
+export type ChapterRevisionReviewRow = {
+  id: string
+  revision_task_id: string
+  proposed_source_id: string
+  content_digest: string
+  issues_json: JsonText
+  recommendation: "no_issue" | "review_suggested" | "material_conflict"
+  created_at: Timestamp
+}
+
+export type ChapterRevisionDecisionRow = {
+  id: string
+  revision_task_id: string
+  proposed_source_id: string
+  content_digest: string
+  mode: "direct" | "reviewed"
+  action: "submit" | "abandon"
+  forced: number
+  reason: "user_forced_edit" | "user_reviewed_edit"
+  review_id: string | null
+  note: string | null
+  created_at: Timestamp
+}
+
+export type ChapterRevisionFinalizationRow = {
+  id: string
+  project_id: string
+  revision_task_id: string
+  proposed_source_id: string
+  content_scope_id: string
+  graph_sync_task_id: string | null
+  content_digest: string
+  status: "prepared" | "content_committed" | "chapter_published" | "chapter_registered" | "graph_sync_pending" | "graph_sync_running" | "completed"
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
 export type ModelContextChainRow = {
   id: string
   project_id: string
@@ -628,6 +689,10 @@ export type ProjectDatabase = {
   artifact_scopes: ArtifactScopeRow
   turn_finalizations: TurnFinalizationRow
   canonical_chapter_messages: CanonicalChapterMessageRow
+  chapter_revision_tasks: ChapterRevisionTaskRow
+  chapter_revision_reviews: ChapterRevisionReviewRow
+  chapter_revision_decisions: ChapterRevisionDecisionRow
+  chapter_revision_finalizations: ChapterRevisionFinalizationRow
   model_context_chains: ModelContextChainRow
   model_context_messages: ModelContextMessageRow
   active_scope_refs: ActiveScopeRefRow

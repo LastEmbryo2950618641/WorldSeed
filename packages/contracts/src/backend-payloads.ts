@@ -145,6 +145,50 @@ export type WorkspaceReadPayload = z.infer<typeof workspaceReadPayloadSchema>
 export const workspaceSavePayloadSchema = workspaceReadPayloadSchema.extend({ content: z.string() })
 export type WorkspaceSavePayload = z.infer<typeof workspaceSavePayloadSchema>
 
+export const chapterListPayloadSchema = projectSettingsReadPayloadSchema
+export const chapterReadPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  chapterId: z.string().min(1),
+})
+export const chapterReadRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  revisionTaskId: idSchema,
+})
+export const chapterFindActiveRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  chapterId: z.string().min(1),
+})
+export const chapterStartRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  chapterId: z.string().min(1),
+  baseSourceId: z.string().min(1),
+  heading: z.string().min(1),
+  body: z.string().min(1),
+})
+export const chapterUpdateRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  revisionTaskId: idSchema,
+  heading: z.string().min(1),
+  body: z.string().min(1),
+})
+export const chapterReviewRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  revisionTaskId: idSchema,
+  model: modelSelectionSchema.optional(),
+  maxModelCalls: z.number().int().positive().optional(),
+  deadlineMs: z.number().int().positive().optional(),
+})
+export const chapterSubmitRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  revisionTaskId: idSchema,
+  model: modelSelectionSchema.optional(),
+  mode: z.enum(["direct", "reviewed"]),
+  forced: z.boolean(),
+  reviewId: idSchema.optional(),
+  note: z.string().max(4_000).optional(),
+})
+export const chapterRetireRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  revisionTaskId: idSchema,
+})
+export type ChapterStartRevisionPayload = z.infer<typeof chapterStartRevisionPayloadSchema>
+export type ChapterUpdateRevisionPayload = z.infer<typeof chapterUpdateRevisionPayloadSchema>
+export type ChapterReviewRevisionPayload = z.infer<typeof chapterReviewRevisionPayloadSchema>
+export type ChapterSubmitRevisionPayload = z.infer<typeof chapterSubmitRevisionPayloadSchema>
+export type ChapterRetireRevisionPayload = z.infer<typeof chapterRetireRevisionPayloadSchema>
+
 export const modelListPayloadSchema = z.object({
   baseUrl: z.url(),
   apiKey: z.string().trim().min(1).max(4096),
@@ -240,6 +284,15 @@ export const backendPayloadSchemas = {
   "workspace.list": projectWorkspacePayloadSchema,
   "workspace.read": workspaceReadPayloadSchema,
   "workspace.save": workspaceSavePayloadSchema,
+  "chapter.list": chapterListPayloadSchema,
+  "chapter.read": chapterReadPayloadSchema,
+  "chapter.readRevision": chapterReadRevisionPayloadSchema,
+  "chapter.findActiveRevision": chapterFindActiveRevisionPayloadSchema,
+  "chapter.startRevision": chapterStartRevisionPayloadSchema,
+  "chapter.updateRevision": chapterUpdateRevisionPayloadSchema,
+  "chapter.reviewRevision": chapterReviewRevisionPayloadSchema,
+  "chapter.submitRevision": chapterSubmitRevisionPayloadSchema,
+  "chapter.retireRevision": chapterRetireRevisionPayloadSchema,
   "model.list": modelListPayloadSchema,
   "model.profiles.read": modelProfilesReadPayloadSchema,
   "model.profiles.save": modelProfilesSavePayloadSchema,
