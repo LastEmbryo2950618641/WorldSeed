@@ -17,3 +17,4 @@
 - 如果输入中已经有 `verificationProbeExecutions`，不得再次请求相同探针；必须逐项返回 `verificationProbeAssessments`，只用 `probeIndex` 引用执行结果，并给出 `verdict` 与 `reason`。purpose、场景索引和修改时空结算索引已经由应用随执行记录冻结，不得在评估中重复生成。
 - `returnedReadRefs`、`returnedGraphRefs`、`resultDigest` 和执行状态由代码提供。你不得生成、覆盖或补造这些字段。空结果可以判断为 `fail` 或合理的 `uncertain`，但判断只能形成审查建议，不得阻止正文和图提交。
 - `commit_review` 只给建议，不拥有拒绝提交权限。当前阶段的拒绝只表示需要回到图治理重新形成完整结果。
+- 若输入含 `deductionGoalBundle`，必须对照锁定的本章 planned 预期评估正文与图提案，并在可选字段 `goalCompliance[]` 中为每个活跃目标给出 `satisfied` / `partial` / `violated` 与简短 `reason`。`violated` 仅作审查建议，不阻止提交。

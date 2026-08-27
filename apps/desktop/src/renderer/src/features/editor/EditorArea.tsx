@@ -1,7 +1,46 @@
-import { Editor } from "@monaco-editor/react"
-import { useEffect, useState } from "react"
-import type { ChapterRevision } from "@worldseed/contracts"
-import { AlertTriangle, BookOpenText, Check, CheckCircle2, Eye, FileDiff, FileText, GitBranch, GitCompare, Play, RotateCcw, Save, Send, Settings2, ShieldCheck, Sparkles, X } from "lucide-react"
+import { Editor, type Monaco } from "@monaco-editor/react"
+import { useEffect, useRef, useState } from "react"
+import type { editor } from "monaco-editor"
+import type { ChapterRevision, ChapterRevisionConversationMessage, SynopsisConversationMessage, SynopsisConversationSession } from "@worldseed/contracts"
+import { SynopsisConversationComposer } from "./SynopsisConversationComposer.js"
+import { isSynopsisMarkdownPath } from "./synopsis-path.js"
+import { AlertTriangle, BookOpenText, RotateCcw, Save, Sparkles } from "lucide-react"
+import { ChapterDraftDiffView } from "./ChapterDraftDiffView.js"
+import { ChapterDraftVersionsPrototype, type DraftDisplayMode } from "./ChapterDraftVersionsPrototype.js"
+import { ChapterWorkspaceToolbar } from "./ChapterWorkspaceToolbar.js"
+import { ChapterReadingToolbar } from "./ChapterReadingToolbar.js"
+import { ChapterEditorChromePanel, ChapterEditorChromeToggle } from "./ChapterEditorChrome.js"
+import { ChapterEditorStatusBar } from "./ChapterEditorStatusBar.js"
+import {
+  appendManualDraftVersion,
+  buildPrototypeDraftVersions,
+  COMMITTED_DRAFT_VERSION_ID,
+  mergeDraftVersionContent,
+  relabelLatestDraftVersion,
+  type PrototypeDraftVersion,
+} from "./chapter-draft-versions-prototype.js"
+import { chapterBodyStyle, useChapterReadingPreferences } from "./chapter-reading-preferences.js"
+import type { ChapterDocumentPane, RevisionStage } from "./chapter-workspace-types.js"
+import { UiTooltip } from "../../components/UiTooltip.js"
+
+/** Space between text and scrollbar reserved for the floating toolbar (px). */
+const CHAPTER_EDITOR_TOOLBAR_LANE = 52
+/** Scrollbar width used to position the toolbar just left of it (px). */
+const CHAPTER_EDITOR_SCROLLBAR_WIDTH = 6
+
+function syncChapterEditorWrap(
+  editorInstance: editor.IStandaloneCodeEditor,
+  monaco: Monaco,
+): void {
+  const layout = editorInstance.getLayoutInfo()
+  const fontInfo = editorInstance.getOption(monaco.editor.EditorOption.fontInfo)
+  const usableWidth = layout.contentWidth - CHAPTER_EDITOR_TOOLBAR_LANE
+  const columns = Math.max(24, Math.floor(usableWidth / fontInfo.typicalHalfwidthCharacterWidth))
+  editorInstance.updateOptions({
+    wordWrap: "bounded",
+    wordWrapColumn: columns,
+  })
+}
 
 type Props = Readonly<{
   selectedPath: string | undefined
@@ -30,74 +69,88 @@ type Props = Readonly<{
   chapterBody: string
   revision: ChapterRevision | undefined
   revisionContent: string | undefined
-  onStartRevision(heading: string, body: string): Promise<ChapterRevision>
+  onEnsureRevision(heading: string, body: string): Promise<ChapterRevision | undefined>
   onUpdateRevision(revisionTaskId: string, heading: string, body: string): Promise<ChapterRevision>
   onReviewRevision(revisionTaskId: string): Promise<ChapterRevision>
   onSubmitRevision(input: Readonly<{ revisionTaskId: string; mode: "direct" | "reviewed"; forced: boolean; reviewId?: string }>): Promise<ChapterRevision>
   onRetireRevision(revisionTaskId: string): Promise<ChapterRevision>
+  chapterConversationMessages: readonly ChapterRevisionConversationMessage[]
+  projectId: string | undefined
+  workspaceRootRef: string | undefined
+  synopsisSession: SynopsisConversationSession | undefined
+  synopsisMessages: readonly SynopsisConversationMessage[]
+  synopsisBusy: boolean
+  onSynopsisSend(message: string): Promise<void>
+  onOpenSynopsisFile(path: string): void
+  diffFocusMessageId: string | undefined
+  onDiffFocusHandled(): void
 }>
 
 export function EditorArea(props: Props): React.JSX.Element {
   const mode = props.selectedPath === undefined
     ? "home"
+    : isSynopsisMarkdownPath(props.selectedPath)
+      ? "synopsis"
     : props.selectedPath.startsWith("章节正文/")
       ? "chapter"
       : "markdown"
+  const dockChapterToolbar = mode === "chapter"
+
+  const documentPane = mode === "home"
+    ? <SynopsisConversationComposer
+        projectId={props.projectId}
+        workspaceRootRef={props.workspaceRootRef}
+        session={props.synopsisSession}
+        messages={props.synopsisMessages}
+        busy={props.synopsisBusy}
+        running={props.running}
+        onSend={props.onSynopsisSend}
+        onStartTurn={props.onRun}
+        onOpenSynopsisFile={props.onOpenSynopsisFile}
+        descriptionRule={props.descriptionRule}
+        proseRule={props.proseRule}
+        minimumWordCount={props.minimumWordCount}
+        maximumWordCount={props.maximumWordCount}
+        wordCountValid={props.wordCountValid}
+        descriptionRules={props.descriptionRules}
+        proseRules={props.proseRules}
+        onDescriptionRuleChange={props.onDescriptionRuleChange}
+        onProseRuleChange={props.onProseRuleChange}
+        onMinimumWordCountChange={props.onMinimumWordCountChange}
+        onMaximumWordCountChange={props.onMaximumWordCountChange}
+      />
+    : mode === "synopsis"
+      ? <MarkdownEditor content={props.content} readOnly={false} onContentChange={props.onContentChange} />
+    : mode === "chapter" ? <ChapterRevisionEditor
+    path={props.selectedPath}
+    content={props.content}
+    body={props.chapterBody}
+    chapter={props.chapter}
+    revision={props.revision}
+    revisionContent={props.revisionContent}
+    conversationMessages={props.chapterConversationMessages}
+    dockToolbar={dockChapterToolbar}
+    diffFocusMessageId={props.diffFocusMessageId}
+    onDiffFocusHandled={props.onDiffFocusHandled}
+    onEnsureRevision={props.onEnsureRevision}
+    onUpdateRevision={props.onUpdateRevision}
+    onReviewRevision={props.onReviewRevision}
+    onSubmitRevision={props.onSubmitRevision}
+    onRetireRevision={props.onRetireRevision}
+  /> : <MarkdownEditor
+    content={props.content}
+    readOnly={props.readOnly}
+    onContentChange={props.onContentChange}
+  />
 
   return <section className="editor-area">
     <div className="editor-tabs">
       <button className={props.selectedPath === undefined ? "active" : ""} onClick={props.onHome}><BookOpenText size={15} /> 创作台</button>
       {props.selectedPath === undefined ? null : <button className="active"><span>{props.selectedPath.split("/").at(-1)}</span>{props.dirty ? <i /> : null}</button>}
-      <div className="editor-tab-actions"><button title="保存" disabled={!props.dirty || props.readOnly} onClick={props.onSave}><Save size={15} /></button></div>
+      <div className="editor-tab-actions"><UiTooltip label="保存"><button aria-label="保存" disabled={!props.dirty || props.readOnly} onClick={props.onSave}><Save size={15} /></button></UiTooltip></div>
     </div>
-    <div className="editor-document">
-      {mode === "home" ? <WorkbenchHome /> : mode === "chapter" ? <ChapterRevisionEditor
-        path={props.selectedPath}
-        content={props.content}
-        body={props.chapterBody}
-        chapter={props.chapter}
-        revision={props.revision}
-        revisionContent={props.revisionContent}
-        onStartRevision={props.onStartRevision}
-        onUpdateRevision={props.onUpdateRevision}
-        onReviewRevision={props.onReviewRevision}
-        onSubmitRevision={props.onSubmitRevision}
-        onRetireRevision={props.onRetireRevision}
-      /> : <MarkdownEditor
-        content={props.content}
-        readOnly={props.readOnly}
-        onContentChange={props.onContentChange}
-      />}
-    </div>
-    <TurnComposer {...props} />
+    <div className="editor-document">{documentPane}</div>
   </section>
-}
-
-function WorkbenchHome(): React.JSX.Element {
-  return <div className="workbench-home">
-    <section className="hero-panel">
-      <span className="mode-pill"><Sparkles size={14} /> 创作台首页</span>
-      <h1>从本轮输入开始，让世界按已读取依据继续生长</h1>
-      <p>这里不是聊天框。每次推演都会先装配规则、选择性读取设定与参考文件，再召回局部世界图，最后才生成章节正文并回写持久图。</p>
-    </section>
-    <section className="home-cards">
-      <article>
-        <FileText size={18} />
-        <strong>Markdown 材料</strong>
-        <p>左侧维护用户规则、设定集、参考文件和表现输出；基础规则只读。</p>
-      </article>
-      <article>
-        <GitBranch size={18} />
-        <strong>动态图召回</strong>
-        <p>正式正文只依赖本轮实际读取的旧图、资料和用户输入，不一次塞入整张图。</p>
-      </article>
-      <article>
-        <Eye size={18} />
-        <strong>表现控制</strong>
-        <p>描写规则、笔风规则和字数约束作为本轮强调提示，不自动成为世界事实。</p>
-      </article>
-    </section>
-  </div>
 }
 
 function MarkdownEditor(props: {
@@ -124,8 +177,6 @@ function MarkdownEditor(props: {
         }}
       />
 }
-
-type RevisionStage = "idle" | "editing" | "reviewing" | "reviewed" | "submitted"
 
 type RevisionIssue = Readonly<{
   category: string
@@ -154,74 +205,283 @@ function ChapterRevisionEditor(props: {
   chapter: Readonly<{ chapterId: string; sourceId: string; heading?: string }> | undefined
   revision: ChapterRevision | undefined
   revisionContent: string | undefined
-  onStartRevision(heading: string, body: string): Promise<ChapterRevision>
+  conversationMessages: readonly ChapterRevisionConversationMessage[]
+  dockToolbar: boolean
+  diffFocusMessageId: string | undefined
+  onDiffFocusHandled(): void
+  onEnsureRevision(heading: string, body: string): Promise<ChapterRevision | undefined>
   onUpdateRevision(revisionTaskId: string, heading: string, body: string): Promise<ChapterRevision>
   onReviewRevision(revisionTaskId: string): Promise<ChapterRevision>
   onSubmitRevision(input: Readonly<{ revisionTaskId: string; mode: "direct" | "reviewed"; forced: boolean; reviewId?: string }>): Promise<ChapterRevision>
   onRetireRevision(revisionTaskId: string): Promise<ChapterRevision>
 }): React.JSX.Element {
-  const [stage, setStage] = useState<RevisionStage>(() => stageFromRevision(props.revision))
-  const [heading, setHeading] = useState(props.revision?.heading ?? props.chapter?.heading ?? "未命名章节")
-  const [draft, setDraft] = useState(props.revisionContent ?? props.body)
-  const [committedHeading, setCommittedHeading] = useState(props.chapter?.heading ?? "未命名章节")
-  const [committedContent, setCommittedContent] = useState(props.body)
+  const committedHeading = props.chapter?.heading ?? props.revision?.heading ?? "未命名章节"
+  const initialDraft = resolveDraftBody(props.body, props.revisionContent, props.conversationMessages)
+  const [heading, setHeading] = useState(committedHeading)
+  const [draft, setDraft] = useState(initialDraft)
   const [revision, setRevision] = useState<ChapterRevision | undefined>(props.revision)
+  const [pane, setPane] = useState<ChapterDocumentPane>("draft")
   const [busy, setBusy] = useState(false)
-  const [submittedMode, setSubmittedMode] = useState<"direct" | "reviewed">(() => props.revision?.submissionMode ?? "direct")
   const [actionError, setActionError] = useState<string>()
+  const [reviewStage, setReviewStage] = useState<RevisionStage>(() => reviewStageFromRevision(props.revision))
+  const [readingPreferences, updateReadingPreferences] = useChapterReadingPreferences()
+  const [displayMode, setDisplayMode] = useState<DraftDisplayMode>("edit")
+  const [selectedVersionId, setSelectedVersionId] = useState(COMMITTED_DRAFT_VERSION_ID)
+  const [diffBaseVersionId, setDiffBaseVersionId] = useState(COMMITTED_DRAFT_VERSION_ID)
+  const [diffHeadVersionId, setDiffHeadVersionId] = useState(COMMITTED_DRAFT_VERSION_ID)
+  const [editorChromeOpen, setEditorChromeOpen] = useState(false)
+  const [draftVersionChain, setDraftVersionChain] = useState<PrototypeDraftVersion[]>(() => buildPrototypeDraftVersions({
+    committedHeading,
+    committedBody: props.body,
+    messages: props.conversationMessages,
+  }))
+  const [lastSavedAtMs, setLastSavedAtMs] = useState<number | undefined>(props.revision?.updatedAtMs)
+  const [draftSaveState, setDraftSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle")
+  const previousSuggestionRef = useRef<string | undefined>(undefined)
+  const previousVersionCountRef = useRef(0)
+  const ensuringRevisionRef = useRef(false)
+  const chapterEditorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
+  const monacoRef = useRef<Monaco | null>(null)
+  const chapterEditorLayoutCleanupRef = useRef<(() => void) | null>(null)
+  const agentProposalCountRef = useRef(0)
+  const autosaveSnapshotRef = useRef<{ heading: string; body: string }>({ heading: committedHeading, body: initialDraft })
+  const draftVersions = draftVersionChain
+  const latestVersionId = draftVersions.at(-1)?.versionId ?? COMMITTED_DRAFT_VERSION_ID
+
+  useEffect(() => {
+    return () => {
+      chapterEditorLayoutCleanupRef.current?.()
+      chapterEditorLayoutCleanupRef.current = null
+      chapterEditorRef.current = null
+      monacoRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!props.dockToolbar || chapterEditorRef.current === null || monacoRef.current === null) return
+    syncChapterEditorWrap(chapterEditorRef.current, monacoRef.current)
+  }, [props.dockToolbar, readingPreferences.fontSize])
+
+  useEffect(() => {
+    setDisplayMode("edit")
+    setSelectedVersionId(COMMITTED_DRAFT_VERSION_ID)
+    setDiffBaseVersionId(COMMITTED_DRAFT_VERSION_ID)
+    setDiffHeadVersionId(COMMITTED_DRAFT_VERSION_ID)
+    previousSuggestionRef.current = undefined
+    previousVersionCountRef.current = 0
+    agentProposalCountRef.current = props.conversationMessages.filter(
+      (message) => message.role === "assistant" && message.proposal !== undefined,
+    ).length
+    setEditorChromeOpen(false)
+    const built = buildPrototypeDraftVersions({
+      committedHeading,
+      committedBody: props.body,
+      messages: props.conversationMessages,
+    })
+    setDraftVersionChain(built)
+    const initialBody = resolveDraftBody(props.body, props.revisionContent, props.conversationMessages)
+    autosaveSnapshotRef.current = { heading: committedHeading, body: initialBody }
+    setLastSavedAtMs(props.revision?.updatedAtMs)
+    setDraftSaveState("idle")
+  }, [props.path])
+
   useEffect(() => {
     setHeading(props.revision?.heading ?? props.chapter?.heading ?? "未命名章节")
-    setDraft(props.revisionContent ?? props.body)
-    setCommittedHeading(props.chapter?.heading ?? "未命名章节")
-    setCommittedContent(props.body)
+    const nextDraft = resolveDraftBody(props.body, props.revisionContent, props.conversationMessages)
+    setDraft(nextDraft)
     setRevision(props.revision)
-    setSubmittedMode(props.revision?.submissionMode ?? "direct")
-    setStage(stageFromRevision(props.revision))
-  }, [props.path, props.body, props.chapter?.heading, props.revision, props.revisionContent])
-
-  const changed = heading !== committedHeading || draft !== committedContent
-  const handleDraftChange = (value: string): void => {
-    setDraft(value)
-    if (stage === "reviewed") setStage("editing")
-  }
-  const startEditing = async (): Promise<void> => {
-    if (props.chapter === undefined || busy) return
-    setBusy(true)
-    setActionError(undefined)
-    try {
-      const next = revision ?? await props.onStartRevision(committedHeading, committedContent)
-      setRevision(next)
-      setStage("editing")
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setBusy(false)
+    setReviewStage(reviewStageFromRevision(props.revision))
+    if (props.revision?.updatedAtMs !== undefined) {
+      setLastSavedAtMs(props.revision.updatedAtMs)
     }
-  }
+    autosaveSnapshotRef.current = {
+      heading: props.revision?.heading ?? props.chapter?.heading ?? "未命名章节",
+      body: nextDraft,
+    }
+  }, [props.body, props.chapter?.heading, props.revision, props.revisionContent, props.conversationMessages])
+
+  useEffect(() => {
+    const built = buildPrototypeDraftVersions({
+      committedHeading,
+      committedBody: props.body,
+      messages: props.conversationMessages,
+    })
+    const proposalCount = props.conversationMessages.filter(
+      (message) => message.role === "assistant" && message.proposal !== undefined,
+    ).length
+    if (proposalCount <= agentProposalCountRef.current) return
+    agentProposalCountRef.current = proposalCount
+    setDraftVersionChain((previous) => {
+      const manualVersions = previous.filter((version) => version.source === "manual")
+      return relabelLatestDraftVersion([...built, ...manualVersions])
+    })
+  }, [committedHeading, props.body, props.conversationMessages])
+
+  useEffect(() => {
+    if (props.path === undefined) return
+    previousVersionCountRef.current = draftVersions.length
+    setSelectedVersionId(latestVersionId)
+  }, [props.path, draftVersions.length, latestVersionId])
+
+  useEffect(() => {
+    const nextSuggested = findSuggestedDraftBody(props.conversationMessages)
+    if (nextSuggested === undefined || nextSuggested === previousSuggestionRef.current) return
+    previousSuggestionRef.current = nextSuggested
+    setDraft(nextSuggested)
+    setPane("draft")
+    setReviewStage("idle")
+  }, [props.conversationMessages])
+
+  useEffect(() => {
+    setSelectedVersionId(latestVersionId)
+    if (draftVersions.length <= previousVersionCountRef.current) {
+      previousVersionCountRef.current = draftVersions.length
+      return
+    }
+    previousVersionCountRef.current = draftVersions.length
+    if (draftVersions.length <= 1) return
+    const latest = draftVersions.at(-1)
+    if (latest === undefined || latest.source !== "agent") return
+    setDiffBaseVersionId(COMMITTED_DRAFT_VERSION_ID)
+    setDiffHeadVersionId(latest.versionId)
+    setDisplayMode("diff")
+    setPane("draft")
+  }, [draftVersions, latestVersionId])
+
+  useEffect(() => {
+    if (props.diffFocusMessageId === undefined) return
+    const match = draftVersions.find((version) => version.messageId === props.diffFocusMessageId)
+    if (match === undefined) return
+    setDiffBaseVersionId(COMMITTED_DRAFT_VERSION_ID)
+    setDiffHeadVersionId(match.versionId)
+    setSelectedVersionId(match.versionId)
+    setDisplayMode("diff")
+    setPane("draft")
+    props.onDiffFocusHandled()
+  }, [draftVersions, latestVersionId, props.diffFocusMessageId, props.onDiffFocusHandled])
+
+  useEffect(() => {
+    if (props.chapter === undefined || ensuringRevisionRef.current) return
+    if (props.revision !== undefined && props.revision.decision !== "submit" && props.revision.status === "editing") return
+    ensuringRevisionRef.current = true
+    void props.onEnsureRevision(committedHeading, props.body)
+      .catch((error: unknown) => {
+        setActionError(error instanceof Error ? error.message : String(error))
+      })
+      .finally(() => {
+        ensuringRevisionRef.current = false
+      })
+  }, [committedHeading, props.body, props.chapter, props.onEnsureRevision, props.revision])
+
+  const changed = draft !== props.body || heading !== committedHeading
+  const activeWordCount = countChapterCharacters(pane === "draft" ? draft : props.body)
+  const graphSyncPending = revision?.decision === "submit" && revision.graphSyncStatus !== "completed"
+  const canReviseLatestDraft = pane === "draft"
+    && !graphSyncPending
+    && selectedVersionId === latestVersionId
+    && displayMode === "edit"
+  const revisionStatusHint = pane === "draft" && !graphSyncPending && !canReviseLatestDraft
+    ? displayMode === "view"
+      ? "历史草稿仅可查看，请返回最新版本后再审核或提交"
+      : "版本对比中，请返回编辑最新草稿后再审核或提交"
+    : undefined
+
+  useEffect(() => {
+    if (graphSyncPending || displayMode !== "edit" || selectedVersionId !== latestVersionId) return
+    if (draft === autosaveSnapshotRef.current.body && heading === autosaveSnapshotRef.current.heading) return
+
+    setDraftSaveState("saving")
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const current = revision ?? await props.onEnsureRevision(committedHeading, props.body)
+          if (current === undefined) return
+          const next = await props.onUpdateRevision(current.revisionTaskId, heading, draft)
+          setRevision(next)
+          const savedAtMs = next.updatedAtMs ?? Date.now()
+          setLastSavedAtMs(savedAtMs)
+          setDraftSaveState("saved")
+          autosaveSnapshotRef.current = { heading, body: draft }
+          setDraftVersionChain((previous) => mergeDraftVersionContent(previous, latestVersionId, {
+            heading,
+            body: draft,
+            updatedAtMs: savedAtMs,
+          }))
+        } catch {
+          setDraftSaveState("error")
+        }
+      })()
+    }, 800)
+    return () => { window.clearTimeout(timer) }
+  }, [
+    committedHeading,
+    displayMode,
+    draft,
+    graphSyncPending,
+    heading,
+    latestVersionId,
+    props.body,
+    props.onEnsureRevision,
+    props.onUpdateRevision,
+    revision,
+    selectedVersionId,
+  ])
+
   const persistDraft = async (): Promise<ChapterRevision> => {
-    const current = revision ?? await props.onStartRevision(committedHeading, committedContent)
+    const current = revision ?? await props.onEnsureRevision(committedHeading, props.body)
+    if (current === undefined) throw new Error("无法创建章节修订草稿")
     const next = !changed ? current : await props.onUpdateRevision(current.revisionTaskId, heading, draft)
     setRevision(next)
     return next
   }
-  const review = async (): Promise<void> => {
-    if (busy) return
+
+  const createNewDraftVersion = async (): Promise<void> => {
+    if (busy || graphSyncPending || displayMode !== "edit" || selectedVersionId !== latestVersionId) return
     setBusy(true)
     setActionError(undefined)
-    setStage("reviewing")
     try {
       const current = await persistDraft()
-      setRevision(await props.onReviewRevision(current.revisionTaskId))
-      setStage("reviewed")
+      const savedAtMs = current.updatedAtMs ?? Date.now()
+      const nextChain = appendManualDraftVersion(draftVersionChain, {
+        heading,
+        body: draft,
+        createdAtMs: savedAtMs,
+      })
+      const nextLatestId = nextChain.at(-1)?.versionId ?? latestVersionId
+      setDraftVersionChain(nextChain)
+      setSelectedVersionId(nextLatestId)
+      setDisplayMode("edit")
+      setPane("draft")
+      autosaveSnapshotRef.current = { heading, body: draft }
+      setLastSavedAtMs(savedAtMs)
+      setDraftSaveState("saved")
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error))
-      setStage("editing")
+      setDraftSaveState("error")
     } finally {
       setBusy(false)
     }
   }
+
+  const review = async (): Promise<void> => {
+    if (busy || graphSyncPending || !canReviseLatestDraft) return
+    setBusy(true)
+    setActionError(undefined)
+    setReviewStage("reviewing")
+    try {
+      const current = await persistDraft()
+      setRevision(await props.onReviewRevision(current.revisionTaskId))
+      setReviewStage("reviewed")
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error))
+      setReviewStage("idle")
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const submit = async (mode: "direct" | "reviewed"): Promise<void> => {
-    if (busy) return
+    if (busy || graphSyncPending || !canReviseLatestDraft) return
     setBusy(true)
     setActionError(undefined)
     try {
@@ -233,23 +493,15 @@ function ChapterRevisionEditor(props: {
         ...(mode === "reviewed" && current.review !== undefined ? { reviewId: current.review.reviewId } : {}),
       })
       setRevision(next)
-      setCommittedHeading(heading)
-      setCommittedContent(draft)
-      setSubmittedMode(mode)
-      setStage("submitted")
+      setReviewStage("submitted")
+      setPane("committed")
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error))
     } finally {
       setBusy(false)
     }
   }
-  const stopEditing = async (): Promise<void> => {
-    if (revision !== undefined) await props.onRetireRevision(revision.revisionTaskId)
-    setDraft(committedContent)
-    setHeading(committedHeading)
-    setRevision(undefined)
-    setStage("idle")
-  }
+
   const retryGraphSync = async (): Promise<void> => {
     if (revision === undefined || busy) return
     setBusy(true)
@@ -263,7 +515,7 @@ function ChapterRevisionEditor(props: {
         ...(mode === "reviewed" && revision.review !== undefined ? { reviewId: revision.review.reviewId } : {}),
       })
       setRevision(next)
-      setStage("submitted")
+      setReviewStage("submitted")
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -271,157 +523,358 @@ function ChapterRevisionEditor(props: {
     }
   }
 
-  if (stage === "editing" || stage === "reviewing" || stage === "reviewed") {
-    return <article className="chapter-reader chapter-revision-editor">
-      <RevisionHeader heading={heading} path={props.path} stage={stage} changed={changed} compact />
-      <div className="revision-workspace">
-        <div className="revision-source-pane">
-          <div className="revision-pane-heading"><span><FileDiff size={14} /> 修订正文</span><small>{changed ? "未提交修改" : "基于当前正式版本"}</small></div>
-          <label className="revision-title-field">
-            <span>章节标题</span>
-            <input value={heading} maxLength={180} onChange={(event) => { setHeading(event.target.value); if (stage === "reviewed") setStage("editing"); }} />
-          </label>
-          <Editor
-            height="100%"
-            language="markdown"
-            value={draft}
-            onChange={(value: string | undefined) => { handleDraftChange(value ?? ""); }}
-            options={{
-              minimap: { enabled: false },
-              fontSize: 13,
-              lineHeight: 22,
-              fontFamily: "JetBrains Mono, Cascadia Code, Consolas, monospace",
-              wordWrap: "on",
-              padding: { top: 14, bottom: 14 },
-              scrollBeyondLastLine: false,
-              renderLineHighlight: "gutter",
-              overviewRulerBorder: false,
-            }}
-          />
+  const embeddedReadingToolbar = props.dockToolbar
+    ? <ChapterReadingToolbar
+        variant="composer"
+        preferences={readingPreferences}
+        onReadingChange={updateReadingPreferences}
+      />
+    : null
+
+  const editorChromeToggle = props.dockToolbar
+    ? <ChapterEditorChromeToggle open={editorChromeOpen} onToggle={() => { setEditorChromeOpen((value) => !value); }} />
+    : null
+
+  const toolbar = props.dockToolbar ? null : <ChapterWorkspaceToolbar
+    preferences={readingPreferences}
+    paneLabel={graphSyncPending || pane === "committed" ? "正文" : "草稿"}
+    wordCount={graphSyncPending || pane === "committed" ? countChapterCharacters(props.body) : activeWordCount}
+    onReadingChange={updateReadingPreferences}
+    showActions={canReviseLatestDraft}
+    statusHint={revisionStatusHint}
+    stage={reviewStage}
+    changed={changed}
+    busy={busy}
+    error={actionError}
+    onReview={() => { void review(); }}
+    onDirectSubmit={() => { void submit("direct"); }}
+    onReviewedSubmit={() => { void submit("reviewed"); }}
+  />
+  const revisionErrorBanner = props.dockToolbar && actionError !== undefined
+    ? <div className="chapter-revision-error" role="alert">{actionError}</div>
+    : null
+
+  const restorePrototypeVersion = async (version: PrototypeDraftVersion): Promise<void> => {
+    if (busy || graphSyncPending) return
+    setBusy(true)
+    setActionError(undefined)
+    try {
+      const current = revision ?? await props.onEnsureRevision(committedHeading, props.body)
+      if (current === undefined) throw new Error("无法创建章节修订草稿")
+      const next = await props.onUpdateRevision(current.revisionTaskId, version.heading, version.body)
+      setRevision(next)
+      setHeading(version.heading)
+      setDraft(version.body)
+      setPane("draft")
+      setReviewStage("idle")
+      setSelectedVersionId(version.versionId)
+      setDisplayMode("edit")
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const selectDraftVersion = (versionId: string): void => {
+    const version = draftVersions.find((item) => item.versionId === versionId)
+    if (version === undefined) return
+    setSelectedVersionId(versionId)
+    setPane("draft")
+    if (versionId === latestVersionId) {
+      setDraft(version.body)
+      setDisplayMode("edit")
+      return
+    }
+    setDisplayMode("view")
+  }
+
+  const enterDiffMode = (): void => {
+    const head = draftVersions.find((version) => version.versionId === selectedVersionId) ?? draftVersions.at(-1)
+    const headId = head?.versionId === COMMITTED_DRAFT_VERSION_ID
+      ? latestVersionId
+      : (head?.versionId ?? latestVersionId)
+    setDiffBaseVersionId(COMMITTED_DRAFT_VERSION_ID)
+    setDiffHeadVersionId(headId)
+    setDisplayMode("diff")
+    setPane("draft")
+  }
+
+  const viewingVersion = draftVersions.find((version) => version.versionId === selectedVersionId) ?? draftVersions.at(-1)
+
+  const versionsPanel = graphSyncPending ? null : <ChapterDraftVersionsPrototype
+    versions={draftVersions}
+    latestVersionId={latestVersionId}
+    selectedVersionId={selectedVersionId}
+    displayMode={displayMode}
+    busy={busy}
+    showRevisionActions={canReviseLatestDraft}
+    revisionStage={reviewStage}
+    draftChanged={changed}
+    onReview={() => { void review(); }}
+    onDirectSubmit={() => { void submit("direct"); }}
+    onReviewedSubmit={() => { void submit("reviewed"); }}
+    onSelectVersion={selectDraftVersion}
+    onEnterDiff={enterDiffMode}
+    onReturnEdit={() => {
+      setSelectedVersionId(latestVersionId)
+      setDisplayMode("edit")
+      setPane("draft")
+    }}
+    onRestore={restorePrototypeVersion}
+    onCreateDraft={() => { void createNewDraftVersion() }}
+  />
+
+  const statusBarTitle = pane === "committed"
+    ? committedHeading
+    : displayMode === "view"
+      ? (viewingVersion?.heading ?? heading)
+      : displayMode === "diff"
+        ? (draftVersions.find((version) => version.versionId === diffHeadVersionId)?.heading ?? heading)
+        : heading
+  const statusBarWordCount = pane === "committed"
+    ? countChapterCharacters(props.body)
+    : displayMode === "view"
+      ? countChapterCharacters(viewingVersion?.body ?? draft)
+      : displayMode === "diff"
+        ? countChapterCharacters(draftVersions.find((version) => version.versionId === diffHeadVersionId)?.body ?? draft)
+        : countChapterCharacters(draft)
+  const editorStatusBar = props.dockToolbar
+    ? <ChapterEditorStatusBar
+        title={statusBarTitle}
+        wordCount={statusBarWordCount}
+        preferences={readingPreferences}
+        showSaveTime={pane === "draft" && displayMode !== "diff"}
+        saveState={draftSaveState}
+        lastSavedAtMs={lastSavedAtMs}
+      />
+    : null
+
+  if (graphSyncPending) {
+    return <article className="chapter-reader chapter-workspace">
+      <header className="chapter-reader-header">
+        <div className="chapter-reader-topline">
+          <div className="chapter-reader-title-block">
+            <span className="mode-pill chapter-status-committed"><BookOpenText size={12} />已提交修订</span>
+            <h1>{heading}</h1>
+          </div>
+          <button className="chapter-edit-command" disabled={busy || revision?.graphSyncStatus === "running"} onClick={() => { void retryGraphSync(); }}>
+            <RotateCcw className={revision?.graphSyncStatus === "running" ? "revision-spin" : ""} size={14} />
+            {revision?.graphSyncStatus === "failed" ? "重试图同步" : revision?.graphSyncStatus === "pending" ? "继续图同步" : "图同步中"}
+          </button>
         </div>
-        <RevisionReviewPane
-          stage={stage}
-          changed={changed}
-          issues={(revision?.review?.issues ?? []).map(toRevisionIssue)}
-          reviewRound={revision?.review === undefined ? 0 : 1}
-          onReview={() => { void review(); }}
-          onDirectSubmit={() => { void submit("direct"); }}
-          onReviewedSubmit={() => { void submit("reviewed"); }}
-          onCancel={() => { void stopEditing(); }}
-          busy={busy}
-          error={actionError}
-        />
+        <p className="chapter-reader-hint">{props.path ?? "章节正文"} · 正文已提交，世界图同步进行中</p>
+      </header>
+      <div className="chapter-body" data-testid="chapter-document-pane-committed" style={chapterBodyStyle(readingPreferences)}>
+        {props.body.length === 0
+          ? <p className="empty-paragraph">当前章节没有正文内容。</p>
+          : props.body.split(/\n{2,}/u).map((paragraph, index) => (
+            <p key={`${String(index)}-${paragraph.slice(0, 12)}`}>{paragraph}</p>
+          ))}
       </div>
+      {props.dockToolbar ? null : toolbar}
     </article>
   }
 
-  return <article className="chapter-reader">
-    <header>
-      <RevisionHeader heading={heading} path={props.path} stage={stage} changed={false} />
-      <div className="chapter-reader-actions">
-        <span><ShieldCheck size={13} /> 正式版本 · {submittedMode === "direct" ? "用户直接提交" : "审核后提交"} · 历史已保留</span>
-        {revision?.decision === "submit" && revision.graphSyncStatus !== "completed"
-          ? <button className="chapter-edit-command" title={revision.graphSyncStatus === "pending" ? "图同步尚未运行，点击继续" : undefined} disabled={busy || revision.graphSyncStatus === "running"} onClick={() => { void retryGraphSync(); }}><RotateCcw className={revision.graphSyncStatus === "running" ? "revision-spin" : ""} size={14} />{revision.graphSyncStatus === "failed" ? "重试图同步" : revision.graphSyncStatus === "pending" ? "继续图同步" : "图同步中"}</button>
-          : <button className="chapter-edit-command" disabled={busy || props.chapter === undefined} onClick={() => { void startEditing(); }}><GitCompare size={14} /> 编辑章节</button>}
+  return <article className="chapter-reader chapter-workspace">
+    <header className="chapter-reader-header chapter-reader-header-compact">
+      <div className="chapter-reader-topline">
+        <span className={`mode-pill chapter-status-${pane}`}>
+          {pane === "draft" ? <Sparkles size={12} /> : <BookOpenText size={12} />}
+          {pane === "draft" ? "章节草稿" : "已提交章节"}
+        </span>
+        {pane === "draft" && versionsPanel !== null
+          ? <div className="chapter-draft-versions-inline" data-testid="chapter-draft-versions-host">{versionsPanel}</div>
+          : null}
+        <div className="chapter-document-switch" data-testid="chapter-document-switch" role="tablist" aria-label="章节文档视图">
+          <button type="button" role="tab" className={pane === "committed" ? "active" : ""} aria-selected={pane === "committed"} data-testid="chapter-document-committed" onClick={() => { setPane("committed"); }}>
+            正文
+          </button>
+          <button type="button" role="tab" className={pane === "draft" ? "active" : ""} aria-selected={pane === "draft"} data-testid="chapter-document-draft" onClick={() => { setPane("draft"); }}>
+            草稿
+          </button>
+        </div>
       </div>
-      {actionError === undefined ? null : <div className="revision-error" role="alert"><AlertTriangle size={14} /><span>{actionError}</span></div>}
     </header>
-    <div className="chapter-body">
-      {props.body.length === 0 ? <p className="empty-paragraph">当前章节没有正文内容。</p> : props.body.split(/\n{2,}/u).map((paragraph, index) => (
-        <p key={`${String(index)}-${paragraph.slice(0, 12)}`}>{paragraph}</p>
-      ))}
-    </div>
+    {revisionErrorBanner}
+    {pane === "committed"
+      ? <div className="chapter-document-pane-committed-shell" data-testid="chapter-document-pane-committed" role="tabpanel">
+          <div className={`chapter-committed-body-shell${props.dockToolbar ? " chapter-editor-surface" : ""}`}>
+            {props.dockToolbar
+              ? <>
+                  {editorChromeToggle}
+                  <ChapterEditorChromePanel open={editorChromeOpen}>{embeddedReadingToolbar}</ChapterEditorChromePanel>
+                </>
+              : embeddedReadingToolbar}
+            <div
+              className="chapter-body chapter-workspace-pane"
+              style={{
+                ...chapterBodyStyle(readingPreferences),
+                ...(props.dockToolbar ? { paddingRight: CHAPTER_EDITOR_TOOLBAR_LANE + CHAPTER_EDITOR_SCROLLBAR_WIDTH + 16 } : {}),
+              }}
+            >
+              {props.body.length === 0
+                ? <p className="empty-paragraph">当前章节没有正文内容。</p>
+                : props.body.split(/\n{2,}/u).map((paragraph, index) => (
+                  <p key={`${String(index)}-${paragraph.slice(0, 12)}`}>{paragraph}</p>
+                ))}
+            </div>
+          </div>
+        </div>
+      : <div className="chapter-draft-pane" data-testid="chapter-document-pane-draft" role="tabpanel">
+          {displayMode === "diff"
+            ? <ChapterDraftDiffView
+                versions={draftVersions}
+                baseVersionId={diffBaseVersionId}
+                headVersionId={diffHeadVersionId}
+                onBaseVersionChange={setDiffBaseVersionId}
+                onHeadVersionChange={setDiffHeadVersionId}
+              />
+            : <>
+                {displayMode === "view"
+                  ? <div className="chapter-draft-view-banner" data-testid="chapter-draft-view-banner">
+                      正在查看 {viewingVersion?.label ?? "历史版本"}（只读）。选择最新版本可继续编辑。
+                    </div>
+                  : null}
+                <div className={`chapter-draft-editor-shell${props.dockToolbar ? " chapter-editor-surface" : ""}`}>
+                  {props.dockToolbar
+                    ? <>
+                        {editorChromeToggle}
+                        <ChapterEditorChromePanel open={editorChromeOpen}>
+                          <label className="chapter-editor-chrome-title">
+                            <span className="sr-only">章节标题</span>
+                            <input
+                              placeholder="章节标题"
+                              value={displayMode === "view" ? (viewingVersion?.heading ?? heading) : heading}
+                              maxLength={180}
+                              readOnly={displayMode === "view"}
+                              onChange={(event) => {
+                                setHeading(event.target.value)
+                                if (reviewStage === "reviewed") setReviewStage("idle")
+                              }}
+                            />
+                          </label>
+                          {embeddedReadingToolbar}
+                        </ChapterEditorChromePanel>
+                      </>
+                    : <>
+                        <label className="revision-title-field chapter-draft-title-field">
+                          <span>章节标题</span>
+                          <input
+                            value={displayMode === "view" ? (viewingVersion?.heading ?? heading) : heading}
+                            maxLength={180}
+                            readOnly={displayMode === "view"}
+                            onChange={(event) => {
+                              setHeading(event.target.value)
+                              if (reviewStage === "reviewed") setReviewStage("idle")
+                            }}
+                          />
+                        </label>
+                        {embeddedReadingToolbar}
+                      </>}
+                  <Editor
+                    height="100%"
+                    language="markdown"
+                    value={displayMode === "view" ? (viewingVersion?.body ?? draft) : draft}
+                    onChange={(value: string | undefined) => {
+                      if (displayMode === "view") return
+                      setDraft(value ?? "")
+                      if (reviewStage === "reviewed") setReviewStage("idle")
+                    }}
+                    onMount={(editorInstance, monaco) => {
+                      chapterEditorLayoutCleanupRef.current?.()
+                      chapterEditorRef.current = editorInstance
+                      monacoRef.current = monaco
+                      if (!props.dockToolbar) return
+                      const apply = (): void => {
+                        syncChapterEditorWrap(editorInstance, monaco)
+                      }
+                      apply()
+                      chapterEditorLayoutCleanupRef.current = editorInstance.onDidLayoutChange(apply).dispose
+                    }}
+                    options={{
+                      readOnly: displayMode === "view",
+                      minimap: { enabled: false },
+                      fontSize: readingPreferences.fontSize,
+                      lineHeight: Math.round(readingPreferences.fontSize * 1.65),
+                      fontFamily: chapterBodyStyle(readingPreferences).fontFamily ?? "JetBrains Mono, Consolas, monospace",
+                      wordWrap: props.dockToolbar ? "bounded" : "on",
+                      padding: { top: 12, bottom: 12 },
+                      scrollBeyondLastLine: false,
+                      renderLineHighlight: "gutter",
+                      overviewRulerBorder: false,
+                      ...(props.dockToolbar
+                        ? {
+                            scrollbar: {
+                              verticalScrollbarSize: CHAPTER_EDITOR_SCROLLBAR_WIDTH,
+                              horizontalScrollbarSize: 6,
+                              verticalSliderSize: 4,
+                              horizontalSliderSize: 4,
+                              useShadows: false,
+                            },
+                          }
+                        : {}),
+                    }}
+                  />
+                </div>
+              </>}
+        </div>}
+    {revisionErrorBanner}
+    {editorStatusBar}
+    {toolbar}
+    {pane === "draft" && reviewStage === "reviewed" && canReviseLatestDraft
+      ? <ChapterReviewResults issues={(revision?.review?.issues ?? []).map(toRevisionIssue)} />
+      : null}
   </article>
 }
 
-function RevisionHeader({ heading, path, stage, changed, compact = false }: { heading: string; path: string | undefined; stage: RevisionStage; changed: boolean; compact?: boolean }): React.JSX.Element {
-  const status = stage === "submitted" ? "已提交修订" : stage === "reviewed" ? "审核建议已生成" : stage === "reviewing" ? "AI审核中" : stage === "editing" ? "正在修订" : "已提交章节"
-  const icon = stage === "reviewed" ? <CheckCircle2 size={14} /> : stage === "reviewing" ? <RotateCcw className="revision-spin" size={14} /> : stage === "editing" ? <GitCompare size={14} /> : <BookOpenText size={14} />
-  return <div className="revision-heading">
-    <div className="revision-heading-main">
-      <span className={`mode-pill revision-status-${stage}`}>{icon}{status}</span>
-      {compact ? null : <>
-        <h1>{heading}</h1>
-        <p>{path} · {changed ? "存在未提交修订" : "当前正式版本"}</p>
-      </>}
-    </div>
-    {stage === "reviewed" ? <span className="revision-advisory-label"><AlertTriangle size={13} /> 建议，不是门禁</span> : null}
-  </div>
-}
-
-function RevisionReviewPane(props: {
-  stage: RevisionStage
-  changed: boolean
-  issues: readonly RevisionIssue[]
-  error: string | undefined
-  reviewRound: number
-  onReview(): void
-  onDirectSubmit(): void
-  onReviewedSubmit(): void
-  onCancel(): void
-  busy: boolean
-}): React.JSX.Element {
-  const reviewing = props.stage === "reviewing"
-  return <aside className="revision-review-pane">
-    <div className="revision-pane-heading"><span><ShieldCheck size={14} /> 修订检查</span><small>{props.reviewRound > 0 ? `第 ${String(props.reviewRound)} 次` : "尚未执行"}</small></div>
-    <div className="revision-review-overview">
-      <div className="revision-authority-note"><CheckCircle2 size={14} /><span><strong>用户拥有最终决定权</strong><small>AI只提示可能的问题，不会拒绝正文。</small></span></div>
-      <div className="revision-review-summary">
-        <span><small>当前版本</small><strong>{props.changed ? "有修改" : "未修改"}</strong></span>
-        <span><small>原文历史</small><strong>已保留</strong></span>
-        <span><small>图同步</small><strong>{props.stage === "reviewed" ? "待提交" : "未开始"}</strong></span>
+function ChapterReviewResults(props: { issues: readonly RevisionIssue[] }): React.JSX.Element {
+  return <aside className="chapter-review-results" data-testid="chapter-review-results">
+    <div className="revision-advisory-callout">
+      <AlertTriangle size={14} />
+      <div>
+        <strong>审核完成 · 发现 {String(props.issues.length)} 条建议</strong>
+        <p>建议仅供参考，不会阻止提交。你可以继续改草稿，或直接提交。</p>
       </div>
     </div>
-    <div className="revision-issue-list">
-      {props.stage === "reviewed" ? <div className="revision-advisory-callout"><AlertTriangle size={14} /><div><strong>发现 {String(props.issues.length)} 条建议</strong><p>请结合正文判断是否采纳。你可以继续修改、重新审核，或直接提交当前版本。</p></div></div> : null}
-      {props.error === undefined ? null : <div className="revision-error" role="alert"><AlertTriangle size={14} /><span>{props.error}</span></div>}
-      {props.stage === "reviewed" && props.issues.length > 0 ? props.issues.map((issue) => <article className="revision-issue" key={issue.location}>
-        <div className="revision-issue-title"><span className="revision-issue-severity"><AlertTriangle size={12} /> {issue.severity}</span><strong>{issue.category}</strong><small>{issue.location}</small></div>
-        <p>{issue.summary}</p>
-        <details><summary>查看依据与建议</summary><p>{issue.detail}</p><p className="revision-suggestion">建议：{issue.suggestion}</p></details>
-      </article>) : null}
-      {props.stage === "reviewing" ? <div className="revision-reviewing"><RotateCcw className="revision-spin" size={16} /><span>正在读取正文、当前图状态和相关时空锚点…</span></div> : null}
-      {props.stage === "editing" ? <p className="revision-empty"><FileDiff size={18} />{props.changed ? "修改正文后，可以选择直接提交或先执行审核。" : "当前没有检测到正文修改。"}</p> : null}
-    </div>
-    <div className="revision-pane-actions">
-      <div className="revision-primary-actions">
-        <button className="revision-secondary-command" disabled={!props.changed || reviewing || props.busy} onClick={props.onReview}><ShieldCheck size={14} />{reviewing ? "审核中" : "审核后提交"}</button>
-        <button className="revision-primary-command" disabled={!props.changed || reviewing || props.busy} onClick={props.onDirectSubmit}><Send size={14} />直接提交</button>
-      </div>
-      {props.stage === "reviewed" ? <button className="revision-reviewed-submit" disabled={props.busy} onClick={props.onReviewedSubmit}><Check size={14} />按审核结果提交</button> : null}
-      <button className="revision-cancel-command" onClick={props.onCancel}><X size={13} />放弃修订</button>
-    </div>
+    {props.issues.length === 0
+      ? null
+      : props.issues.map((issue) => (
+        <article className="revision-issue" key={issue.location}>
+          <div className="revision-issue-title">
+            <span className="revision-issue-severity"><AlertTriangle size={12} /> {issue.severity}</span>
+            <strong>{issue.category}</strong>
+            <small>{issue.location}</small>
+          </div>
+          <p>{issue.summary}</p>
+        </article>
+      ))}
   </aside>
 }
 
-function stageFromRevision(revision: ChapterRevision | undefined): RevisionStage {
-  if (revision === undefined) return "idle"
-  if (revision.status === "ready_to_submit" && revision.review !== undefined) return "reviewed"
-  if (revision.status === "editing" || revision.status === "reviewing") return "editing"
-  if (revision.decision === "submit") return "submitted"
-  if (revision.status === "content_committed"
-    || revision.status === "chapter_published"
-    || revision.status === "chapter_registered"
-    || revision.status === "graph_sync_pending"
-    || revision.status === "graph_sync_running") return "submitted"
-  return "editing"
+function findSuggestedDraftBody(messages: readonly ChapterRevisionConversationMessage[]): string | undefined {
+  const body = messages.findLast((message) => message.role === "assistant" && message.proposal !== undefined)?.proposal?.body
+  return body !== undefined && body.length > 0 ? body : undefined
 }
 
-function TurnComposer(props: Props): React.JSX.Element {
-  return <div className="turn-composer">
-    <div className="composer-heading"><span><Settings2 size={15} /> 本轮推演输入</span><span>用户输入 + 表现规则 + 字数会作为本轮强调提示</span></div>
-    <textarea value={props.prompt} onChange={(event) => { props.onPromptChange(event.target.value); }} placeholder="输入此事如何发展、某人的行动或想法。与世界背景矛盾的内容会作为意图处理，而非直接成为事实。" />
-    <div className="composer-controls">
-      <label>描写规则<select value={props.descriptionRule} onChange={(event) => { props.onDescriptionRuleChange(event.target.value); }}><option value="">自动选择</option>{props.descriptionRules.map((rule) => <option key={rule} value={rule}>{rule.split("/").at(-1)}</option>)}</select></label>
-      <label>笔风规则<select value={props.proseRule} onChange={(event) => { props.onProseRuleChange(event.target.value); }}><option value="">保持当前笔风</option>{props.proseRules.map((rule) => <option key={rule} value={rule}>{rule.split("/").at(-1)}</option>)}</select></label>
-      <label className={`word-count-control${props.wordCountValid ? "" : " invalid"}`} title="正文主体字数范围，标题不计入">
-        <span>字数</span>
-        <input aria-label="正文最少字数" type="number" min="1" step="100" value={props.minimumWordCount} onChange={(event) => { props.onMinimumWordCountChange(event.target.value); }} />
-        <span>—</span>
-        <input aria-label="正文最多字数" type="number" min="1" step="100" value={props.maximumWordCount} onChange={(event) => { props.onMaximumWordCountChange(event.target.value); }} />
-        <span>字</span>
-      </label>
-      <button className="run-command" disabled={props.running || props.prompt.trim().length === 0 || !props.wordCountValid} onClick={props.onRun}><Play size={16} fill="currentColor" />{props.running ? "推演中" : "开始推演"}</button>
-    </div>
-  </div>
+function resolveDraftBody(
+  body: string,
+  revisionContent: string | undefined,
+  messages: readonly ChapterRevisionConversationMessage[],
+): string {
+  const suggested = findSuggestedDraftBody(messages)
+  if (suggested !== undefined) return suggested
+  if (revisionContent !== undefined && revisionContent.length > 0) return revisionContent
+  return body
+}
+
+function reviewStageFromRevision(revision: ChapterRevision | undefined): RevisionStage {
+  if (revision === undefined) return "idle"
+  if (revision.status === "ready_to_submit" && revision.review !== undefined) return "reviewed"
+  if (revision.decision === "submit") return "submitted"
+  return "idle"
+}
+
+function countChapterCharacters(text: string): number {
+  return text.replace(/\s+/gu, "").length
 }

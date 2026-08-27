@@ -1,5 +1,7 @@
 import { z } from "zod"
 
+import { resolvedChapterSchema } from "./chapter.js"
+import { turnDeductionGoalBundleSchema } from "./deduction-goals.js"
 import { projectSettingsSchema } from "./project-settings.js"
 
 import { idSchema } from "./ids.js"
@@ -66,6 +68,7 @@ export const turnStartPayloadSchema = z.object({
   model: modelSelectionSchema.optional(),
   maxModelCalls: z.number().int().positive().optional(),
   allowWorkspaceChapterReads: z.boolean().default(true),
+  deductionGoalBundle: turnDeductionGoalBundleSchema.optional(),
 })
 export type TurnStartPayload = z.infer<typeof turnStartPayloadSchema>
 
@@ -149,6 +152,11 @@ export const chapterListPayloadSchema = projectSettingsReadPayloadSchema
 export const chapterReadPayloadSchema = projectSettingsReadPayloadSchema.extend({
   chapterId: z.string().min(1),
 })
+export const chapterResolvePayloadSchema = chapterReadPayloadSchema
+export const chapterResolveByPathPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  publishPath: z.string().min(1),
+})
+export const chapterResolveResultSchema = resolvedChapterSchema
 export const chapterReadRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
   revisionTaskId: idSchema,
 })
@@ -160,6 +168,21 @@ export const chapterStartRevisionPayloadSchema = projectSettingsReadPayloadSchem
   baseSourceId: z.string().min(1),
   heading: z.string().min(1),
   body: z.string().min(1),
+  inputMode: z.enum(["direct", "agent"]).optional(),
+})
+export const chapterRevisionConversationListPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  chapterId: z.string().min(1),
+})
+export const chapterRevisionConversationSendPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  chapterId: z.string().min(1),
+  message: z.string().trim().min(1).max(8_000),
+  model: modelSelectionSchema.optional(),
+  maxModelCalls: z.number().int().positive().optional(),
+  deadlineMs: z.number().int().positive().optional(),
+})
+export const chapterRevisionConversationApplyPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  revisionTaskId: idSchema,
+  messageId: idSchema,
 })
 export const chapterUpdateRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
   revisionTaskId: idSchema,
@@ -188,6 +211,105 @@ export type ChapterUpdateRevisionPayload = z.infer<typeof chapterUpdateRevisionP
 export type ChapterReviewRevisionPayload = z.infer<typeof chapterReviewRevisionPayloadSchema>
 export type ChapterSubmitRevisionPayload = z.infer<typeof chapterSubmitRevisionPayloadSchema>
 export type ChapterRetireRevisionPayload = z.infer<typeof chapterRetireRevisionPayloadSchema>
+export type ChapterRevisionConversationListPayload = z.infer<typeof chapterRevisionConversationListPayloadSchema>
+export type ChapterRevisionConversationSendPayload = z.infer<typeof chapterRevisionConversationSendPayloadSchema>
+export type ChapterRevisionConversationApplyPayload = z.infer<typeof chapterRevisionConversationApplyPayloadSchema>
+
+export const synopsisConversationStartPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  title: z.string().max(200).optional(),
+})
+export const synopsisConversationListPayloadSchema = projectSettingsReadPayloadSchema
+export const synopsisConversationSendPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  message: z.string().trim().min(1).max(8_000),
+  model: modelSelectionSchema.optional(),
+  maxModelCalls: z.number().int().positive().optional(),
+  deadlineMs: z.number().int().positive().optional(),
+})
+export const synopsisResolveTurnInputPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  sessionId: idSchema.optional(),
+})
+export const synopsisBeginTurnPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  sessionId: idSchema.optional(),
+  acknowledgeWarnings: z.boolean().default(false),
+  forceOverride: z.boolean().default(false),
+  presentation: turnStartPayloadSchema.shape.presentation,
+  model: modelSelectionSchema.optional(),
+  maxModelCalls: z.number().int().positive().optional(),
+  allowWorkspaceChapterReads: z.boolean().default(true),
+})
+export const chapterSynopsisGetPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  chapterId: z.string().min(1).optional(),
+  publishPath: z.string().min(1).optional(),
+}).superRefine((payload, context) => {
+  if (payload.chapterId === undefined && payload.publishPath === undefined) {
+    context.addIssue({
+      code: "custom",
+      message: "chapterId or publishPath is required",
+      path: ["chapterId"],
+    })
+  }
+})
+export type SynopsisConversationStartPayload = z.infer<typeof synopsisConversationStartPayloadSchema>
+export type SynopsisConversationListPayload = z.infer<typeof synopsisConversationListPayloadSchema>
+export type SynopsisConversationSendPayload = z.infer<typeof synopsisConversationSendPayloadSchema>
+export type SynopsisResolveTurnInputPayload = z.infer<typeof synopsisResolveTurnInputPayloadSchema>
+export type SynopsisBeginTurnPayload = z.infer<typeof synopsisBeginTurnPayloadSchema>
+export type ChapterSynopsisGetPayload = z.infer<typeof chapterSynopsisGetPayloadSchema>
+
+export const deductionGoalsListPayloadSchema = projectSettingsReadPayloadSchema
+export const deductionGoalsCreatePayloadSchema = projectSettingsReadPayloadSchema.extend({
+  content: z.string().trim().min(1).max(2_000),
+})
+export const deductionGoalsUpdatePayloadSchema = projectSettingsReadPayloadSchema.extend({
+  goalId: idSchema,
+  content: z.string().trim().min(1).max(2_000).optional(),
+  action: z.enum(["update_content", "complete", "remove"]).optional(),
+}).superRefine((payload, context) => {
+  const action = payload.action ?? (payload.content === undefined ? undefined : "update_content")
+  if (action === undefined) {
+    context.addIssue({
+      code: "custom",
+      message: "content or action is required",
+      path: ["action"],
+    })
+  }
+  if (action === "update_content" && (payload.content === undefined || payload.content.trim().length === 0)) {
+    context.addIssue({
+      code: "custom",
+      message: "content is required for update_content",
+      path: ["content"],
+    })
+  }
+})
+export const deductionGoalsProgressSetPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  goalId: idSchema,
+  chapterSequence: z.number().int().positive(),
+  summary: z.string().trim().min(1).max(4_000),
+  status: z.enum(["planned", "achieved", "partial", "missed"]).default("planned"),
+})
+export const deductionGoalsProposalApprovePayloadSchema = projectSettingsReadPayloadSchema.extend({
+  proposalIds: z.array(idSchema).min(1).max(50),
+})
+export const deductionGoalsProposalRejectPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  proposalIds: z.array(idSchema).min(1).max(50),
+})
+export const deductionGoalsImportLegacyPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  goals: z.array(z.object({
+    goalId: z.string().min(1),
+    content: z.string().min(1).max(2_000),
+    source: z.enum(["user", "agent"]),
+    status: z.enum(["active", "completed", "pending"]),
+    createdAtMs: z.number().int().nonnegative(),
+    completedAtMs: z.number().int().nonnegative().optional(),
+  })).max(500),
+})
+export type DeductionGoalsListPayload = z.infer<typeof deductionGoalsListPayloadSchema>
+export type DeductionGoalsCreatePayload = z.infer<typeof deductionGoalsCreatePayloadSchema>
+export type DeductionGoalsUpdatePayload = z.infer<typeof deductionGoalsUpdatePayloadSchema>
+export type DeductionGoalsProgressSetPayload = z.infer<typeof deductionGoalsProgressSetPayloadSchema>
+export type DeductionGoalsProposalApprovePayload = z.infer<typeof deductionGoalsProposalApprovePayloadSchema>
+export type DeductionGoalsProposalRejectPayload = z.infer<typeof deductionGoalsProposalRejectPayloadSchema>
+export type DeductionGoalsImportLegacyPayload = z.infer<typeof deductionGoalsImportLegacyPayloadSchema>
 
 export const modelListPayloadSchema = z.object({
   baseUrl: z.url(),
@@ -286,6 +408,8 @@ export const backendPayloadSchemas = {
   "workspace.save": workspaceSavePayloadSchema,
   "chapter.list": chapterListPayloadSchema,
   "chapter.read": chapterReadPayloadSchema,
+  "chapter.resolve": chapterResolvePayloadSchema,
+  "chapter.resolveByPath": chapterResolveByPathPayloadSchema,
   "chapter.readRevision": chapterReadRevisionPayloadSchema,
   "chapter.findActiveRevision": chapterFindActiveRevisionPayloadSchema,
   "chapter.startRevision": chapterStartRevisionPayloadSchema,
@@ -293,6 +417,22 @@ export const backendPayloadSchemas = {
   "chapter.reviewRevision": chapterReviewRevisionPayloadSchema,
   "chapter.submitRevision": chapterSubmitRevisionPayloadSchema,
   "chapter.retireRevision": chapterRetireRevisionPayloadSchema,
+  "chapter.revision.conversation.list": chapterRevisionConversationListPayloadSchema,
+  "chapter.revision.conversation.send": chapterRevisionConversationSendPayloadSchema,
+  "chapter.revision.conversation.apply": chapterRevisionConversationApplyPayloadSchema,
+  "synopsis.conversation.start": synopsisConversationStartPayloadSchema,
+  "synopsis.conversation.list": synopsisConversationListPayloadSchema,
+  "synopsis.conversation.send": synopsisConversationSendPayloadSchema,
+  "synopsis.conversation.resolveTurnInput": synopsisResolveTurnInputPayloadSchema,
+  "synopsis.conversation.beginTurn": synopsisBeginTurnPayloadSchema,
+  "chapter.synopsis.get": chapterSynopsisGetPayloadSchema,
+  "deduction.goals.list": deductionGoalsListPayloadSchema,
+  "deduction.goals.create": deductionGoalsCreatePayloadSchema,
+  "deduction.goals.update": deductionGoalsUpdatePayloadSchema,
+  "deduction.goals.progress.set": deductionGoalsProgressSetPayloadSchema,
+  "deduction.goals.proposal.approve": deductionGoalsProposalApprovePayloadSchema,
+  "deduction.goals.proposal.reject": deductionGoalsProposalRejectPayloadSchema,
+  "deduction.goals.importLegacy": deductionGoalsImportLegacyPayloadSchema,
   "model.list": modelListPayloadSchema,
   "model.profiles.read": modelProfilesReadPayloadSchema,
   "model.profiles.save": modelProfilesSavePayloadSchema,

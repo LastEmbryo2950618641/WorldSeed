@@ -103,6 +103,14 @@
 - 日志确认 `world.evolve.committed`，本轮 3 个图修订；编排累计 25 次模型调用、12,059,797 输入 Token、14,511 输出 Token。数据库作用域提交序号为 46，任务无错误残留。
 - 最新全量复验为 45 个测试文件、340 项测试通过，类型检查和完整工作区构建通过；`git diff --check` 无空白错误，仅有 Windows 换行符提示。
 
+### 2.7 2026-08-26 章节修改入口协调设计评审
+
+- 新增 [章节修改入口协调设计](chapter-modification-coordination.md)，冻结三种修改入口（本轮推演、直接编辑、Agent 对话）的上下文分层、`ChapterIndex`、`ChapterLineage`、`resolveChapter` 和 UI 路由规则。
+- 代码探索、架构批评和契约/测试三份子 agent 交叉审核结论一致：修订后端闭环已基本可用，但 **P0 阻断** 为 `TurnOrchestrator` hydration 仍直接读链上 stale `canonical_chapter`，以及 `ContextWindowManager` 不保护 `chapter_revision`。
+- **P0 已实施（2026-08-26）：** `ChapterContextResolver`、`TurnOrchestrator` hydration supersession、`ContextWindowManager` 保护 `chapter_revision`、`chapter_revision` 在正文提交后即追加链消息。见 [实施计划](superpowers/plans/2026-08-26-chapter-modification-coordination-impl.md)。
+- Agent 对话修订、`chapter.resolve`、UI 底部面板按文档状态路由仍未实现；`TurnComposer` 当前在章节 Tab 下仍显示。
+- 后续顺序：P1 `ChapterIndex` → P2 `ChapterLineage` → P3 UI 路由 → P4 Agent 对话。
+
 ## 3. 当前总览
 
 截至 2026-08-17，正文单轮、分步图治理、容量治理、Source 返回、后台演化恢复和提交闭环已经分别获得真实证据，但图治理降本与正文时间断言仍缺三组有效真实 A/B，跨越长期压缩召回、复杂世界线切换、多时间流和持续后台影响的完整产品闭环也未达到 `verified`。不能用单轮成功或局部自动化替代长期产品验收。
@@ -137,7 +145,10 @@
 | 世界图专业布局、节点避碰与边交叉控制 | [ui-design.md](ui-design.md) | `prototype_only` | 已使用 Sigma 展示图；当前布局没有满足避碰和边交叉验收 | 引入布局计算、稳定坐标和视觉回归测试 |
 | DeepSeek 模型配置、模型列表、思考与 JSON 开关 | [model-protocol-boundary.md](model-protocol-boundary.md)、[ui-design.md](ui-design.md) | `design_complete_implemented` | 配置持久化、模型调用及 reasoning/JSON 控制已有代码和测试；真实供应商边界仍需持续回归 | 增加 Profile 切换、空 content、结构修复和状态码集成测试 |
 | 用户规则、设定集/参考文件 `readme.md` 索引和表现输出 | [rule-and-source-layers.md](rule-and-source-layers.md)、[dynamic-context-architecture.md](dynamic-context-architecture.md) | `design_complete_implemented` | 目录和动态读取流程已有代码基础；尚未完成大型目录选择性读取验收 | 测试索引引导、来源追踪、表现规则尾部强调和不读章节目录 |
-| 连续章节编号与 AI 章节名 | [system-design.md](system-design.md)、[ui-design.md](ui-design.md) | `design_complete_not_implemented` | 当前章节序号仍由章节目录文件数量推算，不能支持历史恢复、并发和分支 | 使用世界线章节头或永久序列协议生成编号 |
+| 连续章节编号与 AI 章节名 | [system-design.md](system-design.md)、[ui-design.md](ui-design.md)、[chapter-modification-coordination.md](chapter-modification-coordination.md) | `design_complete_not_implemented` | 当前章节序号仍由章节目录文件数量推算；`ChapterIndex` 设计已冻结，待 `chapter_index` 表与回填 | 实现 `ChapterIndex` 并在 turn/revision 提交时分配稳定 sequence |
+| 章节修改入口协调（resolveChapter、Lineage、三种入口隔离） | [chapter-modification-coordination.md](chapter-modification-coordination.md) | `design_complete_not_implemented` | 设计已冻结并经三份子 agent 交叉审核；`active_document_heads` 和修订 API 已有基础，但 hydration supersession、`ChapterLineage`、`chapter.resolve` 和 UI 路由均未实现 | P0 修复 hydration 双真相；P1–P4 按设计文档实施顺序推进 |
+| 已提交章节 Agent 对话修订 | [chapter-modification-coordination.md](chapter-modification-coordination.md) §4.3 | `design_complete_not_implemented` | 无 `revision_conversation_messages`、`revision_assist` 阶段和章节对话 UI | 在 `ChapterRevision` 容器内实现多轮对话与显式 apply |
+| 用户编辑已提交章节、审核建议、正文与图同步解耦 | [chapter-revision-and-user-authority.md](chapter-revision-and-user-authority.md) | `design_complete_implemented` | 后端 API、SQLite 表、正文提交、图同步恢复和 Renderer 修订编辑器已接入；缺 P0 hydration 修复和部分 UI 抛光 | 修复 stale canonical 正文；补冲突 UI、直接提交确认和 stale 审核标记 |
 | 后端低耦合、基础工具复用和业务隔离 | [backend-coding-principles.md](backend-coding-principles.md)、[backend-architecture.md](backend-architecture.md) | `design_complete_not_implemented` | 端口和仓储边界存在，但 `TurnOrchestrator` 仍集中承担大量职责 | 按上下文、探针、恢复、Finalization 拆分独立应用服务 |
 
 ## 4. 设计完整性结论

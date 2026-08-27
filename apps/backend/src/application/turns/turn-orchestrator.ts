@@ -12,6 +12,7 @@ import {
   type ProjectId,
   type ProjectSettings,
   type TurnContext,
+  type TurnDeductionGoalBundle,
   type WorkspaceCatalogEntry,
   type WorkspaceCatalogSnapshot,
 } from "@worldseed/contracts"
@@ -103,6 +104,8 @@ import { applyGraphCapacityRewrite, assembleGraphGovernanceArtifact, replayGraph
 import { buildStageProjection, readPriorFrontierStates } from "./graph-governance-stage-projection.js"
 import { canonicalizeRetrievalProjections } from "./retrieval-projection-canonicalizer.js"
 import { decideAdaptiveGraphGovernance } from "./adaptive-graph-governance-coordinator.js"
+import { ChapterContextResolver } from "../chapters/chapter-context-resolver.js"
+import type { ChapterSynopsisService } from "../chapters/chapter-synopsis-service.js"
 
 const turnModelPhases: readonly AIPhase[] = [
   "interpret",
@@ -191,6 +194,8 @@ const phaseInternalArtifactDependencies = {
   frontier_settlement: ["graph_governance", "semantic_review", "settlement_review"],
   commit_review: ["draft", "dependency_audit", "graph_governance", "graph_governance_review", "semantic_review", "settlement_review", "frontier_settlement"],
   revision_review: [],
+  revision_assist: [],
+  synopsis_discuss: [],
 } as const satisfies Record<AIPhase, readonly AIPhase[]>
 
 const phaseModelArtifactDependencies = {
@@ -230,6 +235,7 @@ export type TurnOrchestratorInput = Readonly<{
     minimumWordCount: number
     maximumWordCount: number
   }>
+  deductionGoalBundle?: TurnDeductionGoalBundle
   taskId?: string
   turnId?: string
   scopeId?: string
@@ -329,6 +335,7 @@ export type TurnOrchestratorDependencies = Readonly<{
   commit: ScopeCommitRepository
   internalStore: InternalStorePort
   workspace: WorkspacePort
+  chapterSynopsis?: ChapterSynopsisService
   createId: () => string
   idAllocator?: ProjectIdAllocatorPort
   now: () => number
@@ -372,8 +379,15 @@ export class QueryDraftAuditExceededError extends Error {
 export class TurnOrchestrator {
   private readonly verificationProbes = new VerificationProbeCoordinator()
   private readonly contextWindow = new ContextWindowManager()
+  private readonly chapterContext: ChapterContextResolver
 
-  public constructor(private readonly dependencies: TurnOrchestratorDependencies) {}
+  public constructor(private readonly dependencies: TurnOrchestratorDependencies) {
+    this.chapterContext = new ChapterContextResolver({
+      documents: dependencies.documents,
+      internalStore: dependencies.internalStore,
+      persistence: dependencies.persistence,
+    })
+  }
 
   public async execute(input: TurnOrchestratorInput, hooks?: TurnExecutionHooks): Promise<WorkflowExecutionResult> {
     throwIfExecutionCancelled(hooks?.signal)
@@ -704,10 +718,7 @@ export class TurnOrchestrator {
     taskId: string,
   ): Promise<void> {
     const messages = await this.dependencies.persistence.listModelContextMessages(chainId)
-    const hydrated = await Promise.all(messages.map(async (message) => {
-      const content = message.content ?? await this.dependencies.internalStore.readDocument(message.contentRef as string)
-      return { ...message, tokenEstimate: estimateModelMessageTokens(content) }
-    }))
+    const hydrated = await this.chapterContext.hydrateNarrativeMessages(input.projectId, messages)
     const compaction = this.contextWindow.plan({
       messages: hydrated,
       contextWindowTokens: requireModelContextWindowTokens(this.dependencies.model),
@@ -1759,6 +1770,18 @@ export class TurnOrchestrator {
         })
       }
       if (current.status === "chapter_registered") {
+        if (this.dependencies.chapterSynopsis !== undefined) {
+          const version = await this.dependencies.documents.findVersion(current.projectId, current.sourceId)
+          if (version !== undefined) {
+            await this.dependencies.chapterSynopsis.linkAfterPublish({
+              projectId: current.projectId,
+              workspaceRootRef: input.workspaceRootRef,
+              chapterId: version.chapterId,
+              chapterSequence: current.chapterSequence,
+              chapterPath: current.chapterPath,
+            })
+          }
+        }
         this.log("debug", "turn.finalization.step.started", {
           taskId: current.taskId,
           finalizationId: current.finalizationId,
@@ -1978,6 +2001,14 @@ export class TurnOrchestrator {
         chapterSequence: input.input.chapterSequence,
         allowWorkspaceChapterReads: input.input.allowWorkspaceChapterReads ?? true,
         ...(input.input.presentation === undefined ? {} : { presentation: input.input.presentation }),
+        ...(input.input.deductionGoalBundle === undefined
+          ? {}
+          : {
+              deductionGoalBundle: input.input.deductionGoalBundle,
+              deductionGoalConstraintMarkdown: formatDeductionGoalConstraintMarkdown(
+                input.input.deductionGoalBundle,
+              ),
+            }),
         sourceId: input.sourceId,
         sourceUnitIds: input.sourceUnitIds,
         phaseRunIds: input.phaseRunIds,
@@ -2093,15 +2124,9 @@ export class TurnOrchestrator {
       let execution: PhaseModelExecution
       try {
         const persistedContextMessages = await this.dependencies.persistence.listModelContextMessages(input.modelContextChainId)
-        const hydratedContextContent = new Map<string, string>()
-        const contextMessagesForCompaction = await Promise.all(persistedContextMessages.map(async (message) => {
-          const content = message.content ?? await this.dependencies.internalStore.readDocument(message.contentRef as string)
-          hydratedContextContent.set(message.messageId, content)
-          return {
-            ...message,
-            tokenEstimate: estimateModelMessageTokens(content),
-          }
-        }))
+        const hydratedMessages = await this.chapterContext.hydrateNarrativeMessages(input.input.projectId, persistedContextMessages)
+        const hydratedContextContent = new Map(hydratedMessages.map((message) => [message.messageId, message.content]))
+        const contextMessagesForCompaction = hydratedMessages
         const compaction = this.contextWindow.plan({
           messages: contextMessagesForCompaction,
           currentTurnId: currentContext.turnId,
@@ -5066,4 +5091,21 @@ function resolveEmbeddedGraphReferences(
 
 function splitSourceUnits(content: string): string[] {
   return content.split(/\n\s*\n/u).map((unit) => unit.trim()).filter((unit) => unit.length > 0)
+}
+
+function formatDeductionGoalConstraintMarkdown(bundle: TurnDeductionGoalBundle): string {
+  const progressByGoal = new Map(
+    bundle.chapterProgress.map((item) => [item.goalId, item] as const),
+  )
+  const lines = bundle.activeGoals.map((goal) => {
+    const progress = progressByGoal.get(goal.goalId)
+    const expectation = progress === undefined || progress.summary.trim().length === 0
+      ? "（未填写本章 planned）"
+      : `${progress.summary}${progress.lockedAtMs === undefined ? "" : "（locked）"}`
+    return `- [${goal.content}] 本章预期：${expectation}`
+  })
+  if (lines.length === 0) {
+    return `## 推演目标约束（第 ${String(bundle.chapterSequence)} 章）\n\n（本轮无活跃推演目标）`
+  }
+  return `## 推演目标约束（第 ${String(bundle.chapterSequence)} 章）\n\n${lines.join("\n")}`
 }

@@ -12,6 +12,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
 import {
+  digest,
   NodeInternalStoreAdapter,
   NodeWorkspaceAdapter,
   openProjectDatabase,
@@ -28,6 +29,7 @@ const temporaryDirectories: string[] = []
 
 const defaults = {
   baseRules: "# Worldseed V1 基础规则\n\n平台只读规则。\n",
+  plotSynopsisGuide: "# 剧情梗概讨论引导\n\n平台只读引导。\n",
   settingsReadme: "# 设定集索引\n",
   referencesReadme: "# 参考文件索引\n",
   descriptionRules: "# 默认描写规则\n\n自动选择描写方式。\n",
@@ -209,6 +211,54 @@ describe("project lifecycle", () => {
     await registryDatabase.destroy()
   })
 
+  it("reconciles manifest when the workspace is valid but platform fixed entries expanded", async () => {
+    const root = temporaryDirectory()
+    const workspaceRoot = join(root, "workspace")
+    const appDataRoot = join(root, "app-data")
+    const registryDatabase = await openRegistryDatabase(join(appDataRoot, "registry.sqlite"))
+    const lifecycle = new ProjectLifecycleService(
+      new SqliteProjectRegistryRepository(registryDatabase),
+      new NodeWorkspaceAdapter(),
+      new NodeInternalStoreAdapter(appDataRoot),
+      new SqliteProjectRepositoryFactory(),
+    )
+    await lifecycle.create({
+      projectId,
+      displayName: "Upgrade Test",
+      workspaceRootRef: workspaceRoot,
+      defaults,
+      nowMs: 100,
+    })
+
+    const store = await new NodeInternalStoreAdapter(appDataRoot).inspectProject(
+      projectId,
+      workspaceRoot,
+      (await new SqliteProjectRegistryRepository(registryDatabase).findById(projectId))!.internalStoreRef,
+    )
+    const session = await new SqliteProjectRepositoryFactory().open(store, workspaceRoot)
+    try {
+      const manifest = (await session.repository.readManifest(projectId))!
+      const legacyFixedEntries = manifest.fixedEntries.filter((entry) => entry.key !== "plot-synopsis-guide")
+      const legacyDigest = digest({
+        protocolVersion: manifest.protocolVersion,
+        manifestVersion: manifest.manifestVersion,
+        fixedEntries: legacyFixedEntries,
+        projectId,
+        displayName: manifest.displayName,
+        workspaceRootRef: workspaceRoot,
+        internalStoreRef: store.internalStoreRef,
+        baseRulesDigest: digest(defaults.baseRules),
+      })
+      await session.repository.reconcileManifest({ ...manifest, fixedEntries: legacyFixedEntries, manifestDigest: legacyDigest }, 150)
+    } finally {
+      await session.close()
+    }
+
+    const opened = await lifecycle.openByWorkspace(workspaceRoot, 200)
+    expect(opened.manifest.fixedEntries.some((entry) => entry.key === "plot-synopsis-guide")).toBe(true)
+    await registryDatabase.destroy()
+  })
+
   it("rejects internal storage nested inside the user workspace", async () => {
     const root = temporaryDirectory()
     const workspaceRoot = join(root, "workspace")
@@ -226,7 +276,7 @@ describe("project lifecycle", () => {
     const internalStore = new NodeInternalStoreAdapter(appDataRoot)
     const store = await internalStore.prepareProject(projectId, workspaceRoot)
     const database = await openProjectDatabase(store.projectDatabaseRef)
-    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(28)
+    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(31)
     await database.destroy()
   })
 })

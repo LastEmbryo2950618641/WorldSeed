@@ -4,6 +4,7 @@ import { Check, CheckCircle2, Eye, EyeOff, KeyRound, LoaderCircle, Plus, Refresh
 import type { ModelDescriptor, ModelListResult } from "@worldseed/contracts"
 
 import { listModelCatalog } from "../../api/client.js"
+import { UiTooltip } from "../../components/UiTooltip.js"
 
 export type ModelProfile = Readonly<{
   id: string
@@ -219,11 +220,11 @@ export function ModelConfigurationDialog({ profiles, activeProfileId, onClose, o
     <section className="model-dialog model-dialog-wide" data-testid="model-configuration-dialog" role="dialog" aria-modal="true" aria-labelledby="model-dialog-title">
       <header className="model-dialog-header">
         <div><strong id="model-dialog-title">模型配置</strong><span>管理并切换 OpenAI 兼容模型接口</span></div>
-        <button title="关闭" aria-label="关闭模型配置" onClick={onClose}><X size={16} /></button>
+        <UiTooltip label="关闭"><button aria-label="关闭模型配置" onClick={onClose}><X size={16} /></button></UiTooltip>
       </header>
       <div className="model-dialog-layout">
         <aside className="model-profile-panel">
-          <div className="model-profile-heading"><span>模型列表<small>{String(drafts.length)} 个配置</small></span><button data-testid="add-model-profile" title="新增模型配置" onClick={addProfile}><Plus size={15} /></button></div>
+          <div className="model-profile-heading"><span>模型列表<small>{String(drafts.length)} 个配置</small></span><UiTooltip label="新增模型配置"><button data-testid="add-model-profile" aria-label="新增模型配置" onClick={addProfile}><Plus size={15} /></button></UiTooltip></div>
           <div className="model-profile-list">{drafts.map((profile) => <button className={`${profile.id === selectedProfile?.id ? "selected" : ""} ${profile.id === nextActiveId ? "active" : ""}`} key={profile.id} onClick={() => { setSelectedId(profile.id); setTestState("idle"); setMessage("选择一个配置进行编辑"); }}>
             <span className="profile-state">{profile.id === nextActiveId ? <Check size={12} /> : null}</span>
             <span><strong>{profile.name || "未命名配置"}</strong><small>{profile.model || "未选择模型"}</small></span>
@@ -253,7 +254,7 @@ export function ModelConfigurationDialog({ profiles, activeProfileId, onClose, o
             </label>
             <label className="model-field">
               <span>API Key<small>使用系统安全存储，不写入项目 Markdown 或数据库</small></span>
-              <div className="secret-input"><KeyRound size={15} /><input type={showApiKey ? "text" : "password"} value={selectedProfile.apiKey} onChange={(event) => { updateSelected({ apiKey: event.target.value, hasApiKey: event.target.value.trim().length > 0 }); }} placeholder={selectedProfile.hasApiKey ? "已保存（重新输入可替换）" : "输入 API Key"} autoComplete="off" spellCheck={false} /><button type="button" title={showApiKey ? "隐藏密钥" : "显示密钥"} onClick={() => { setShowApiKey((visible) => !visible); }}>{showApiKey ? <EyeOff size={15} /> : <Eye size={15} />}</button></div>
+              <div className="secret-input"><KeyRound size={15} /><input type={showApiKey ? "text" : "password"} value={selectedProfile.apiKey} onChange={(event) => { updateSelected({ apiKey: event.target.value, hasApiKey: event.target.value.trim().length > 0 }); }} placeholder={selectedProfile.hasApiKey ? "已保存（重新输入可替换）" : "输入 API Key"} autoComplete="off" spellCheck={false} /><UiTooltip label={showApiKey ? "隐藏密钥" : "显示密钥"}><button type="button" aria-label={showApiKey ? "隐藏密钥" : "显示密钥"} onClick={() => { setShowApiKey((visible) => !visible); }}>{showApiKey ? <EyeOff size={15} /> : <Eye size={15} />}</button></UiTooltip></div>
             </label>
             <label className="model-field">
               <span>模型<small>{deepSeekSelected ? "输入密钥后自动读取 DeepSeek 模型列表" : "输入兼容服务支持的模型名称"}</small></span>
@@ -262,7 +263,7 @@ export function ModelConfigurationDialog({ profiles, activeProfileId, onClose, o
                   {selectedCatalog?.models.length === 0 || selectedCatalog === undefined ? <option value="">{selectedCatalog?.status === "loading" ? "正在获取模型..." : selectedCatalog?.status === "error" ? "获取模型失败" : "等待 API Key"}</option> : null}
                   {selectedCatalog?.models.map((model) => <option value={model.id} key={model.id}>{model.id}</option>)}
                 </select>
-                <button type="button" title="重新获取 DeepSeek 模型列表" disabled={(!selectedProfile.hasApiKey && selectedProfile.apiKey.trim().length === 0) || selectedCatalog?.status === "loading"} onClick={() => { void loadDeepSeekModels(selectedProfile) }}><RefreshCw size={14} /></button>
+                <UiTooltip label="重新获取 DeepSeek 模型列表"><button type="button" aria-label="重新获取 DeepSeek 模型列表" disabled={(!selectedProfile.hasApiKey && selectedProfile.apiKey.trim().length === 0) || selectedCatalog?.status === "loading"} onClick={() => { void loadDeepSeekModels(selectedProfile) }}><RefreshCw size={14} /></button></UiTooltip>
               </div> : <input value={selectedProfile.model} onChange={(event) => { updateSelected({ model: event.target.value }); }} placeholder="输入模型名称" spellCheck={false} />}
             </label>
             <label className="model-field">

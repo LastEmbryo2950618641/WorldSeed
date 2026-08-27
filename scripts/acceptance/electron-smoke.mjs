@@ -16,11 +16,12 @@ const page = context?.pages()[0]
 if (page === undefined) throw new Error(`No Electron renderer page is available at ${cdpUrl}`)
 
 await openProjectIfNeeded(page, workspace)
-await page.getByText("创作台首页", { exact: true }).waitFor({ timeout: 20_000 })
+await page.getByTestId("synopsis-conversation").waitFor({ timeout: 20_000 })
 await closeKnownDialogs(page)
 
 const checks = []
-checks.push(await visibleCheck(page, "workbench_loaded", page.getByText("创作台首页", { exact: true })))
+checks.push(await visibleCheck(page, "creation_desk_loaded", page.getByTestId("synopsis-conversation")))
+checks.push(await visibleCheck(page, "creation_desk_heading", page.getByRole("heading", { name: "剧情梗概讨论" })))
 checks.push(await graphCheck(page, expectedGraph))
 
 await closeKnownDialogs(page)
@@ -53,7 +54,7 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
 process.exit(report.passed ? 0 : 1)
 
 async function openProjectIfNeeded(page, workspacePath) {
-  if (await page.getByText("创作台首页", { exact: true }).count() > 0) return
+  if (await page.getByTestId("synopsis-conversation").count() > 0) return
   await page.getByRole("button", { name: "打开项目", exact: true }).first().click()
   await page.getByPlaceholder("选择一个空目录或已有项目目录").fill(workspacePath)
   await page.getByRole("button", { name: "打开项目", exact: true }).last().click()

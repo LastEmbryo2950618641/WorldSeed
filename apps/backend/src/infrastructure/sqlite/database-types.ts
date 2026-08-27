@@ -158,6 +158,7 @@ export type ChapterRevisionTaskRow = {
   content_digest: string
   base_content_digest: string
   submission_mode: "direct" | "reviewed" | null
+  input_mode: "direct" | "agent"
   decision: "pending" | "submit" | "abandon"
   review_id: string | null
   graph_sync_status: "not_started" | "pending" | "running" | "completed" | "failed"
@@ -235,7 +236,110 @@ export type ModelContextMessageRow = {
   origin_phase_run_id: string | null
   origin_index: number | null
   hidden_at: NullableTimestamp
+  metadata_json: string | null
   created_at: Timestamp
+}
+
+export type ChapterIndexRow = {
+  project_id: string
+  chapter_id: string
+  sequence: number
+  current_source_id: string
+  current_publish_path: string
+  assigned_at_ms: Timestamp
+}
+
+export type ChapterLineageSnapshotRow = {
+  id: string
+  project_id: string
+  chapter_id: string
+  source_id: string
+  prior_chapter_source_ids_json: string
+  created_at_ms: Timestamp
+}
+
+export type RevisionConversationMessageRow = {
+  id: string
+  project_id: string
+  revision_task_id: string
+  role: "user" | "assistant" | "system"
+  content_text: string
+  proposal_json: string | null
+  created_at_ms: Timestamp
+}
+
+export type SynopsisConversationSessionRow = {
+  session_id: string
+  project_id: string
+  chapter_sequence: number
+  synopsis_path: string
+  title: string
+  last_agent_digest: string | null
+  turn_bootstrap_input: string | null
+  status: "active" | "completed"
+  created_at_ms: Timestamp
+  updated_at_ms: Timestamp
+}
+
+export type SynopsisConversationMessageRow = {
+  id: string
+  project_id: string
+  session_id: string
+  role: "user" | "assistant" | "system"
+  content_text: string
+  choices_json: string | null
+  created_at_ms: Timestamp
+}
+
+export type ChapterSynopsisRow = {
+  chapter_id: string
+  project_id: string
+  chapter_sequence: number
+  chapter_path: string
+  synopsis_markdown: string
+  source: "synopsis_file" | "conversation" | "turn_input"
+  original_synopsis_path: string | null
+  turn_bootstrap_input: string | null
+  linked_at_ms: Timestamp
+}
+
+export type DeductionGoalRow = {
+  goal_id: string
+  project_id: string
+  content: string
+  source: "user" | "agent"
+  lifecycle: "active" | "completed" | "removed"
+  created_at_ms: Timestamp
+  updated_at_ms: Timestamp
+  completed_at_ms: Timestamp | null
+  removed_at_ms: Timestamp | null
+  removed_by: "user" | "agent" | null
+}
+
+export type DeductionGoalProgressRow = {
+  progress_id: string
+  project_id: string
+  goal_id: string
+  chapter_sequence: number
+  chapter_id: string | null
+  summary: string
+  status: "planned" | "achieved" | "partial" | "missed" | "superseded"
+  source: "synopsis_discuss" | "turn_review" | "user"
+  locked_at_ms: Timestamp | null
+  recorded_at_ms: Timestamp
+  superseded_by_progress_id: string | null
+}
+
+export type DeductionGoalProposalRow = {
+  proposal_id: string
+  project_id: string
+  kind: "create" | "update_content" | "complete" | "remove" | "set_chapter_progress"
+  goal_id: string | null
+  payload_json: string
+  status: "pending" | "approved" | "rejected"
+  source_message_id: string | null
+  created_at_ms: Timestamp
+  resolved_at_ms: Timestamp | null
 }
 
 export type ActiveScopeRefRow = {
@@ -693,6 +797,15 @@ export type ProjectDatabase = {
   chapter_revision_reviews: ChapterRevisionReviewRow
   chapter_revision_decisions: ChapterRevisionDecisionRow
   chapter_revision_finalizations: ChapterRevisionFinalizationRow
+  chapter_index: ChapterIndexRow
+  chapter_lineage_snapshots: ChapterLineageSnapshotRow
+  revision_conversation_messages: RevisionConversationMessageRow
+  synopsis_conversation_sessions: SynopsisConversationSessionRow
+  synopsis_conversation_messages: SynopsisConversationMessageRow
+  chapter_synopsis: ChapterSynopsisRow
+  deduction_goals: DeductionGoalRow
+  deduction_goal_progress: DeductionGoalProgressRow
+  deduction_goal_proposals: DeductionGoalProposalRow
   model_context_chains: ModelContextChainRow
   model_context_messages: ModelContextMessageRow
   active_scope_refs: ActiveScopeRefRow

@@ -810,4 +810,140 @@ export const projectMigrations = Object.freeze([
     "ALTER TABLE chapter_revision_tasks ADD COLUMN heading TEXT NOT NULL DEFAULT ''",
     "UPDATE chapter_revision_tasks SET heading = COALESCE((SELECT heading FROM document_versions WHERE document_versions.source_id = chapter_revision_tasks.base_source_id ORDER BY document_versions.created_at DESC LIMIT 1), '未命名章节') WHERE heading = ''",
   ]),
+  defineSqlMigration<ProjectDatabase>(29, "029_chapter_index_and_context_metadata", [
+    `CREATE TABLE chapter_index (
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      chapter_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence >= 1),
+      current_source_id TEXT NOT NULL,
+      current_publish_path TEXT NOT NULL,
+      assigned_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (project_id, chapter_id),
+      UNIQUE (project_id, sequence)
+    )`,
+    "CREATE INDEX chapter_index_project_sequence ON chapter_index(project_id, sequence)",
+  `CREATE TABLE chapter_lineage_snapshots (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      chapter_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      prior_chapter_source_ids_json TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL
+    )`,
+    "CREATE INDEX chapter_lineage_snapshots_project_chapter ON chapter_lineage_snapshots(project_id, chapter_id, created_at_ms DESC)",
+    "ALTER TABLE model_context_messages ADD COLUMN metadata_json TEXT",
+    `INSERT INTO chapter_index (project_id, chapter_id, sequence, current_source_id, current_publish_path, assigned_at_ms)
+      SELECT
+        adh.project_id,
+        adh.chapter_id,
+        COALESCE((
+          SELECT MIN(ccm.chapter_sequence)
+          FROM canonical_chapter_messages ccm
+          INNER JOIN document_versions dv_ccm
+            ON dv_ccm.source_id = ccm.source_id
+           AND dv_ccm.project_id = ccm.project_id
+           AND dv_ccm.chapter_id = adh.chapter_id
+          WHERE ccm.project_id = adh.project_id
+        ), 1),
+        head_dv.source_id,
+        head_dv.publish_path,
+        head_dv.created_at
+      FROM active_document_heads adh
+      INNER JOIN document_versions head_dv ON head_dv.id = adh.document_version_id`,
+  ]),
+  defineSqlMigration<ProjectDatabase>(30, "030_revision_conversation_messages", [
+    "ALTER TABLE chapter_revision_tasks ADD COLUMN input_mode TEXT NOT NULL DEFAULT 'direct' CHECK (input_mode IN ('direct', 'agent'))",
+    `CREATE TABLE revision_conversation_messages (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      revision_task_id TEXT NOT NULL REFERENCES chapter_revision_tasks(id),
+      role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+      content_text TEXT NOT NULL,
+      proposal_json TEXT,
+      created_at_ms INTEGER NOT NULL
+    )`,
+    "CREATE INDEX revision_conversation_messages_revision ON revision_conversation_messages(revision_task_id, created_at_ms)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(31, "031_synopsis_conversation_and_chapter_synopsis", [
+    `CREATE TABLE synopsis_conversation_sessions (
+      session_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      chapter_sequence INTEGER NOT NULL,
+      synopsis_path TEXT NOT NULL,
+      title TEXT NOT NULL,
+      last_agent_digest TEXT,
+      turn_bootstrap_input TEXT,
+      status TEXT NOT NULL CHECK (status IN ('active', 'completed')),
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      UNIQUE (project_id, chapter_sequence)
+    )`,
+    "CREATE INDEX synopsis_conversation_sessions_project ON synopsis_conversation_sessions(project_id, status, updated_at_ms DESC)",
+    `CREATE TABLE synopsis_conversation_messages (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      session_id TEXT NOT NULL REFERENCES synopsis_conversation_sessions(session_id),
+      role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+      content_text TEXT NOT NULL,
+      choices_json TEXT,
+      created_at_ms INTEGER NOT NULL
+    )`,
+    "CREATE INDEX synopsis_conversation_messages_session ON synopsis_conversation_messages(session_id, created_at_ms)",
+    `CREATE TABLE chapter_synopsis (
+      chapter_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      chapter_sequence INTEGER NOT NULL,
+      chapter_path TEXT NOT NULL,
+      synopsis_markdown TEXT NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('synopsis_file', 'conversation', 'turn_input')),
+      original_synopsis_path TEXT,
+      turn_bootstrap_input TEXT,
+      linked_at_ms INTEGER NOT NULL
+    )`,
+    "CREATE INDEX chapter_synopsis_project_sequence ON chapter_synopsis(project_id, chapter_sequence)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(32, "032_deduction_goals", [
+    `CREATE TABLE deduction_goals (
+      goal_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      content TEXT NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('user', 'agent')),
+      lifecycle TEXT NOT NULL CHECK (lifecycle IN ('active', 'completed', 'removed')),
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      completed_at_ms INTEGER,
+      removed_at_ms INTEGER,
+      removed_by TEXT CHECK (removed_by IN ('user', 'agent'))
+    )`,
+    "CREATE INDEX deduction_goals_project_lifecycle ON deduction_goals(project_id, lifecycle, created_at_ms DESC)",
+    `CREATE TABLE deduction_goal_progress (
+      progress_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      goal_id TEXT NOT NULL REFERENCES deduction_goals(goal_id),
+      chapter_sequence INTEGER NOT NULL,
+      chapter_id TEXT,
+      summary TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL CHECK (status IN ('planned', 'achieved', 'partial', 'missed', 'superseded')),
+      source TEXT NOT NULL CHECK (source IN ('synopsis_discuss', 'turn_review', 'user')),
+      locked_at_ms INTEGER,
+      recorded_at_ms INTEGER NOT NULL,
+      superseded_by_progress_id TEXT REFERENCES deduction_goal_progress(progress_id)
+    )`,
+    `CREATE UNIQUE INDEX deduction_goal_progress_current
+      ON deduction_goal_progress(project_id, goal_id, chapter_sequence)
+      WHERE status != 'superseded'`,
+    "CREATE INDEX deduction_goal_progress_chapter ON deduction_goal_progress(project_id, chapter_sequence, status)",
+    `CREATE TABLE deduction_goal_proposals (
+      proposal_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      kind TEXT NOT NULL CHECK (kind IN ('create', 'update_content', 'complete', 'remove', 'set_chapter_progress')),
+      goal_id TEXT REFERENCES deduction_goals(goal_id),
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
+      source_message_id TEXT,
+      created_at_ms INTEGER NOT NULL,
+      resolved_at_ms INTEGER
+    )`,
+    "CREATE INDEX deduction_goal_proposals_pending ON deduction_goal_proposals(project_id, status, created_at_ms DESC)",
+  ]),
 ])

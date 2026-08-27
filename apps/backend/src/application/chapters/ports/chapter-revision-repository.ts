@@ -18,6 +18,7 @@ export interface ChapterRevisionRepository {
   findByGraphSyncTaskId(graphSyncTaskId: string): Promise<StoredChapterRevision | undefined>
   findActive(projectId: ProjectId, chapterId: string, baseSourceId: string): Promise<StoredChapterRevision | undefined>
   findActiveForChapter(projectId: ProjectId, chapterId: string): Promise<StoredChapterRevision | undefined>
+  hasIncompleteGraphSync(projectId: ProjectId): Promise<boolean>
   createFinalization(input: Readonly<{
     finalizationId: string
     revisionTaskId: string

@@ -26,6 +26,7 @@ import type { ProjectIdAllocatorPort } from "../ids/index.js"
 import type { InternalProjectStore, InternalStorePort, WorkspacePort } from "../workspace/index.js"
 import type { DocumentRepository, RetrievalRepository, ScopeCommitRepository, TaskScopeRepository } from "../turns/index.js"
 import type { ChapterRevisionRepository, StoredChapterRevision } from "./ports/index.js"
+import type { ChapterIndexRecord } from "../../infrastructure/sqlite/repositories/sqlite-chapter-index-repository.js"
 
 export type ChapterRevisionServiceDependencies = Readonly<{
   taskScopes: TaskScopeRepository
@@ -33,6 +34,31 @@ export type ChapterRevisionServiceDependencies = Readonly<{
   retrieval: RetrievalRepository
   commit: ScopeCommitRepository
   revisions: ChapterRevisionRepository
+  chapterIndex: {
+    list(projectId: ProjectId): Promise<readonly ChapterIndexRecord[]>
+    find(projectId: ProjectId, chapterId: string): Promise<ChapterIndexRecord | undefined>
+    nextSequence(projectId: ProjectId): Promise<number>
+    assignOnFirstCommit(input: Readonly<{
+      projectId: ProjectId
+      chapterId: string
+      sequence: number
+      currentSourceId: string
+      currentPublishPath: string
+      assignedAtMs: number
+    }>): Promise<ChapterIndexRecord>
+    updateCurrent(input: Readonly<{
+      projectId: ProjectId
+      chapterId: string
+      currentSourceId: string
+      currentPublishPath: string
+    }>): Promise<void>
+  }
+  recordLineageSnapshot(input: Readonly<{
+    projectId: ProjectId
+    chapterId: string
+    sourceId: string
+    priorChapterSourceIds: readonly string[]
+  }>): Promise<void>
   workspace: WorkspacePort
   internalStore: InternalStorePort
   internalProjectStore: InternalProjectStore
@@ -45,6 +71,7 @@ export type ChapterRevisionServiceDependencies = Readonly<{
     contentRef: string
     contentDigest: string
     contentTokenEstimate: number
+    decisionId?: string
   }>): Promise<void>
   runGraphSync(input: Readonly<{
     revision: StoredChapterRevision
@@ -60,12 +87,16 @@ export class ChapterRevisionService {
 
   public async list(projectId: ProjectId): Promise<readonly ChapterSummary[]> {
     const chapters = await this.dependencies.documents.listCommittedChapters(projectId)
+    const indices = new Map(
+      (await this.dependencies.chapterIndex.list(projectId)).map((entry) => [entry.chapterId, entry.sequence]),
+    )
     return chapters.map((chapter) => ({
       chapterId: chapter.chapterId,
       sourceId: chapter.sourceId,
       heading: chapter.heading,
       publishPath: chapter.publishPath,
       digest: chapter.digest,
+      ...(indices.get(chapter.chapterId) === undefined ? {} : { sequence: indices.get(chapter.chapterId) }),
       createdAtMs: chapter.createdAtMs,
     }))
   }
@@ -114,6 +145,7 @@ export class ChapterRevisionService {
     baseSourceId: string
     heading: string
     body: string
+    inputMode?: "direct" | "agent"
   }>): Promise<ChapterRevision> {
     const current = await this.requireCurrentChapter(input.projectId, input.chapterId)
     if (current.sourceId !== input.baseSourceId) {
@@ -156,6 +188,7 @@ export class ChapterRevisionService {
       predecessorSourceId: current.sourceId,
       heading,
       contentDigest: digest(content),
+      inputMode: input.inputMode ?? "direct",
       decision: "pending",
       graphSyncStatus: "not_started",
       status: "editing",
@@ -346,7 +379,8 @@ export class ChapterRevisionService {
         updatedAtMs: this.dependencies.now(),
       })
     }
-    if (input.model !== undefined && committedRevision.status === "graph_sync_pending") {
+    await this.registerChapterRevisionContextIfNeeded(committedRevision)
+    if (input.model !== undefined && this.shouldRunGraphSync(committedRevision)) {
       const graphSyncTaskId = committedRevision.graphSyncTaskId ?? this.dependencies.createId()
       const sourceUnits = await this.dependencies.documents.listSourceUnits(
         committedRevision.projectId,
@@ -366,12 +400,6 @@ export class ChapterRevisionService {
         updatedAtMs: this.dependencies.now(),
       })
       try {
-        await this.dependencies.appendChapterRevisionContext({
-          revision: committedRevision,
-          contentRef: committedRevision.contentRef,
-          contentDigest: committedRevision.contentDigest,
-          contentTokenEstimate: estimateTokenCount(await this.dependencies.internalStore.readDocument(committedRevision.contentRef)),
-        })
         await this.dependencies.runGraphSync({
           revision: committedRevision,
           workspaceRootRef: input.workspaceRootRef,
@@ -565,6 +593,34 @@ export class ChapterRevisionService {
       createdAtMs: this.dependencies.now(),
     })
     await this.dependencies.commit.commit(revision.contentScopeId)
+    const priorChapterSourceIds = (await this.dependencies.chapterIndex.list(revision.projectId))
+      .filter((entry) => entry.chapterId !== revision.chapterId)
+      .sort((left, right) => left.sequence - right.sequence)
+      .map((entry) => entry.currentSourceId)
+    const existingIndex = await this.dependencies.chapterIndex.find(revision.projectId, revision.chapterId)
+    if (existingIndex === undefined) {
+      await this.dependencies.chapterIndex.assignOnFirstCommit({
+        projectId: revision.projectId,
+        chapterId: revision.chapterId,
+        sequence: await this.dependencies.chapterIndex.nextSequence(revision.projectId),
+        currentSourceId: revision.proposedSourceId,
+        currentPublishPath: nextPublishPath,
+        assignedAtMs: this.dependencies.now(),
+      })
+    } else {
+      await this.dependencies.chapterIndex.updateCurrent({
+        projectId: revision.projectId,
+        chapterId: revision.chapterId,
+        currentSourceId: revision.proposedSourceId,
+        currentPublishPath: nextPublishPath,
+      })
+    }
+    await this.dependencies.recordLineageSnapshot({
+      projectId: revision.projectId,
+      chapterId: revision.chapterId,
+      sourceId: revision.proposedSourceId,
+      priorChapterSourceIds,
+    })
     await this.dependencies.revisions.updateState({
       revisionTaskId: revision.revisionTaskId,
       status: "content_committed",
@@ -613,6 +669,22 @@ export class ChapterRevisionService {
     })
   }
 
+  private async registerChapterRevisionContextIfNeeded(revision: StoredChapterRevision): Promise<void> {
+    if (revision.decision !== "submit") return
+    if (!shouldHaveChapterRevisionContext(revision.status)) return
+    await this.dependencies.appendChapterRevisionContext({
+      revision,
+      contentRef: revision.contentRef,
+      contentDigest: revision.contentDigest,
+      contentTokenEstimate: estimateTokenCount(await this.dependencies.internalStore.readDocument(revision.contentRef)),
+    })
+  }
+
+  private shouldRunGraphSync(revision: StoredChapterRevision): boolean {
+    return revision.status === "graph_sync_pending"
+      || (revision.status === "awaiting_user_decision" && revision.graphSyncStatus === "failed")
+  }
+
   private async requireCurrentChapter(projectId: ProjectId, chapterId: string) {
     const chapter = await this.dependencies.documents.findCurrentChapter(projectId, chapterId)
     if (chapter === undefined) throw new ChapterNotFoundError(chapterId)
@@ -640,6 +712,7 @@ function toPublicRevision(record: StoredChapterRevision): ChapterRevision {
     ...(record.predecessorSourceId === undefined ? {} : { predecessorSourceId: record.predecessorSourceId }),
     heading: record.heading,
     contentDigest: record.contentDigest,
+    ...(record.inputMode === undefined ? {} : { inputMode: record.inputMode }),
     ...(record.submissionMode === undefined ? {} : { submissionMode: record.submissionMode }),
     decision: record.decision,
     ...(record.review === undefined ? {} : { review: record.review }),
@@ -657,6 +730,12 @@ function assertEditable(record: StoredChapterRevision): void {
   if (parsed !== "editing" && parsed !== "ready_to_submit" && parsed !== "awaiting_user_decision") {
     throw new RevisionInvalidStateError(`Revision cannot be changed in state: ${parsed}`)
   }
+}
+
+function shouldHaveChapterRevisionContext(status: ChapterRevision["status"]): boolean {
+  return isContentCommitState(status)
+    || status === "completed"
+    || status === "awaiting_user_decision"
 }
 
 function isContentCommitState(status: ChapterRevision["status"]): boolean {

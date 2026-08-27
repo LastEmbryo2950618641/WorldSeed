@@ -30,4 +30,5 @@ export interface ProjectRepository {
   create(project: StoredProject, manifest: ProjectManifest): Promise<void>
   find(projectId: ProjectId): Promise<StoredProject | undefined>
   readManifest(projectId: ProjectId): Promise<ProjectManifest | undefined>
+  reconcileManifest(manifest: ProjectManifest, updatedAtMs: number): Promise<void>
 }

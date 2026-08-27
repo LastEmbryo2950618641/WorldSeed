@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm"
 import { aiPhaseValues, type HistoryOverview, type ProjectSettings, type ResettableRuntimeMetricId } from "@worldseed/contracts"
 
 import type { GraphSlice, PhaseRunSnapshot, TaskSnapshot } from "../../api/client.js"
+import { UiTooltip, uiTooltipRich } from "../../components/UiTooltip.js"
 import { useWorkbenchStore, type RightTab } from "../../state/workbench-store.js"
 import { WorldGraph } from "./WorldGraph.js"
 import { HistoryPanel } from "./HistoryPanel.js"
@@ -200,10 +201,11 @@ function PhaseMetricRings({ runs }: { runs: readonly PhaseRunSnapshot[] }): Reac
 
 function PhaseMetricRing({ value, label, progress }: { value: string; label: string; progress?: number }): React.JSX.Element {
   const style = { "--phase-ring-progress": progress === undefined ? "0%" : `${String(Math.round(progress * 100))}%` } as React.CSSProperties
-  return <span className={`phase-metric-ring${value === "--" ? " empty" : ""}`} style={style} aria-label={`${label}: ${value}`} tabIndex={0}>
-    <span>{value}</span>
-    <span className="phase-metric-tooltip" role="tooltip"><strong>{label}</strong><span>{value}</span></span>
-  </span>
+  return <UiTooltip label={uiTooltipRich(label, value)} rich>
+    <span className={`phase-metric-ring${value === "--" ? " empty" : ""}`} style={style} aria-label={`${label}: ${value}`} tabIndex={0}>
+      <span>{value}</span>
+    </span>
+  </UiTooltip>
 }
 
 function summarizePhaseMetrics(runs: readonly PhaseRunSnapshot[]): PhaseMetric {

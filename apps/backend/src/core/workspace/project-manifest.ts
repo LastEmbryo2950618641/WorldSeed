@@ -68,6 +68,16 @@ export const fixedWorkspaceEntries: readonly FixedWorkspaceEntry[] = Object.free
     allowUserMarkdown: false,
   },
   {
+    key: "plot-synopsis-guide",
+    role: "base_rules",
+    relativePath: "世界推演规则/基础规则/plot-synopsis-guide.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: false,
+  },
+  {
     key: "user-rules",
     role: "user_rules",
     relativePath: "世界推演规则/用户规则",

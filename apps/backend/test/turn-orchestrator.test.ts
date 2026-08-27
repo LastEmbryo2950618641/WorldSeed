@@ -3955,6 +3955,7 @@ async function createFixture() {
     workspaceRootRef: workspaceRoot,
     defaults: {
       baseRules: "# base\n",
+      plotSynopsisGuide: "# synopsis guide\n",
       settingsReadme: "# settings\n",
       referencesReadme: "# references\n",
       descriptionRules: "# description\n",

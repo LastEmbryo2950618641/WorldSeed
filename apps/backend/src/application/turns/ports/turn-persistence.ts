@@ -1,5 +1,6 @@
 import type {
   AIPhase,
+  ChapterRevisionContextMetadata,
   ContextSegmentRef,
   ModelContextMessage,
   ModelContextMessageDraft,
@@ -281,8 +282,20 @@ export interface TurnPersistencePort {
     contentRef: string
     contentDigest: string
     tokenEstimate: number
+    metadata: ChapterRevisionContextMetadata
     createdAtMs: number
   }>): Promise<void>
+  listCanonicalChapterMessageSources(projectId: ProjectId): Promise<readonly Readonly<{
+    messageId: string
+    sourceId: string
+    contentDigest: string
+  }>[]>
+  findChapterRevisionSummaryByTaskId(taskId: string): Promise<Readonly<{
+    chapterId: string
+    proposedSourceId: string
+    baseSourceId: string
+    contentDigest: string
+  }> | undefined>
   listModelContextMessages(chainId: string): Promise<readonly ModelContextMessage[]>
   listVisibleModelContextEvidence(chainId: string): Promise<readonly TurnReadEvidence[]>
   hideModelContextMessages(chainId: string, messageIds: readonly string[], hiddenAtMs: number): Promise<void>

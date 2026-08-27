@@ -2,6 +2,7 @@ import { useState } from "react"
 import { BookOpen, FolderOpen, Plus, Sprout } from "lucide-react"
 
 import { invokeBackend, selectDirectory, type OpenProject } from "../../api/client.js"
+import { UiTooltip } from "../../components/UiTooltip.js"
 
 type Props = Readonly<{ onOpen(project: OpenProject): void }>
 
@@ -53,7 +54,7 @@ export function ProjectLauncher({ onOpen }: Props): React.JSX.Element {
       </div>
       <h2>{mode === "new" ? "建立一个新世界" : "打开已有世界"}</h2>
       {mode === "new" ? <label>项目名称<input value={name} onChange={(event) => { setName(event.target.value); }} placeholder="例如：雾港纪事" /></label> : null}
-      <label>工作目录<div className="path-input"><input value={workspaceRootRef} onChange={(event) => { setWorkspaceRootRef(event.target.value); }} placeholder="选择一个空目录或已有项目目录" /><button title="选择目录" onClick={() => void chooseDirectory()}><FolderOpen size={17} /></button></div></label>
+      <label>工作目录<div className="path-input"><input value={workspaceRootRef} onChange={(event) => { setWorkspaceRootRef(event.target.value); }} placeholder="选择一个空目录或已有项目目录" /><UiTooltip label="选择目录"><button aria-label="选择目录" onClick={() => void chooseDirectory()}><FolderOpen size={17} /></button></UiTooltip></div></label>
       {error === undefined ? null : <p className="form-error">{error}</p>}
       <button className="primary-command" disabled={busy || workspaceRootRef.length === 0 || (mode === "new" && name.length === 0)} onClick={() => void submit()}>{busy ? "正在打开..." : mode === "new" ? "创建并进入" : "打开项目"}</button>
     </section>

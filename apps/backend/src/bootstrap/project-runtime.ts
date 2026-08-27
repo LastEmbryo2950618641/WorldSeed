@@ -12,6 +12,11 @@ import type {
 import {
   TurnOrchestrator,
   ChapterRevisionService,
+  ChapterRevisionConversationService,
+  ChapterResolveService,
+  ChapterSynopsisService,
+  DeductionGoalsService,
+  SynopsisConversationService,
   buildSourceUnitExactKeys,
   HistoryManifestBuilder,
   HistoryCheckoutService,
@@ -26,6 +31,11 @@ import { IsomorphicGitHistoryAdapter } from "../infrastructure/history-git/index
 import {
   SqliteDocumentRepository,
   SqliteChapterRevisionRepository,
+  SqliteRevisionConversationRepository,
+  SqliteSynopsisConversationRepository,
+  SqliteChapterSynopsisRepository,
+  SqliteDeductionGoalsRepository,
+  SqliteChapterIndexRepository,
   SqliteEvidenceStore,
   SqliteGraphRepository,
   SqliteHistoryRepository,
@@ -93,6 +103,7 @@ export class ProjectRuntime {
       commit: new SqliteScopeCommitRepository(this.database),
       internalStore: this.internalStorePort,
       workspace: this.workspace,
+      chapterSynopsis: this.createChapterSynopsisService(),
       createId,
       idAllocator: new SqliteProjectIdAllocator(this.database, now),
       now,
@@ -271,15 +282,39 @@ export class ProjectRuntime {
     await this.workspace.saveUserMarkdown(this.workspaceRootRef, relativePath, content)
   }
 
+  public createChapterResolveService(): ChapterResolveService {
+    const chapterIndex = new SqliteChapterIndexRepository(this.database)
+    return new ChapterResolveService({
+      chapters: this.createChapterRevisionService(),
+      revisions: new SqliteChapterRevisionRepository(this.database),
+      chapterIndex,
+      database: this.database,
+      createId: randomUUID,
+      now: Date.now,
+    })
+  }
+
   public createChapterRevisionService(): ChapterRevisionService {
     const persistence = new SqliteTurnPersistence(this.database, randomUUID)
     const documents = new SqliteDocumentRepository(this.database)
+    const chapterIndex = new SqliteChapterIndexRepository(this.database)
     return new ChapterRevisionService({
       taskScopes: new SqliteTaskScopeRepository(this.database),
       documents,
       retrieval: new SqliteRetrievalRepository(this.database),
       commit: new SqliteScopeCommitRepository(this.database),
       revisions: new SqliteChapterRevisionRepository(this.database),
+      chapterIndex,
+      recordLineageSnapshot: async (input) => {
+        await this.database.insertInto("chapter_lineage_snapshots").values({
+          id: randomUUID(),
+          project_id: input.projectId,
+          chapter_id: input.chapterId,
+          source_id: input.sourceId,
+          prior_chapter_source_ids_json: JSON.stringify(input.priorChapterSourceIds),
+          created_at_ms: Date.now(),
+        }).execute()
+      },
       workspace: this.workspace,
       internalStore: this.internalStorePort,
       internalProjectStore: this.internalStore,
@@ -304,13 +339,21 @@ export class ProjectRuntime {
           contentRef: input.contentRef,
           contentDigest: input.contentDigest,
           tokenEstimate: input.contentTokenEstimate,
+          metadata: {
+            chapterId: input.revision.chapterId,
+            replacedSourceId: input.revision.baseSourceId,
+            sourceId: input.revision.proposedSourceId,
+            ...(input.decisionId === undefined ? {} : { decisionId: input.decisionId }),
+          },
           createdAtMs: Date.now(),
         })
       },
       runGraphSync: async (input) => {
         const settings = await this.readSettings()
-        const chapters = await documents.listCommittedChapters(input.revision.projectId)
-        const chapterSequence = Math.max(1, chapters.findIndex((chapter) => chapter.chapterId === input.revision.chapterId) + 1)
+        const chapterIndex = new SqliteChapterIndexRepository(this.database)
+        const index = await chapterIndex.find(input.revision.projectId, input.revision.chapterId)
+        const chapterSequence = index?.sequence ?? Math.max(1, (await documents.listCommittedChapters(input.revision.projectId))
+          .findIndex((chapter) => chapter.chapterId === input.revision.chapterId) + 1)
         const content = await this.internalStorePort.readDocument(input.revision.contentRef)
         const orchestrator = this.createTurnOrchestrator(input.model, randomUUID, Date.now)
         const orchestratorInput = {
@@ -338,6 +381,46 @@ export class ProjectRuntime {
           await orchestrator.resume(orchestratorInput)
         }
       },
+    })
+  }
+
+  public createChapterRevisionConversationService(): ChapterRevisionConversationService {
+    return new ChapterRevisionConversationService({
+      chapters: this.createChapterRevisionService(),
+      revisions: new SqliteChapterRevisionRepository(this.database),
+      conversation: new SqliteRevisionConversationRepository(this.database),
+      prompts: this.createPromptResourcePort(),
+      createId: randomUUID,
+      now: Date.now,
+    })
+  }
+
+  public createSynopsisConversationService(): SynopsisConversationService {
+    return new SynopsisConversationService({
+      chapters: this.createChapterResolveService(),
+      conversation: new SqliteSynopsisConversationRepository(this.database),
+      goals: this.createDeductionGoalsService(),
+      workspace: this.workspace,
+      prompts: this.createPromptResourcePort(),
+      createId: randomUUID,
+      now: Date.now,
+    })
+  }
+
+  public createChapterSynopsisService(): ChapterSynopsisService {
+    return new ChapterSynopsisService({
+      synopsis: new SqliteChapterSynopsisRepository(this.database),
+      conversation: new SqliteSynopsisConversationRepository(this.database),
+      workspace: this.workspace,
+      now: Date.now,
+    })
+  }
+
+  public createDeductionGoalsService(): DeductionGoalsService {
+    return new DeductionGoalsService({
+      goals: new SqliteDeductionGoalsRepository(this.database),
+      createId: randomUUID,
+      now: Date.now,
     })
   }
 

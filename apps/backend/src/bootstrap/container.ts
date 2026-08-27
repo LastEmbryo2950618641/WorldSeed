@@ -86,8 +86,10 @@ export class BackendContainer {
 
   public async createProject(input: Omit<CreateProjectInput, "defaults" | "nowMs">): Promise<CreatedProject> {
     const baseRules = await new NodePromptResourceAdapter(this.promptPackageRoot).loadBaseRules()
+    const plotSynopsisGuide = await new NodePromptResourceAdapter(this.promptPackageRoot).loadPlotSynopsisGuide()
     const defaults = this.workspaceDefaults ?? {
       baseRules: baseRules.text,
+      plotSynopsisGuide: plotSynopsisGuide.text,
       settingsReadme: "# 设定集索引\n\n请在这里说明设定文件的内容、路径与适用条件，供 AI 按需选择读取。\n",
       referencesReadme: "# 参考文件索引\n\n请在这里说明参考资料的内容、路径与使用条件，供 AI 按需选择读取。\n",
       descriptionRules: "# 默认描写规则\n\n由用户在表现输出目录中继续定义。\n",

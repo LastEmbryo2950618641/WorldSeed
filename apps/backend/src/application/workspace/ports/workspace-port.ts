@@ -9,6 +9,7 @@ import type { ProjectRepository } from "../../projects/index.js"
 
 export type WorkspaceDefaultDocuments = Readonly<{
   baseRules: string
+  plotSynopsisGuide: string
   settingsReadme: string
   referencesReadme: string
   descriptionRules: string
@@ -27,6 +28,8 @@ export interface WorkspacePort {
   validate(workspaceRootRef: string): Promise<WorkspaceValidationReport>
   readMarkdown(workspaceRootRef: string, relativePath: string): Promise<string>
   saveUserMarkdown(workspaceRootRef: string, relativePath: string, content: string): Promise<void>
+  saveSynopsisMarkdown(workspaceRootRef: string, relativePath: string, content: string): Promise<void>
+  removeSynopsisMarkdown(workspaceRootRef: string, relativePath: string): Promise<void>
   publishChapter(workspaceRootRef: string, relativePath: string, content: string): Promise<void>
   replacePublishedChapter(
     workspaceRootRef: string,

@@ -31,6 +31,8 @@ import {
   historyRetentionPreviewPayloadSchema,
   historySaveManualPayloadSchema,
   chapterListPayloadSchema,
+  chapterResolvePayloadSchema,
+  chapterResolveByPathPayloadSchema,
   chapterReadPayloadSchema,
   chapterReadRevisionPayloadSchema,
   chapterFindActiveRevisionPayloadSchema,
@@ -39,6 +41,22 @@ import {
   chapterReviewRevisionPayloadSchema,
   chapterSubmitRevisionPayloadSchema,
   chapterRetireRevisionPayloadSchema,
+  chapterRevisionConversationApplyPayloadSchema,
+  chapterRevisionConversationListPayloadSchema,
+  chapterRevisionConversationSendPayloadSchema,
+  synopsisConversationStartPayloadSchema,
+  synopsisConversationListPayloadSchema,
+  synopsisConversationSendPayloadSchema,
+  synopsisResolveTurnInputPayloadSchema,
+  synopsisBeginTurnPayloadSchema,
+  chapterSynopsisGetPayloadSchema,
+  deductionGoalsListPayloadSchema,
+  deductionGoalsCreatePayloadSchema,
+  deductionGoalsUpdatePayloadSchema,
+  deductionGoalsProgressSetPayloadSchema,
+  deductionGoalsProposalApprovePayloadSchema,
+  deductionGoalsProposalRejectPayloadSchema,
+  deductionGoalsImportLegacyPayloadSchema,
   modelListPayloadSchema,
   modelProfilesReadPayloadSchema,
   modelProfilesSavePayloadSchema,
@@ -62,6 +80,7 @@ import {
   RevisionConflictError,
   RevisionInvalidStateError,
   RevisionNotFoundError,
+  SynopsisInvalidStateError,
   TurnBudgetExceededError,
   TurnPauseRequestedError,
 } from "../application/index.js"
@@ -285,6 +304,16 @@ export class BackendFacade {
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
         return runtime.createChapterRevisionService().read(payload.projectId, payload.chapterId)
       }
+      case "chapter.resolve": {
+        const payload = chapterResolvePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterResolveService().resolve(payload.projectId, payload.chapterId)
+      }
+      case "chapter.resolveByPath": {
+        const payload = chapterResolveByPathPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterResolveService().resolveByPath(payload.projectId, payload.publishPath)
+      }
       case "chapter.readRevision": {
         const payload = chapterReadRevisionPayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
@@ -298,7 +327,15 @@ export class BackendFacade {
       case "chapter.startRevision": {
         const payload = chapterStartRevisionPayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
-        return runtime.createChapterRevisionService().start(payload)
+        return runtime.createChapterRevisionService().start({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          chapterId: payload.chapterId,
+          baseSourceId: payload.baseSourceId,
+          heading: payload.heading,
+          body: payload.body,
+          ...(payload.inputMode === undefined ? {} : { inputMode: payload.inputMode }),
+        })
       }
       case "chapter.updateRevision": {
         const payload = chapterUpdateRevisionPayloadSchema.parse(request.payload)
@@ -384,6 +421,145 @@ export class BackendFacade {
         const payload = chapterRetireRevisionPayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
         return runtime.createChapterRevisionService().retire(payload.revisionTaskId)
+      }
+      case "chapter.revision.conversation.list": {
+        const payload = chapterRevisionConversationListPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionConversationService().list(payload.projectId, payload.chapterId)
+      }
+      case "chapter.revision.conversation.send": {
+        const payload = chapterRevisionConversationSendPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionConversationService().send({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          chapterId: payload.chapterId,
+          message: payload.message,
+          model: this.resolveModel(payload.model),
+          ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
+          ...(payload.deadlineMs === undefined ? {} : { deadlineMs: payload.deadlineMs }),
+        })
+      }
+      case "chapter.revision.conversation.apply": {
+        const payload = chapterRevisionConversationApplyPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionConversationService().apply(payload)
+      }
+      case "synopsis.conversation.start": {
+        const payload = synopsisConversationStartPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSynopsisConversationService().start({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          ...(payload.title === undefined ? {} : { title: payload.title }),
+        })
+      }
+      case "synopsis.conversation.list": {
+        const payload = synopsisConversationListPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSynopsisConversationService().list(payload.projectId)
+      }
+      case "synopsis.conversation.send": {
+        const payload = synopsisConversationSendPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSynopsisConversationService().send({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          message: payload.message,
+          model: this.resolveModel(payload.model),
+          ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
+          ...(payload.deadlineMs === undefined ? {} : { deadlineMs: payload.deadlineMs }),
+        })
+      }
+      case "synopsis.conversation.resolveTurnInput": {
+        const payload = synopsisResolveTurnInputPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSynopsisConversationService().resolveTurnInput({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          ...(payload.sessionId === undefined ? {} : { sessionId: payload.sessionId }),
+        })
+      }
+      case "synopsis.conversation.beginTurn": {
+        const payload = synopsisBeginTurnPayloadSchema.parse(request.payload)
+        return this.beginSynopsisTurn({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          acknowledgeWarnings: payload.acknowledgeWarnings,
+          forceOverride: payload.forceOverride,
+          allowWorkspaceChapterReads: payload.allowWorkspaceChapterReads,
+          ...(payload.sessionId === undefined ? {} : { sessionId: payload.sessionId }),
+          ...(payload.presentation === undefined ? {} : { presentation: payload.presentation }),
+          ...(payload.model === undefined ? {} : { model: payload.model }),
+          ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
+        })
+      }
+      case "chapter.synopsis.get": {
+        const payload = chapterSynopsisGetPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterSynopsisService().get({
+          projectId: payload.projectId,
+          ...(payload.chapterId === undefined ? {} : { chapterId: payload.chapterId }),
+          ...(payload.publishPath === undefined ? {} : { publishPath: payload.publishPath }),
+        })
+      }
+      case "deduction.goals.list": {
+        const payload = deductionGoalsListPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createDeductionGoalsService().list(payload.projectId)
+      }
+      case "deduction.goals.create": {
+        const payload = deductionGoalsCreatePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createDeductionGoalsService().create({
+          projectId: payload.projectId,
+          content: payload.content,
+        })
+      }
+      case "deduction.goals.update": {
+        const payload = deductionGoalsUpdatePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createDeductionGoalsService().update({
+          projectId: payload.projectId,
+          goalId: payload.goalId,
+          ...(payload.content === undefined ? {} : { content: payload.content }),
+          ...(payload.action === undefined ? {} : { action: payload.action }),
+        })
+      }
+      case "deduction.goals.progress.set": {
+        const payload = deductionGoalsProgressSetPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createDeductionGoalsService().setProgress({
+          projectId: payload.projectId,
+          goalId: payload.goalId,
+          chapterSequence: payload.chapterSequence,
+          summary: payload.summary,
+          status: payload.status,
+        })
+      }
+      case "deduction.goals.proposal.approve": {
+        const payload = deductionGoalsProposalApprovePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createDeductionGoalsService().approveProposals({
+          projectId: payload.projectId,
+          proposalIds: payload.proposalIds,
+        })
+      }
+      case "deduction.goals.proposal.reject": {
+        const payload = deductionGoalsProposalRejectPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createDeductionGoalsService().rejectProposals({
+          projectId: payload.projectId,
+          proposalIds: payload.proposalIds,
+        })
+      }
+      case "deduction.goals.importLegacy": {
+        const payload = deductionGoalsImportLegacyPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createDeductionGoalsService().importLegacy({
+          projectId: payload.projectId,
+          goals: payload.goals,
+        })
       }
       case "model.list": {
         const payload = modelListPayloadSchema.parse(request.payload)
@@ -549,6 +725,7 @@ export class BackendFacade {
     model?: ModelSelection | undefined
     maxModelCalls?: number | undefined
     allowWorkspaceChapterReads: boolean
+    deductionGoalBundle?: TurnOrchestratorInput["deductionGoalBundle"]
   }): Promise<TaskHandle> {
     return this.startWorkflow({
       workflow: "turn",
@@ -557,6 +734,42 @@ export class BackendFacade {
       userInput: payload.userInput,
       chapterSequence: payload.chapterSequence,
       allowWorkspaceChapterReads: payload.allowWorkspaceChapterReads,
+      ...(payload.presentation === undefined ? {} : { presentation: payload.presentation }),
+      ...(payload.model === undefined ? {} : { model: payload.model }),
+      ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
+      ...(payload.deductionGoalBundle === undefined
+        ? {}
+        : { deductionGoalBundle: payload.deductionGoalBundle }),
+    })
+  }
+
+  private async beginSynopsisTurn(payload: {
+    projectId: ProjectId
+    workspaceRootRef: string
+    sessionId?: string
+    acknowledgeWarnings: boolean
+    forceOverride: boolean
+    presentation?: TurnOrchestratorInput["presentation"]
+    model?: ModelSelection
+    maxModelCalls?: number
+    allowWorkspaceChapterReads: boolean
+  }): Promise<TaskHandle> {
+    const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+    const prepared = await runtime.createSynopsisConversationService().prepareBeginTurn({
+      projectId: payload.projectId,
+      workspaceRootRef: payload.workspaceRootRef,
+      ...(payload.sessionId === undefined ? {} : { sessionId: payload.sessionId }),
+      acknowledgeWarnings: payload.acknowledgeWarnings,
+      forceOverride: payload.forceOverride,
+    })
+    return this.startWorkflow({
+      workflow: "turn",
+      projectId: payload.projectId,
+      workspaceRootRef: payload.workspaceRootRef,
+      userInput: prepared.userInput,
+      chapterSequence: prepared.chapterSequence,
+      allowWorkspaceChapterReads: payload.allowWorkspaceChapterReads,
+      lockDeductionGoals: true,
       ...(payload.presentation === undefined ? {} : { presentation: payload.presentation }),
       ...(payload.model === undefined ? {} : { model: payload.model }),
       ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
@@ -576,6 +789,8 @@ export class BackendFacade {
     deadlineMs?: number
     maxRetrievalRounds?: number
     executionOrigin?: TurnOrchestratorInput["executionOrigin"]
+    deductionGoalBundle?: TurnOrchestratorInput["deductionGoalBundle"]
+    lockDeductionGoals?: boolean
   }>): Promise<TaskHandle> {
     if (input.executionOrigin?.kind !== "automatic_evolution" && input.workflow !== "query") {
       await this.preemptAutomaticEvolution(input.projectId)
@@ -587,6 +802,31 @@ export class BackendFacade {
     }
     const runtime = await this.container.getRuntime(input.projectId, input.workspaceRootRef)
     await runtime.ensureWritableHistoryBranch(this.container.now())
+    const chapterResolve = runtime.createChapterResolveService()
+    let chapterSequence = input.chapterSequence
+    if (input.workflow === "turn") {
+      if (await chapterResolve.isGraphSyncBlocking(input.projectId)) {
+        runtimeLog("warn", "backend-facade", "turn.blocked.graph_sync", { projectId: input.projectId })
+        throw new RevisionInvalidStateError("存在尚未完成图同步的章节修订，请先完成图同步后再开始新一轮推演")
+      }
+      chapterSequence = await chapterResolve.nextChapterSequence(input.projectId)
+      runtimeLog("debug", "backend-facade", "turn.sequence.assigned", {
+        projectId: input.projectId,
+        chapterSequence,
+        requestedSequence: input.chapterSequence,
+      })
+    }
+    let deductionGoalBundle = input.deductionGoalBundle
+    if (input.workflow === "turn" && (input.lockDeductionGoals === true || deductionGoalBundle !== undefined)) {
+      const goals = runtime.createDeductionGoalsService()
+      if (input.lockDeductionGoals === true) {
+        await goals.lockForTurn({ projectId: input.projectId, chapterSequence })
+        deductionGoalBundle = await goals.buildTurnBundle({
+          projectId: input.projectId,
+          chapterSequence,
+        })
+      }
+    }
     const projectSettings = await runtime.readSettings()
     const taskId = this.container.createId()
     const abortController = new AbortController()
@@ -609,7 +849,7 @@ export class BackendFacade {
     runtimeLog("debug", "backend-facade", `${input.workflow}.accepted`, {
       taskId,
       projectId: input.projectId,
-      chapterSequence: input.chapterSequence,
+      chapterSequence,
       modelProvider: modelInfo?.provider ?? "unknown",
       modelName: modelInfo?.model ?? "unknown",
       maxModelCalls: input.maxModelCalls ?? projectSettings.execution.maxModelCalls,
@@ -621,9 +861,10 @@ export class BackendFacade {
       workspaceRootRef: input.workspaceRootRef,
       internalStore: runtime.internalStore,
       userInput: input.userInput,
-      chapterSequence: input.chapterSequence,
+      chapterSequence,
       allowWorkspaceChapterReads: input.allowWorkspaceChapterReads,
       ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
+      ...(deductionGoalBundle === undefined ? {} : { deductionGoalBundle }),
       taskId,
       maxModelCalls: input.maxModelCalls ?? projectSettings.execution.maxModelCalls,
       deadlineMs: input.deadlineMs ?? projectSettings.execution.maxWallTimeMs,
@@ -1135,7 +1376,7 @@ export class BackendFacade {
       code = "revision_not_found"
     } else if (error instanceof RevisionConflictError) {
       code = "revision_conflict"
-    } else if (error instanceof RevisionInvalidStateError) {
+    } else if (error instanceof RevisionInvalidStateError || error instanceof SynopsisInvalidStateError) {
       code = "revision_invalid_state"
     }
     return this.createError(code, message, recoverable)

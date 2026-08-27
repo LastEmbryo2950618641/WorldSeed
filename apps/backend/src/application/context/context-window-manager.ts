@@ -50,7 +50,7 @@ export class ContextWindowManager {
     }
 
     const nonNarrative = currentMessages.filter((message) => (
-      !isProtected(message, input.currentTurnId) && message.kind !== "canonical_chapter"
+      !isProtected(message, input.currentTurnId) && !isNarrativeChapterMessage(message.kind)
     ))
     const firstVisible = currentMessages.filter((message) => !nonNarrative.includes(message))
     const firstTokens = sumTokens(firstVisible) + input.incomingTokenEstimate
@@ -59,7 +59,7 @@ export class ContextWindowManager {
     }
 
     const oldChapters = firstVisible
-      .filter((message) => message.kind === "canonical_chapter" && !isCurrentTurn(message, input.currentTurnId))
+      .filter((message) => isNarrativeChapterMessage(message.kind) && !isCurrentTurn(message, input.currentTurnId))
       .sort((left, right) => left.sequence - right.sequence)
     const hiddenMessageIds = nonNarrative.map((message) => message.messageId)
     const secondVisible = [...firstVisible]
@@ -107,6 +107,10 @@ function completePlan(
     blocked: false,
     ...(reason === undefined ? {} : { reason }),
   }
+}
+
+function isNarrativeChapterMessage(kind: ModelContextMessage["kind"]): boolean {
+  return kind === "canonical_chapter" || kind === "chapter_revision"
 }
 
 function isProtected(message: ModelContextMessage, currentTurnId: string | undefined): boolean {

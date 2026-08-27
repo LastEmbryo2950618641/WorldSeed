@@ -57,7 +57,7 @@ describe("SQLite migrations", () => {
     const frontierColumns = await sql<{ name: string }>`PRAGMA table_info(frontier_refs)`.execute(database)
     const sourceUnitColumns = await sql<{ name: string }>`PRAGMA table_info(source_units)`.execute(database)
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28])
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32])
     expect(tableNames).toEqual(expect.objectContaining(new Set([
       "projects",
       "project_manifests",
@@ -66,7 +66,10 @@ describe("SQLite migrations", () => {
       "artifact_scopes",
       "turn_finalizations",
       "canonical_chapter_messages",
+      "chapter_index",
+      "chapter_lineage_snapshots",
       "chapter_revision_tasks",
+      "revision_conversation_messages",
       "chapter_revision_finalizations",
       "chapter_revision_reviews",
       "chapter_revision_decisions",
@@ -110,6 +113,12 @@ describe("SQLite migrations", () => {
       "workspace_catalog_snapshots",
       "task_workspace_catalog_snapshots",
       "evidence_objects",
+      "synopsis_conversation_sessions",
+      "synopsis_conversation_messages",
+      "chapter_synopsis",
+      "deduction_goals",
+      "deduction_goal_progress",
+      "deduction_goal_proposals",
     ])))
     expect(journalMode.rows[0]?.journal_mode).toBe("wal")
     expect(foreignKeys.rows[0]?.foreign_keys).toBe(1)
@@ -129,6 +138,18 @@ describe("SQLite migrations", () => {
       "revisit_condition",
     ])
     expect(sourceUnitColumns.rows.map((column) => column.name)).not.toContain("settlement_status")
+    const revisionTaskColumns = await sql<{ name: string }>`PRAGMA table_info(chapter_revision_tasks)`.execute(database)
+    const conversationColumns = await sql<{ name: string }>`PRAGMA table_info(revision_conversation_messages)`.execute(database)
+    expect(revisionTaskColumns.rows.map((column) => column.name)).toContain("input_mode")
+    expect(conversationColumns.rows.map((column) => column.name)).toEqual([
+      "id",
+      "project_id",
+      "revision_task_id",
+      "role",
+      "content_text",
+      "proposal_json",
+      "created_at_ms",
+    ])
 
     await sql`INSERT INTO retrieval_fts(projection_id, project_id, scope_id, visibility, semantic_text)
       VALUES ('projection', 'project', 'scope', 'committed', 'old bridge hidden key')`.execute(database)

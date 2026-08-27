@@ -87,18 +87,29 @@ export class ProjectLifecycleService {
       if (manifest === undefined) {
         throw new ProjectLifecycleError("manifest_mismatch", "The internal project manifest is missing")
       }
-      const expectedDigest = calculateManifestDigest({
+      const digestInput = {
         projectId: registered.projectId,
         displayName: manifest.displayName,
         workspaceRootRef: workspaceReport.workspaceRootRef,
         internalStoreRef: store.internalStoreRef,
         baseRulesDigest: workspaceReport.baseRulesDigest,
-      })
+      }
+      const expectedDigest = calculateManifestDigest(digestInput)
+      let resolvedManifest = manifest
       if (manifest.manifestDigest !== expectedDigest) {
-        throw new ProjectLifecycleError("manifest_mismatch", "The workspace or platform base rules no longer match the project manifest")
+        const legacyDigest = calculateManifestDigest(digestInput, manifest.fixedEntries)
+        if (legacyDigest !== manifest.manifestDigest) {
+          throw new ProjectLifecycleError("manifest_mismatch", "The workspace or platform base rules no longer match the project manifest")
+        }
+        resolvedManifest = {
+          ...manifest,
+          fixedEntries: fixedWorkspaceEntries,
+          manifestDigest: expectedDigest,
+        }
+        await session.repository.reconcileManifest(resolvedManifest, nowMs)
       }
       await this.registry.touch(registered.projectId, nowMs)
-      return { manifest, internalStore: store }
+      return { manifest: resolvedManifest, internalStore: store }
     } finally {
       await session.close()
     }
@@ -137,11 +148,14 @@ type ManifestDigestInput = Readonly<{
   baseRulesDigest: string
 }>
 
-function calculateManifestDigest(input: ManifestDigestInput): string {
+function calculateManifestDigest(
+  input: ManifestDigestInput,
+  fixedEntries: ProjectManifest["fixedEntries"] = fixedWorkspaceEntries,
+): string {
   return digest({
     protocolVersion: PROTOCOL_VERSION,
     manifestVersion: PROJECT_MANIFEST_VERSION,
-    fixedEntries: fixedWorkspaceEntries,
+    fixedEntries,
     ...input,
   })
 }

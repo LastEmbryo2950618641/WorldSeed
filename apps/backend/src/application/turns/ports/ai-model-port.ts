@@ -4,6 +4,7 @@ import type {
   PhaseResultEnvelope,
   ProjectSettings,
   ReadRequest,
+  TurnDeductionGoalBundle,
   VerificationProbeDescriptor,
   ModelContextMessageDraft,
   ModelReasoningKind,
@@ -80,6 +81,8 @@ export type TurnPhaseInput = Readonly<{
     minimumWordCount: number
     maximumWordCount: number
   }>
+  deductionGoalBundle?: TurnDeductionGoalBundle
+  deductionGoalConstraintMarkdown?: string
   sourceId?: string
   sourceUnitIds: readonly string[]
   phaseRunIds: readonly string[]
@@ -118,6 +121,38 @@ export type TurnPhaseInput = Readonly<{
   stageProjection?: StageProjection
   validationArtifacts?: Partial<Record<AIPhase, unknown>>
   artifacts: Partial<Record<AIPhase, unknown>>
+  revision?: Readonly<{
+    chapterId: string
+    baseSourceId: string
+    proposedSourceId: string
+    baseContent: string
+    proposedContent: string
+  }>
+  revisionAssist?: Readonly<{
+    chapterId: string
+    heading: string
+    committedBody: string
+    workingBody: string
+    conversationHistory: readonly Readonly<{ role: "user" | "assistant"; content: string }>[]
+  }>
+  synopsisDiscuss?: Readonly<{
+    heading: string
+    chapterSequence: number
+    synopsisMarkdown: string
+    userEditedSinceAgent: boolean
+    conversationHistory: readonly Readonly<{ role: "user" | "assistant"; content: string }>[]
+    activeGoals?: readonly Readonly<{
+      goalId: string
+      content: string
+      lifecycle: "active" | "completed" | "removed"
+    }>[]
+    chapterProgress?: readonly Readonly<{
+      goalId: string
+      chapterSequence: number
+      summary: string
+      status: "planned" | "achieved" | "partial" | "missed" | "superseded"
+    }>[]
+  }>
 }>
 
 export type VerificationProbeExecution = Readonly<{

@@ -15,6 +15,7 @@ import {
   assertWorkspaceMutationAllowed,
   digest,
   fixedWorkspaceEntries,
+  isSynopsisMarkdownPath,
   normalizeWorkspacePath,
   validateWorkspaceInventory,
   type WorkspaceInventoryEntry,
@@ -46,6 +47,10 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       }
     }
     await writeFile(resolveInside(root, "世界推演规则/基础规则/base-rules.md"), defaults.baseRules, {
+      encoding: "utf8",
+      flag: "wx",
+    })
+    await writeFile(resolveInside(root, "世界推演规则/基础规则/plot-synopsis-guide.md"), defaults.plotSynopsisGuide, {
       encoding: "utf8",
       flag: "wx",
     })
@@ -111,6 +116,28 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     await assertParentChainContainsNoLinks(root, path)
     await mkdir(resolve(path, ".."), { recursive: true })
     await writeFile(path, content, { encoding: "utf8" })
+  }
+
+  public async saveSynopsisMarkdown(workspaceRootRef: string, relativePath: string, content: string): Promise<void> {
+    const root = await realpath(resolve(workspaceRootRef))
+    const normalized = assertWorkspaceMutationAllowed(relativePath, "file", "platform")
+    if (!isSynopsisMarkdownPath(normalized)) {
+      throw new Error(`Only synopsis markdown paths can be saved through synopsis workflow: ${normalized}`)
+    }
+    const path = resolveInside(root, normalized)
+    await assertParentChainContainsNoLinks(root, path)
+    await mkdir(resolve(path, ".."), { recursive: true })
+    await writeFile(path, content, { encoding: "utf8" })
+  }
+
+  public async removeSynopsisMarkdown(workspaceRootRef: string, relativePath: string): Promise<void> {
+    const root = await realpath(resolve(workspaceRootRef))
+    const normalized = assertWorkspaceMutationAllowed(relativePath, "file", "platform")
+    if (!isSynopsisMarkdownPath(normalized)) {
+      throw new Error(`Only synopsis markdown paths can be removed through synopsis workflow: ${normalized}`)
+    }
+    const path = resolveInside(root, normalized)
+    await unlink(path)
   }
 
   public async publishChapter(workspaceRootRef: string, relativePath: string, content: string): Promise<void> {

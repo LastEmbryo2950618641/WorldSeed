@@ -54,9 +54,78 @@ export const chapterSummarySchema = z.object({
   heading: z.string().min(1),
   publishPath: z.string().min(1),
   digest: z.string().min(1),
+  sequence: z.number().int().positive().optional(),
   createdAtMs: z.number().int().nonnegative(),
 })
 export type ChapterSummary = z.infer<typeof chapterSummarySchema>
+
+export const chapterIndexSchema = z.object({
+  chapterId: z.string().min(1),
+  sequence: z.number().int().positive(),
+  currentSourceId: z.string().min(1),
+  currentPublishPath: z.string().min(1),
+  assignedAtMs: z.number().int().nonnegative(),
+})
+export type ChapterIndex = z.infer<typeof chapterIndexSchema>
+
+export const chapterStaleMarkerSchema = z.object({
+  kind: z.enum(["prior_chapter_superseded", "graph_sync_incomplete", "review_digest_mismatch"]),
+  ref: z.string().min(1),
+  reason: z.string().min(1),
+  staleSinceMs: z.number().int().nonnegative(),
+})
+export type ChapterStaleMarker = z.infer<typeof chapterStaleMarkerSchema>
+
+export const chapterLineageSchema = z.object({
+  chapterId: z.string().min(1),
+  sourceId: z.string().min(1),
+  priorChapterSourceIds: z.array(z.string().min(1)),
+  staleMarkers: z.array(chapterStaleMarkerSchema),
+})
+export type ChapterLineage = z.infer<typeof chapterLineageSchema>
+
+export const editorSurfaceModeSchema = z.enum([
+  "home_turn",
+  "chapter_read",
+  "chapter_revision_agent",
+  "chapter_revision_direct",
+  "graph_sync_recovery",
+])
+export type EditorSurfaceMode = z.infer<typeof editorSurfaceModeSchema>
+
+export const chapterRevisionInputModeSchema = z.enum(["direct", "agent"])
+export type ChapterRevisionInputMode = z.infer<typeof chapterRevisionInputModeSchema>
+
+export const chapterRevisionConversationProposalSchema = z.object({
+  heading: z.string().min(1).optional(),
+  body: z.string(),
+})
+export type ChapterRevisionConversationProposal = z.infer<typeof chapterRevisionConversationProposalSchema>
+
+export const chapterRevisionConversationMessageSchema = z.object({
+  messageId: idSchema,
+  revisionTaskId: idSchema,
+  projectId: idSchema,
+  role: z.enum(["user", "assistant", "system"]),
+  content: z.string(),
+  proposal: chapterRevisionConversationProposalSchema.optional(),
+  createdAtMs: z.number().int().nonnegative(),
+})
+export type ChapterRevisionConversationMessage = z.infer<typeof chapterRevisionConversationMessageSchema>
+
+export const chapterRevisionConversationListResultSchema = z.object({
+  revisionTaskId: idSchema.optional(),
+  messages: z.array(chapterRevisionConversationMessageSchema),
+})
+export type ChapterRevisionConversationListResult = z.infer<typeof chapterRevisionConversationListResultSchema>
+
+export const chapterRevisionContextMetadataSchema = z.object({
+  chapterId: z.string().min(1),
+  replacedSourceId: z.string().min(1),
+  sourceId: z.string().min(1),
+  decisionId: idSchema.optional(),
+})
+export type ChapterRevisionContextMetadata = z.infer<typeof chapterRevisionContextMetadataSchema>
 
 export const chapterReadResultSchema = chapterSummarySchema.extend({ content: z.string(), body: z.string() })
 export type ChapterReadResult = z.infer<typeof chapterReadResultSchema>
@@ -94,6 +163,7 @@ export const chapterRevisionSchema = z.object({
   predecessorSourceId: z.string().min(1).optional(),
   heading: z.string().min(1),
   contentDigest: z.string().min(1),
+  inputMode: chapterRevisionInputModeSchema.optional(),
   submissionMode: chapterRevisionSubmissionModeSchema.optional(),
   decision: z.enum(["pending", "submit", "abandon"]),
   review: chapterRevisionReviewSchema.optional(),
@@ -106,8 +176,25 @@ export const chapterRevisionSchema = z.object({
 })
 export type ChapterRevision = z.infer<typeof chapterRevisionSchema>
 
+export const chapterRevisionConversationSendResultSchema = z.object({
+  revision: chapterRevisionSchema,
+  messages: z.array(chapterRevisionConversationMessageSchema),
+})
+export type ChapterRevisionConversationSendResult = z.infer<typeof chapterRevisionConversationSendResultSchema>
+
 export const chapterRevisionReadResultSchema = chapterRevisionSchema.extend({ proposedContent: z.string(), proposedBody: z.string() })
 export type ChapterRevisionReadResult = z.infer<typeof chapterRevisionReadResultSchema>
+
+export const resolvedChapterSchema = z.object({
+  index: chapterIndexSchema,
+  committed: chapterReadResultSchema,
+  lineage: chapterLineageSchema,
+  activeRevision: chapterRevisionReadResultSchema.optional(),
+  revisionStale: z.boolean(),
+  graphSyncBlocking: z.boolean(),
+  suggestedUiMode: editorSurfaceModeSchema,
+})
+export type ResolvedChapter = z.infer<typeof resolvedChapterSchema>
 
 export const chapterRevisionDecisionSchema = z.object({
   decisionId: idSchema,

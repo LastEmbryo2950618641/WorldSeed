@@ -394,6 +394,17 @@ compressionTargetRatio = 0.50
 
 第一阶段完成后重新计算可见上下文占用。如果已经不超过 `contextWindowTokens × compressionTargetRatio`，压缩结束。
 
+### 8.3.1 章节修订后的 supersession
+
+用户修订已提交章节后，链上旧的 `canonical_chapter` 消息**不得修改**，但模型可见的章节正文必须以 `active_document_heads` 为准，不能继续向模型展示已被替代的旧正文。完整规则见 [章节修改入口协调设计](chapter-modification-coordination.md) §5。
+
+补充规则：
+
+1. 任何需要当前章节正文的调用方必须通过 `resolveChapter(chapterId)` 读取，禁止直接把链上 `canonical_chapter` 的 `contentRef` 当作当前正文；
+2. `chapter_revision` 与 `canonical_chapter` 同等视为叙事类消息，不得在第一阶段压缩中被当作普通非叙事消息删除；
+3. hydration 时，对每个 `chapterId`，若链上消息对应的 `sourceId` 与 head 不一致，则跳过或替换为 head 解析结果；
+4. `chapter_revision` 消息应在正文提交完成时追加，并携带 `chapterId`、`replacedSourceId`、`sourceId` 等结构化元数据。
+
 ### 8.4 第二阶段：按整章移出最旧正文
 
 若第一阶段后仍超过目标比例，则：

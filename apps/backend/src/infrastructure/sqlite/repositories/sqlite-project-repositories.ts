@@ -141,4 +141,22 @@ export class SqliteProjectRepository implements ProjectRepository {
       manifestDigest: row.digest,
     }
   }
+
+  public async reconcileManifest(manifest: ProjectManifest, updatedAtMs: number): Promise<void> {
+    if (manifest.workspaceRootRef !== this.workspaceRootRef || manifest.internalStoreRef !== this.internalStoreRef) {
+      throw new Error("Manifest storage references do not match the registered project")
+    }
+    await this.database.transaction().execute(async (transaction) => {
+      await transaction.updateTable("project_manifests").set({
+        schema_version: manifest.manifestVersion,
+        fixed_entries_json: encodeJson(manifest.fixedEntries),
+        digest: manifest.manifestDigest,
+        updated_at: updatedAtMs,
+      }).where("project_id", "=", manifest.id).executeTakeFirstOrThrow()
+      await transaction.updateTable("projects").set({
+        manifest_version: manifest.manifestVersion,
+        updated_at: updatedAtMs,
+      }).where("id", "=", manifest.id).executeTakeFirstOrThrow()
+    })
+  }
 }

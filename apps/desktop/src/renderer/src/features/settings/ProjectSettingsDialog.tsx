@@ -13,6 +13,8 @@ import {
 
 import { projectSettingsSchema, type ProjectSettings } from "@worldseed/contracts"
 
+import { UiTooltip } from "../../components/UiTooltip.js"
+
 type SettingsSection = "execution" | "retrieval" | "graph" | "history" | "model"
 type NumericExecutionSetting = Exclude<keyof ProjectSettings["execution"], "outputTokenLimitMode">
 
@@ -115,7 +117,7 @@ export function ProjectSettingsDialog({
     <section className="project-settings-dialog" data-testid="project-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="project-settings-title">
       <header className="model-dialog-header">
         <div><strong id="project-settings-title">设置 / {projectName}</strong><span>项目推演参数与应用服务入口</span></div>
-        <button title="关闭" aria-label="关闭项目设置" onClick={onClose}><X size={16} /></button>
+        <UiTooltip label="关闭"><button aria-label="关闭项目设置" onClick={onClose}><X size={16} /></button></UiTooltip>
       </header>
       <div className="project-settings-layout">
         <aside className="settings-navigation">

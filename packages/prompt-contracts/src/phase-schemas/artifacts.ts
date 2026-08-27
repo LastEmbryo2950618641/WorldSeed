@@ -420,6 +420,11 @@ export const semanticReviewArtifactSchema = z.object({
   graphStillConcise: z.boolean(),
   continuityPreserved: z.boolean(),
   spacetimeContinuityPreserved: z.boolean(),
+  goalCompliance: z.array(z.object({
+    goalId: z.string().min(1),
+    verdict: z.enum(["satisfied", "partial", "violated"]),
+    reason: z.string().min(1),
+  })).optional(),
 })
 
 export const settlementReviewArtifactSchema = z.object({
@@ -477,6 +482,59 @@ export const revisionReviewArtifactSchema = z.object({
   finalSelfReview: z.string().min(1),
 })
 
+export const revisionAssistArtifactSchema = z.object({
+  assistantMessage: z.string().min(1),
+  proposedHeading: z.string().min(1).optional(),
+  proposedBody: z.string().min(1),
+  finalSelfReview: z.string().min(1),
+})
+
+const synopsisDiscussGoalIdSchema = z.string().min(1)
+
+const synopsisDiscussGoalProposalPayloadSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("create"),
+    content: z.string().min(1).max(2_000),
+  }),
+  z.object({
+    kind: z.literal("update_content"),
+    goalId: synopsisDiscussGoalIdSchema,
+    content: z.string().min(1).max(2_000),
+  }),
+  z.object({
+    kind: z.literal("complete"),
+    goalId: synopsisDiscussGoalIdSchema,
+  }),
+  z.object({
+    kind: z.literal("remove"),
+    goalId: synopsisDiscussGoalIdSchema,
+    reason: z.string().max(1_000).optional(),
+  }),
+  z.object({
+    kind: z.literal("set_chapter_progress"),
+    goalId: synopsisDiscussGoalIdSchema,
+    chapterSequence: z.number().int().positive(),
+    summary: z.string().min(1).max(4_000),
+  }),
+])
+
+export const synopsisDiscussGoalProposalSchema = z.object({
+  payload: synopsisDiscussGoalProposalPayloadSchema,
+  reason: z.string().max(1_000).optional(),
+})
+
+export const synopsisDiscussArtifactSchema = z.object({
+  assistantMessage: z.string().min(1),
+  chapterTitle: z.string().min(1).optional(),
+  synopsisBody: z.string().min(1).optional(),
+  choices: z.array(z.object({
+    label: z.string().min(1),
+    action: z.enum(["start_turn", "continue_discuss"]),
+  })).optional(),
+  goalProposals: z.array(synopsisDiscussGoalProposalSchema).optional(),
+  finalSelfReview: z.string().min(1),
+})
+
 export const phaseArtifactSchemas: Record<AIPhase, z.ZodType> = {
   interpret: interpretArtifactSchema,
   rule_assembly: ruleAssemblyArtifactSchema,
@@ -498,6 +556,8 @@ export const phaseArtifactSchemas: Record<AIPhase, z.ZodType> = {
   frontier_settlement: frontierSettlementArtifactSchema,
   commit_review: commitReviewArtifactSchema,
   revision_review: revisionReviewArtifactSchema,
+  revision_assist: revisionAssistArtifactSchema,
+  synopsis_discuss: synopsisDiscussArtifactSchema,
 }
 
 export function phaseArtifactJsonSchema(phase: AIPhase): unknown {
@@ -524,3 +584,5 @@ export type SettlementReviewArtifact = z.infer<typeof settlementReviewArtifactSc
 export type FrontierSettlementArtifact = z.infer<typeof frontierSettlementArtifactSchema>
 export type CommitReviewArtifact = z.infer<typeof commitReviewArtifactSchema>
 export type RevisionReviewArtifact = z.infer<typeof revisionReviewArtifactSchema>
+export type RevisionAssistArtifact = z.infer<typeof revisionAssistArtifactSchema>
+export type SynopsisDiscussArtifact = z.infer<typeof synopsisDiscussArtifactSchema>

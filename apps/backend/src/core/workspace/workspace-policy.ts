@@ -1,3 +1,4 @@
+import { isSynopsisMarkdownPath } from "../chapters/synopsis-path.js"
 import { fixedTopLevelDirectories, fixedWorkspaceEntries } from "./project-manifest.js"
 
 export type WorkspaceInventoryEntry = Readonly<{
@@ -52,7 +53,8 @@ export function assertWorkspaceMutationAllowed(
   }
 
   if (normalized === "章节正文" || normalized.startsWith("章节正文/")) {
-    if (actor !== "chapter_publisher") {
+    const synopsisWritable = isSynopsisMarkdownPath(normalized) && (actor === "user" || actor === "platform")
+    if (!synopsisWritable && actor !== "chapter_publisher") {
       throw new WorkspacePolicyError("Committed chapters can only be changed through the chapter workflow")
     }
   }
@@ -77,7 +79,7 @@ export function assertWorkspaceMutationAllowed(
       throw new WorkspacePolicyError(`User folders are not allowed under ${root.relativePath}`)
     }
 
-    if (kind === "file" && !root.allowUserMarkdown) {
+    if (kind === "file" && !root.allowUserMarkdown && !isSynopsisMarkdownPath(normalized)) {
       throw new WorkspacePolicyError(`User Markdown is not allowed under ${root.relativePath}`)
     }
   }

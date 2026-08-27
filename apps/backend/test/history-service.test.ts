@@ -63,7 +63,7 @@ describe("HistoryService", () => {
     expect(snapshot.manifest.activeScopeIds).toEqual([fixture.scopeId])
     expect(snapshot.manifest.documentHeads).toEqual([expect.objectContaining({ chapterId: fixture.chapterId })])
     expect(snapshot.files.some((file) => file.gitPath.includes("章节正文/第一章 开始.md"))).toBe(true)
-    expect(snapshot.files.some((file) => file.gitPath.includes("基础规则"))).toBe(false)
+    expect(snapshot.files.some((file) => file.gitPath.includes("base-rules.md"))).toBe(false)
     expect((await fixture.repository.listBranches(fixture.projectId))[0]).toMatchObject({
       worldHeadEntryId: first.entryId,
       historyHeadEntryId: first.entryId,
@@ -794,6 +794,7 @@ async function createFixture() {
   const workspace = new NodeWorkspaceAdapter()
   await workspace.createLayout(workspaceRoot, {
     baseRules: "# 基础规则\n",
+    plotSynopsisGuide: "# 剧情梗概讨论引导\n",
     settingsReadme: "# 设定集索引\n",
     referencesReadme: "# 参考文件索引\n",
     descriptionRules: "# 描写规则\n",

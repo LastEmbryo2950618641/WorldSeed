@@ -163,6 +163,16 @@ describe("prompt contracts", () => {
     }
   })
 
+  it("exposes optional deduction-goal fields on synopsis_discuss and semantic_review artifacts", () => {
+    const synopsis = JSON.stringify(phaseArtifactJsonSchema("synopsis_discuss"))
+    expect(synopsis).toContain("goalProposals")
+    expect(synopsis).not.toContain('"format":"uuid"')
+
+    const semantic = phaseArtifactJsonSchema("semantic_review") as { required?: string[] }
+    expect(JSON.stringify(semantic)).toContain("goalCompliance")
+    expect(semantic.required ?? []).not.toContain("goalCompliance")
+  })
+
   it("keeps rule assembly semantic and lets the runtime own its snapshot identity", () => {
     const result = phaseArtifactJsonSchema("rule_assembly")
     expect(JSON.stringify(result)).toContain("selectedWorkspacePaths")

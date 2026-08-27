@@ -13,6 +13,8 @@ import {
 } from "lucide-react"
 import type { HistoryBranchSummary, HistoryEntrySummary } from "@worldseed/contracts"
 
+import { UiTooltip } from "../../components/UiTooltip.js"
+
 type HistoryFilter = "all" | "automatic" | "manual" | "paused"
 
 type Props = Readonly<{
@@ -86,11 +88,15 @@ export function HistoryPanel({
       <button className="history-primary" type="button" disabled={loading || pendingAction !== undefined} onClick={() => { void run("save", onSave); }}>
         {pendingAction === "save" ? <LoaderCircle size={13} /> : <Save size={13} />}保存
       </button>
-      <button type="button" title="返回上一轮" disabled={taskRunning || loading || pendingAction !== undefined} onClick={() => { void run("previous", onReturnPreviousRound); }}><ArrowLeftToLine size={14} /></button>
+      <UiTooltip label="返回上一轮">
+        <button type="button" aria-label="返回上一轮" disabled={taskRunning || loading || pendingAction !== undefined} onClick={() => { void run("previous", onReturnPreviousRound); }}><ArrowLeftToLine size={14} /></button>
+      </UiTooltip>
       <label className="history-branch-select"><GitBranch size={13} /><select aria-label="当前世界线" value={branchId} disabled={branches.length === 0} onChange={(event) => { setBranchId(event.target.value); setShowDifference(false); }}>
         {branches.map((branch) => <option key={branch.branchId} value={branch.branchId}>{branch.name}</option>)}
       </select></label>
-      <button type="button" title="推演历史设置" onClick={onOpenSettings}><Settings2 size={14} /></button>
+      <UiTooltip label="推演历史设置">
+        <button type="button" aria-label="推演历史设置" onClick={onOpenSettings}><Settings2 size={14} /></button>
+      </UiTooltip>
     </div>
     <div className="history-capacity">
       <span><History size={13} />推演历史</span>

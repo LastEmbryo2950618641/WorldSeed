@@ -7,6 +7,7 @@ import {
   type PhaseModelExecution,
   type TurnPhaseInput,
 } from "../../application/index.js"
+import { formatChapterSequenceLabel } from "../../core/index.js"
 import type {
   AIPhase,
   PhaseRequestEnvelope,
@@ -204,6 +205,10 @@ export class FakeAiModelAdapter implements AIModelPort {
           recommendation: "no_issue",
           finalSelfReview: "The proposed revision was checked for continuity using only the supplied revision context.",
         }
+      case "revision_assist":
+        return this.createRevisionAssistArtifact(input)
+      case "synopsis_discuss":
+        return this.createSynopsisDiscussArtifact(input)
       case "graph_governance":
         return this.createGraphGovernanceArtifact(input)
       case "graph_structure_plan": {
@@ -322,6 +327,16 @@ export class FakeAiModelAdapter implements AIModelPort {
       }
       case "semantic_review": {
         const governance = graphGovernanceArtifactSchema.parse(phaseArtifacts(input).graph_governance)
+        const goalCompliance = (input.deductionGoalBundle?.activeGoals ?? []).map((goal) => {
+          const progress = input.deductionGoalBundle?.chapterProgress.find((item) => item.goalId === goal.goalId)
+          return {
+            goalId: goal.goalId,
+            verdict: "satisfied" as const,
+            reason: progress === undefined
+              ? "No chapter progress was locked; treated as unconstrained for this fixture"
+              : `Fixture treats locked progress「${progress.summary}」as satisfied`,
+          }
+        })
         return {
           approvedMutationIndexes: governance.mutations.map((_, index) => index),
           rejectedMutationIndexes: [],
@@ -349,6 +364,7 @@ export class FakeAiModelAdapter implements AIModelPort {
           graphStillConcise: true,
           continuityPreserved: true,
           spacetimeContinuityPreserved: true,
+          ...(goalCompliance.length === 0 ? {} : { goalCompliance }),
         }
       }
       case "settlement_review":
@@ -509,6 +525,106 @@ export class FakeAiModelAdapter implements AIModelPort {
       }],
     }
   }
+
+  private createRevisionAssistArtifact(input: TurnPhaseInput): {
+    assistantMessage: string
+    proposedHeading?: string
+    proposedBody: string
+    finalSelfReview: string
+  } {
+    const assist = input.revisionAssist
+    const userMessage = input.userInput.trim()
+    const heading = assist?.heading ?? "未命名章节"
+    const workingBody = assist?.workingBody ?? assist?.committedBody ?? ""
+    const countChars = (text: string): number => text.replace(/\s+/gu, "").length
+    const currentCount = countChars(workingBody)
+
+    if (/2000|字数|太短|扩充|扩写|加长/u.test(userMessage)) {
+      const target = Number.parseInt(userMessage.match(/(\d{3,5})/u)?.[1] ?? "2000", 10)
+      const safeTarget = Number.isFinite(target) ? target : 2000
+      const expansion = buildExpansionParagraphs(Math.max(200, safeTarget - currentCount), userMessage)
+      const proposedBody = `${workingBody.trim()}\n\n${expansion}`.trim()
+      const nextCount = countChars(proposedBody)
+      return {
+        assistantMessage: `我已把正文从约 ${String(currentCount)} 字扩展到约 ${String(nextCount)} 字，补充了场景细节、人物动作与环境描写。请预览修订建议，满意后再点击「应用到修订稿」。`,
+        proposedHeading: heading,
+        proposedBody,
+        finalSelfReview: "Expanded the chapter body toward the requested length without replacing unrelated paragraphs.",
+      }
+    }
+
+    if (/悬疑|悬念|紧张|惊悚/u.test(userMessage)) {
+      const paragraphs = workingBody.trim().split(/\n{2,}/u).filter((part) => part.length > 0)
+      const suspenseLead = "风先停了一瞬，像是有人在暗处屏住了呼吸。旅人还没看清那盏灯，就先听见了比雨更轻、却更靠近的脚步。"
+      const proposedBody = [suspenseLead, ...paragraphs.slice(1)].join("\n\n")
+      return {
+        assistantMessage: "我重写了开头，把悬疑感前置：先写异常氛围与未现身的威胁，再接入原有情节。若方向合适，可应用到修订稿继续微调。",
+        proposedHeading: heading,
+        proposedBody,
+        finalSelfReview: "Rewrote the opening for suspense while preserving the remaining committed paragraphs.",
+      }
+    }
+
+    const addition = `（按你的要求「${userMessage.slice(0, 48)}${userMessage.length > 48 ? "…" : ""}」补充：这里展开了相关情节，并与上文自然衔接。）`
+    const proposedBody = `${workingBody.trim()}\n\n${addition}`.trim()
+    return {
+      assistantMessage: `我根据「${userMessage.slice(0, 40)}${userMessage.length > 40 ? "…" : ""}」在工作稿末尾增补了一段，并保留原有正文。请查看修订建议后决定是否应用。`,
+      proposedHeading: heading,
+      proposedBody,
+      finalSelfReview: "Appended a targeted paragraph responding to the latest user instruction.",
+    }
+  }
+
+  private createSynopsisDiscussArtifact(input: TurnPhaseInput): {
+    assistantMessage: string
+    chapterTitle?: string
+    synopsisBody?: string
+    choices?: Array<{ label: string; action: "start_turn" | "continue_discuss" }>
+    goalProposals?: Array<{ payload: { kind: string; [key: string]: unknown }; reason?: string }>
+    finalSelfReview: string
+  } {
+    const discuss = input.synopsisDiscuss
+    const userMessage = input.userInput.trim()
+    const chapterSequence = discuss?.chapterSequence ?? 1
+    const chapterLabel = formatChapterSequenceLabel(chapterSequence)
+    const heading = discuss?.heading ?? chapterLabel
+    const chapterTitle = heading.replace(/^第(?:\d+|[零一二三四五六七八九十百]+)章(?:\s+)?/u, "").trim() || "世界种子"
+    const existing = discuss?.synopsisMarkdown.trim() ?? ""
+    const synopsisHeading = `${chapterLabel} ${chapterTitle}`
+    const synopsisBody = existing.length > 0
+      ? `${existing.trim()}\n\n- ${userMessage.slice(0, 120)}${userMessage.length > 120 ? "…" : ""}`
+      : `# ${synopsisHeading} 剧情梗概\n\n${userMessage}\n\n（Agent 已根据讨论整理梗概要点。）`
+    const activeGoals = discuss?.activeGoals?.filter((goal) => goal.lifecycle === "active") ?? []
+    const goalProposals = activeGoals.length === 0
+      ? [{
+          payload: {
+            kind: "create" as const,
+            content: `推进：${userMessage.slice(0, 80)}${userMessage.length > 80 ? "…" : ""}`,
+          },
+          reason: "根据讨论建议新增推演目标",
+        }]
+      : activeGoals.slice(0, 1).map((goal) => ({
+          payload: {
+            kind: "set_chapter_progress" as const,
+            goalId: goal.goalId,
+            chapterSequence,
+            summary: `本章围绕「${userMessage.slice(0, 60)}${userMessage.length > 60 ? "…" : ""}」推进该目标`,
+          },
+          reason: "根据讨论建议本章 planned 进展",
+        }))
+    return {
+      assistantMessage: discuss?.userEditedSinceAgent === true
+        ? "我看到你手工调整过梗概，本轮我只在对话里回应，没有覆盖文件。若需要我重写梗概，请明确说明。"
+        : `我已更新「${synopsisHeading}」的剧情梗概。你可以继续修改，或在满意后点击「开始推演」。`,
+      ...(discuss?.userEditedSinceAgent === true ? {} : { chapterTitle, synopsisBody }),
+      choices: [
+        { label: "按当前梗概开始正式推演", action: "start_turn" },
+        { label: "再修改梗概", action: "continue_discuss" },
+      ],
+      goalProposals,
+      finalSelfReview: "Discussed synopsis without auto-starting a turn; emitted goal proposals for user approval.",
+    }
+  }
 }
 
 function phaseArtifacts(input: TurnPhaseInput): Partial<Record<AIPhase, unknown>> {
@@ -526,4 +642,27 @@ function estimateTokens(value: unknown): number {
 function chineseNumber(value: number): string {
   const numbers = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
   return numbers[value] ?? String(value)
+}
+
+function buildExpansionParagraphs(minChars: number, userMessage: string): string {
+  const seeds = [
+    "雨丝在站台铁架上汇成细流，灯光把每一滴水都照成短暂坠落的星。",
+    "旅人注意到轨道尽头的阴影里，似乎有人刚刚离开，却来不及留下脚印。",
+    "旧广播喇叭偶尔嘶鸣，像是从另一个年代借来的回声，提醒这里并非完全无人。",
+    "风从隧道口涌出，带着潮湿金属与远火的气息，把人的呼吸也吹得发紧。",
+    "站台的时钟停在某一刻，指针的阴影却仍在缓慢移动，仿佛时间本身也在犹豫。",
+  ]
+  const chunks: string[] = []
+  let total = 0
+  let index = 0
+  while (total < minChars && index < 24) {
+    const paragraph = seeds[index % seeds.length] ?? seeds[0] ?? ""
+    chunks.push(paragraph)
+    total += paragraph.replace(/\s+/gu, "").length
+    index += 1
+  }
+  if (userMessage.length > 0) {
+    chunks.push(`以上增补围绕你的要求：${userMessage.slice(0, 60)}${userMessage.length > 60 ? "…" : ""}`)
+  }
+  return chunks.join("\n\n")
 }

@@ -17,6 +17,7 @@ import {
 } from "lucide-react"
 
 import type { TaskSnapshot } from "../../api/client.js"
+import { UiTooltip, uiTooltipRich } from "../../components/UiTooltip.js"
 
 type ResetMetrics = (metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>
 
@@ -99,12 +100,13 @@ function RuntimeRing({ metric, label }: { metric: RuntimeMetric | undefined; lab
   const style = { "--ring-progress": `${String(Math.round(ratio * 100))}%` } as CSSProperties
   const state = metric?.state === "warning" || metric?.state === "exhausted" ? " warning" : ""
   const tooltipValue = `${current} ${detail}`
-  return <div className={`runtime-ring-card${state}`} title={metric?.description ?? label}>
-    <div className="runtime-ring" style={style} aria-label={`${label} ${tooltipValue}`} tabIndex={0}>
-      <span>{centerValue}</span>
+  return <UiTooltip label={uiTooltipRich(label, tooltipValue)} rich>
+    <div className={`runtime-ring-card${state}`}>
+      <div className="runtime-ring" style={style} aria-label={`${label} ${tooltipValue}`} tabIndex={0}>
+        <span>{centerValue}</span>
+      </div>
     </div>
-    <div className="runtime-ring-tooltip" role="tooltip"><strong>{label}</strong><span>{tooltipValue}</span></div>
-  </div>
+  </UiTooltip>
 }
 
 export function TaskCheckpointDialog({ task, onClose, onResume, onPause, onResetMetrics }: {
@@ -173,7 +175,7 @@ export function TaskCheckpointDialog({ task, onClose, onResume, onPause, onReset
         <span className="checkpoint-status-icon"><Pause size={17} /></span>
         <div><strong id="checkpoint-dialog-title">推演已暂停</strong><small>{latestPhase} · 最近稳定检查点</small></div>
         <span className="checkpoint-state">等待决定</span>
-        <button type="button" title="保持暂停并关闭" onClick={onClose}><X size={16} /></button>
+        <UiTooltip label="保持暂停并关闭"><button type="button" aria-label="保持暂停并关闭" onClick={onClose}><X size={16} /></button></UiTooltip>
       </header>
 
       <div className="checkpoint-dialog-body">

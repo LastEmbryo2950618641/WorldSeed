@@ -6,6 +6,7 @@ import { defaultProjectSettings } from "@worldseed/config"
 import type { ProjectSettings } from "@worldseed/contracts"
 
 import type { GraphSlice } from "../../api/client.js"
+import { UiTooltip } from "../../components/UiTooltip.js"
 
 type Props = Readonly<{
   slice: GraphSlice | undefined
@@ -63,8 +64,8 @@ export function WorldGraph({ slice, settings = defaultProjectSettings.graph }: P
   return <div className="graph-view">
     <div className="graph-toolbar">
       <div className="graph-search"><Search size={14} /><input placeholder="搜索节点或原文" /></div>
-      <button title="定位当前场景"><LocateFixed size={15} /></button>
-      <button title="重新布局"><RefreshCw size={15} /></button>
+      <UiTooltip label="定位当前场景"><button aria-label="定位当前场景"><LocateFixed size={15} /></button></UiTooltip>
+      <UiTooltip label="重新布局"><button aria-label="重新布局"><RefreshCw size={15} /></button></UiTooltip>
     </div>
     <div className="graph-config"><span>出度 {settings.maxDirectOutDegree}</span><span>入度 {settings.maxDirectInDegree}</span><span>查询入口 {settings.maxNeighborhoodAnchors}</span><span>合并预警 {settings.mergeWarningThreshold}</span><span>{settings.layoutMode === "layered_collision_avoidance" ? "分层避碰" : settings.layoutMode}</span></div>
     {slice === undefined || slice.nodes.length === 0 ? <div className="empty-state">完成一轮推演后，这里显示从本轮锚点读取的真实局部图。</div> : <div className="graph-stage">

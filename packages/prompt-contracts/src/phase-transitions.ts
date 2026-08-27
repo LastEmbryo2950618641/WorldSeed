@@ -32,6 +32,8 @@ export const phaseTransitions: Record<AIPhase, PhaseTransition> = {
   frontier_settlement: { next: ["commit_review"], returnsTo: ["graph_governance"] },
   commit_review: { next: [], returnsTo: ["source_retrieval", "graph_governance", "settlement_review", "frontier_settlement"] },
   revision_review: { next: [], returnsTo: [] },
+  revision_assist: { next: [], returnsTo: [] },
+  synopsis_discuss: { next: [], returnsTo: [] },
 }
 
 export function isAllowedPhaseTransition(from: AIPhase, to: AIPhase): boolean {

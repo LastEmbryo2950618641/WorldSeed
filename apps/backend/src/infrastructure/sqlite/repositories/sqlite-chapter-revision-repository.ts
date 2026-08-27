@@ -34,6 +34,7 @@ export class SqliteChapterRevisionRepository implements ChapterRevisionRepositor
       content_ref: input.contentRef,
       content_digest: input.contentDigest,
       base_content_digest: input.baseContentDigest,
+      input_mode: input.inputMode ?? "direct",
       submission_mode: input.submissionMode ?? null,
       decision: input.decision,
       review_id: input.review?.reviewId ?? null,
@@ -79,6 +80,16 @@ export class SqliteChapterRevisionRepository implements ChapterRevisionRepositor
       .orderBy("updated_at", "desc")
       .executeTakeFirst()
     return row === undefined ? undefined : this.map(row)
+  }
+
+  public async hasIncompleteGraphSync(projectId: ProjectId): Promise<boolean> {
+    const row = await this.database.selectFrom("chapter_revision_tasks").select("id")
+      .where("project_id", "=", projectId)
+      .where("decision", "=", "submit")
+      .where("graph_sync_status", "in", ["pending", "running", "failed"])
+      .where("status", "not in", ["retired", "completed"])
+      .executeTakeFirst()
+    return row !== undefined
   }
 
   public async createFinalization(input: Readonly<{
@@ -237,6 +248,7 @@ export class SqliteChapterRevisionRepository implements ChapterRevisionRepositor
       ...(row.predecessor_source_id === null ? {} : { predecessorSourceId: row.predecessor_source_id }),
       heading: row.heading,
       contentDigest: row.content_digest,
+      inputMode: row.input_mode,
       ...(row.submission_mode === null ? {} : { submissionMode: row.submission_mode }),
       decision: row.decision,
       ...(review === undefined ? {} : { review: mapReview(review) }),

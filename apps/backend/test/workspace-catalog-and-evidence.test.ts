@@ -50,6 +50,7 @@ describe("workspace catalog", () => {
     const workspace = new NodeWorkspaceAdapter()
     await workspace.createLayout(workspaceRoot, {
       baseRules: "# 基础规则\n",
+      plotSynopsisGuide: "# 剧情梗概讨论引导\n",
       settingsReadme: "# 设定集索引\n",
       referencesReadme: "# 参考文件索引\n",
       descriptionRules: "# 描写规则\n",
@@ -102,6 +103,7 @@ describe("sqlite workspace catalog snapshot repository", () => {
     const workspace = new NodeWorkspaceAdapter()
     await workspace.createLayout(workspaceRoot, {
       baseRules: "# 基础规则\n",
+      plotSynopsisGuide: "# 剧情梗概讨论引导\n",
       settingsReadme: "# 设定集索引\n",
       referencesReadme: "# 参考文件索引\n",
       descriptionRules: "# 描写规则\n",
@@ -176,6 +178,7 @@ describe("sqlite evidence store", () => {
     const workspace = new NodeWorkspaceAdapter()
     await workspace.createLayout(workspaceRoot, {
       baseRules: "# 基础规则\n",
+      plotSynopsisGuide: "# 剧情梗概讨论引导\n",
       settingsReadme: "# 设定集索引\n",
       referencesReadme: "# 参考文件索引\n",
       descriptionRules: "# 描写规则\n",

@@ -6,4 +6,5 @@
 - 判断任务应进入正式正文、只读查询、后台演化或章节修订工作流。
 - 提炼必须读取的旧依赖假设，但不要把假设当作读取结果。
 - 正式场景标记时间与地点锚点需求。
+- 若输入含 `deductionGoalBundle` / `deductionGoalConstraintMarkdown`，将其视为**本轮锁定的推演目标约束**：正文推进不得违背已锁定的本章 planned 预期；冲突须在后续审查暴露，不得静默改写目标。
 - 输出 `interpret` 阶段结果包和对应 artifact。

@@ -118,6 +118,9 @@ async function listModels(backend: BackendProcess, vault: FileCredentialVault, r
 }
 
 async function resolveRequest(request: ClientRequest, vault: FileCredentialVault): Promise<ClientRequest> {
+  if (process.env.WORLDSEED_FAKE_MODEL?.trim() === "1") {
+    return stripModelSelection(request)
+  }
   if (request.method === "turn.start") {
     const payload = turnStartPayloadSchema.parse(request.payload)
     return { ...request, payload: await resolveModelCredential(payload, vault) }
@@ -143,6 +146,13 @@ async function resolveRequest(request: ClientRequest, vault: FileCredentialVault
     return { ...request, payload: await resolveModelCredential(payload, vault) }
   }
   return request
+}
+
+function stripModelSelection(request: ClientRequest): ClientRequest {
+  if (request.payload === undefined || typeof request.payload !== "object" || request.payload === null) return request
+  if (!("model" in request.payload)) return request
+  const { model: _model, ...payload } = request.payload as Record<string, unknown> & { model?: unknown }
+  return { ...request, payload }
 }
 
 async function invokeData<T>(backend: BackendProcess, method: ClientRequest["method"], payload: unknown): Promise<T> {

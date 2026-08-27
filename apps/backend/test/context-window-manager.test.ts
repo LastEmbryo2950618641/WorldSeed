@@ -26,6 +26,30 @@ describe("ContextWindowManager", () => {
     expect(estimateModelMessageTokens("世界连续演化")).toBe(14)
   })
 
+  it("treats chapter_revision as narrative during compaction", () => {
+    const turnId = "00000000-0000-4000-8000-000000000010"
+    const messages = [
+      message({ messageId: "00000000-0000-4000-8000-000000000011", sequence: 0, kind: "system_rules", tokenEstimate: 10 }),
+      message({ messageId: "00000000-0000-4000-8000-000000000012", sequence: 1, kind: "phase_response", tokenEstimate: 25, turnId: "00000000-0000-4000-8000-000000000020" }),
+      message({ messageId: "00000000-0000-4000-8000-000000000013", sequence: 2, kind: "chapter_revision", tokenEstimate: 30, turnId: "00000000-0000-4000-8000-000000000020" }),
+      message({ messageId: "00000000-0000-4000-8000-000000000014", sequence: 3, kind: "phase_response", tokenEstimate: 25, turnId }),
+    ]
+    const plan = new ContextWindowManager().plan({
+      messages,
+      currentTurnId: turnId,
+      contextWindowTokens: 100,
+      triggerRatio: 0.97,
+      targetRatio: 0.5,
+      incomingTokenEstimate: 10,
+    })
+
+    expect(plan.phase).toBe("chapter")
+    expect(plan.hiddenMessageIds).toEqual([
+      "00000000-0000-4000-8000-000000000012",
+      "00000000-0000-4000-8000-000000000013",
+    ])
+  })
+
   it("removes older non-narrative messages before older chapters", () => {
     const turnId = "00000000-0000-4000-8000-000000000010"
     const messages = [

@@ -6,7 +6,12 @@ import type { RuntimeMetricsSnapshot } from "@worldseed/contracts"
 
 import { invokeBackend } from "../src/renderer/src/api/client.js"
 import { EditorArea } from "../src/renderer/src/features/editor/EditorArea.js"
+import { ChapterWorkspaceRail } from "../src/renderer/src/features/editor/ChapterWorkspaceRail.js"
+import { ChapterWorkspaceToolbar } from "../src/renderer/src/features/editor/ChapterWorkspaceToolbar.js"
+import { ChapterDraftVersionsPrototype } from "../src/renderer/src/features/editor/ChapterDraftVersionsPrototype.js"
+import { CreationDeskProgressReview } from "../src/renderer/src/features/editor/CreationDeskProgressReview.js"
 import { RightRail } from "../src/renderer/src/features/status/RightRail.js"
+import { RightPanelViewport } from "../src/renderer/src/features/status/RightPanelViewport.js"
 import { HistoryPanel } from "../src/renderer/src/features/status/HistoryPanel.js"
 import { TaskCheckpointDialog } from "../src/renderer/src/features/status/TaskCheckpointPrototype.js"
 import { ProjectSettingsDialog } from "../src/renderer/src/features/settings/ProjectSettingsDialog.js"
@@ -64,6 +69,21 @@ function editorDefaults(overrides: Partial<React.ComponentProps<typeof EditorAre
     onMaximumWordCountChange: vi.fn(),
     onSave: vi.fn(),
     onRun: vi.fn(),
+    onEnsureRevision: vi.fn(async () => undefined),
+    onUpdateRevision: vi.fn(async () => { throw new Error("updateRevision not mocked") }),
+    onReviewRevision: vi.fn(async () => { throw new Error("reviewRevision not mocked") }),
+    onSubmitRevision: vi.fn(async () => { throw new Error("submitRevision not mocked") }),
+    onRetireRevision: vi.fn(async () => { throw new Error("retireRevision not mocked") }),
+    chapterConversationMessages: [],
+    projectId: "project-test",
+    workspaceRootRef: "C:\\Worldseed\\test",
+    synopsisSession: undefined,
+    synopsisMessages: [],
+    synopsisBusy: false,
+    onSynopsisSend: vi.fn(async () => {}),
+    onOpenSynopsisFile: vi.fn(),
+    diffFocusMessageId: undefined,
+    onDiffFocusHandled: vi.fn(),
     ...overrides,
   }
 }
@@ -90,17 +110,56 @@ describe("renderer workbench UI contract", () => {
     vi.clearAllMocks()
   })
 
-  it("renders the creation desk as a distinct home state with prompt controls", () => {
+  it("renders the creation desk as a full-height conversation workspace", () => {
     const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults()))
 
-    expect(html).toContain("创作台首页")
-    expect(html).toContain("动态图召回")
-    expect(html).toContain("表现控制")
-    expect(html).toContain("本轮推演输入")
+    expect(html).toContain("data-testid=\"synopsis-conversation\"")
+    expect(html).toContain("creation-desk-workspace")
+    expect(html).toContain("剧情梗概讨论")
+    expect(html).toContain("data-testid=\"creation-desk-toolbar\"")
+    expect(html).toContain("data-testid=\"creation-desk-goals-trigger\"")
+    expect(html).toContain("data-testid=\"creation-desk-start-turn\"")
+    expect(html).not.toContain("创作台首页")
+    expect(html).not.toContain("从本轮输入开始")
     expect(html).toContain("近景跟随.md")
     expect(html).toContain("克制叙述.md")
     expect(html).toContain("2000")
     expect(html).toContain("3000")
+  })
+
+  it("renders post-turn progress review actions for locked planned rows", () => {
+    const html = renderToStaticMarkup(React.createElement(CreationDeskProgressReview, {
+      items: [{
+        goal: {
+          goalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          projectId: "11111111-1111-4111-8111-111111111111",
+          content: "林序查清名单来源",
+          source: "user",
+          lifecycle: "active",
+          createdAtMs: 1,
+          updatedAtMs: 1,
+        },
+        progress: {
+          progressId: "22222222-2222-4222-8222-222222222222",
+          projectId: "11111111-1111-4111-8111-111111111111",
+          goalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          chapterSequence: 1,
+          summary: "获得登记簿副本",
+          status: "planned",
+          source: "synopsis_discuss",
+          lockedAtMs: 100,
+          recordedAtMs: 100,
+        },
+      }],
+      onReview: async () => {},
+    }))
+
+    expect(html).toContain("data-testid=\"creation-desk-progress-review\"")
+    expect(html).toContain("data-testid=\"creation-desk-progress-review-card\"")
+    expect(html).toContain("data-testid=\"creation-desk-review-achieved\"")
+    expect(html).toContain("data-testid=\"creation-desk-review-partial\"")
+    expect(html).toContain("data-testid=\"creation-desk-review-missed\"")
+    expect(html).toContain("获得登记簿副本")
   })
 
   it("renders committed chapters through the chapter reader instead of the editor", () => {
@@ -112,13 +171,140 @@ describe("renderer workbench UI contract", () => {
       readOnly: true,
     })))
 
-    expect(html).toContain("已提交章节")
+    expect(html).toContain("章节草稿")
+    expect(html).not.toContain("data-testid=\"chapter-workspace-toolbar\"")
+    expect(html).toContain("data-testid=\"chapter-reading-toolbar\"")
+    expect(html).toContain("data-testid=\"chapter-editor-chrome-toggle\"")
+    expect(html).toContain("aria-expanded=\"false\"")
     expect(html).toContain("第一章 雨夜来信")
     expect(html).toContain("雨落在旧港的铁皮屋顶上。")
-    expect(html).not.toContain("mock-monaco-editor")
+    expect(html).toContain("mock-monaco-editor")
   })
 
-  it("places revision checks below the full-width editor", () => {
+  it("renders committed and draft document tabs during agent revision", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      selectedPath: "章节正文/第一章 世界种子.md",
+      content: "# 第一章 世界种子\n\n正式正文。",
+      chapterBody: "正式正文。",
+      chapter: { chapterId: "chapter-1", sourceId: "source-1", heading: "第一章 世界种子" },
+      revision: {
+        revisionTaskId: "revision-1",
+        projectId: "project-1",
+        chapterId: "chapter-1",
+        baseSourceId: "source-1",
+        proposedSourceId: "source-2",
+        heading: "第一章 世界种子",
+        contentDigest: "digest-2",
+        inputMode: "agent",
+        decision: "pending",
+        graphSyncStatus: "not_started",
+        status: "editing",
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      },
+      chapterConversationMessages: [{
+        messageId: "message-1",
+        revisionTaskId: "revision-1",
+        projectId: "project-1",
+        role: "assistant",
+        content: "我已扩展正文。",
+        proposal: { heading: "第一章 世界种子", body: "正式正文。\n\nAgent 扩写段落。" },
+        createdAtMs: 2,
+      }],
+    })))
+
+    expect(html).toContain("data-testid=\"chapter-document-switch\"")
+    expect(html).toContain("data-testid=\"chapter-document-committed\"")
+    expect(html).toContain("data-testid=\"chapter-document-draft\"")
+    expect(html).toContain("data-testid=\"chapter-draft-version-create\"")
+    expect(html).toContain("data-testid=\"chapter-editor-status-bar\"")
+    expect(html).toContain("data-testid=\"chapter-editor-status-saved\"")
+    expect(html).toContain("data-testid=\"chapter-editor-status-words\"")
+    expect(html).toContain("aria-label=\"创建新草稿\"")
+    expect(html).toContain("Agent 扩写段落。")
+    expect(html).not.toContain("data-testid=\"chapter-conversation\"")
+  })
+
+  it("renders revision actions in the chapter header toolbar", () => {
+    const html = renderToStaticMarkup(React.createElement(ChapterDraftVersionsPrototype, {
+      versions: [{
+        versionId: "proto-v0",
+        parentVersionId: undefined,
+        source: "baseline",
+        label: "正文",
+        heading: "第一章",
+        body: "正文。",
+        messageId: undefined,
+        createdAtMs: 0,
+      }, {
+        versionId: "proto-v1",
+        parentVersionId: "proto-v0",
+        source: "manual",
+        label: "v1 最新",
+        heading: "第一章",
+        body: "草稿。",
+        messageId: undefined,
+        createdAtMs: 1,
+      }],
+      latestVersionId: "proto-v1",
+      selectedVersionId: "proto-v1",
+      displayMode: "edit",
+      busy: false,
+      showRevisionActions: true,
+      revisionStage: "idle",
+      draftChanged: true,
+      onReview: vi.fn(),
+      onDirectSubmit: vi.fn(),
+      onReviewedSubmit: vi.fn(),
+      onSelectVersion: vi.fn(),
+      onEnterDiff: vi.fn(),
+      onReturnEdit: vi.fn(),
+      onRestore: vi.fn(async () => {}),
+      onCreateDraft: vi.fn(),
+    }))
+
+    expect(html).toContain("data-testid=\"chapter-revision-actions\"")
+    expect(html).toContain("aria-label=\"审核修订\"")
+    expect(html).toContain("aria-label=\"直接提交\"")
+    expect(html).not.toContain("放弃修订")
+  })
+
+  it("renders chapter workspace rail with conversation only", () => {
+    const html = renderToStaticMarkup(React.createElement(ChapterWorkspaceRail, {
+      messages: [],
+      revisionTaskId: "revision-1",
+      busy: false,
+      chapterSynopsis: undefined,
+      synopsisPanelOpen: false,
+      onToggleSynopsisPanel: vi.fn(),
+      onSend: vi.fn(),
+      onInspectDiff: vi.fn(),
+    }))
+
+    expect(html).toContain("data-testid=\"chapter-workspace-rail\"")
+    expect(html).toContain("剧情梗概")
+    expect(html).not.toContain("章节修订")
+    expect(html).not.toContain("data-testid=\"chapter-revision-actions\"")
+    expect(html).not.toContain("data-testid=\"chapter-reading-toolbar\"")
+    expect(html).toContain("data-testid=\"chapter-conversation\"")
+    expect(html).toContain("Agent 对话")
+  })
+
+  it("slides chapter rail over the default right panel when chapter mode is active", () => {
+    const html = renderToStaticMarkup(React.createElement(RightPanelViewport, {
+      chapterMode: true,
+      chapterPanel: React.createElement("div", { "data-testid": "chapter-panel" }, "chapter"),
+      defaultPanel: React.createElement("div", { "data-testid": "default-panel" }, "default"),
+    }))
+
+    expect(html).toContain("data-testid=\"right-panel-viewport\"")
+    expect(html).toContain("right-panel-layer active")
+    expect(html).toContain("data-testid=\"chapter-panel\"")
+    expect(html).toContain("right-panel-layer inactive")
+    expect(html).toContain("data-testid=\"default-panel\"")
+  })
+
+  it("renders draft workspace with unified revision actions", () => {
     const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
       selectedPath: "章节正文/第一章 雨夜来信.md",
       content: "# 第一章 雨夜来信\n\n正式正文。",
@@ -131,6 +317,7 @@ describe("renderer workbench UI contract", () => {
         proposedSourceId: "source-2",
         heading: "第一章 雨夜来信",
         contentDigest: "digest-2",
+        inputMode: "agent",
         decision: "pending",
         graphSyncStatus: "not_started",
         status: "editing",
@@ -141,13 +328,54 @@ describe("renderer workbench UI contract", () => {
       revisionContent: "修改后的正文。",
     })))
 
-    expect(html).toContain("class=\"revision-workspace\"")
-    expect(html).toContain("章节标题")
-    expect(html).toContain("value=\"第一章 雨夜来信\"")
     expect(html).toContain("修改后的正文。")
-    expect(html).not.toContain("# 第一章 雨夜来信")
-    expect(html.indexOf("revision-source-pane")).toBeLessThan(html.indexOf("revision-review-pane"))
-    expect(html).not.toContain("<h1>第一章 雨夜来信</h1>")
+    expect(html).toContain("mock-monaco-editor")
+    expect(html).not.toContain("revision-workspace")
+    expect(html).not.toContain("data-testid=\"chapter-workspace-toolbar\"")
+  })
+
+  it("disables review and direct submit when draft matches committed body", () => {
+    const html = renderToStaticMarkup(React.createElement(ChapterWorkspaceToolbar, {
+      preferences: { fontFamily: "serif", fontSize: 16, lineHeight: "relaxed" },
+      paneLabel: "草稿",
+      wordCount: 4,
+      onReadingChange: vi.fn(),
+      showActions: true,
+      statusHint: undefined,
+      stage: "idle",
+      changed: false,
+      busy: false,
+      error: undefined,
+      onReview: vi.fn(),
+      onDirectSubmit: vi.fn(),
+      onReviewedSubmit: vi.fn(),
+    }))
+
+    expect(html).toContain("修改草稿后可审核或提交")
+    expect(html).toMatch(/revision-secondary-command"[^>]*disabled/)
+    expect(html).toMatch(/revision-primary-command"[^>]*disabled/)
+  })
+
+  it("shows blocked revision hint in the default chapter toolbar", () => {
+    const html = renderToStaticMarkup(React.createElement(ChapterWorkspaceToolbar, {
+      preferences: { fontFamily: "serif", fontSize: 16, lineHeight: "relaxed" },
+      paneLabel: "草稿",
+      wordCount: 4,
+      onReadingChange: vi.fn(),
+      showActions: false,
+      statusHint: "历史草稿仅可查看，请返回最新版本后再审核或提交",
+      stage: "idle",
+      changed: true,
+      busy: false,
+      error: undefined,
+      onReview: vi.fn(),
+      onDirectSubmit: vi.fn(),
+      onReviewedSubmit: vi.fn(),
+    }))
+
+    expect(html).toContain("data-testid=\"chapter-revision-blocked-hint\"")
+    expect(html).toContain("历史草稿仅可查看")
+    expect(html).not.toContain("data-testid=\"chapter-revision-actions\"")
   })
 
   it("does not expose editing controls after chapter content enters graph synchronization", () => {
@@ -367,7 +595,7 @@ describe("right rail process UI contract", () => {
     expect(html).toContain("执行时间")
     expect(html).toContain("活动上下文长度")
     expect(html).toContain("KV 缓存平均命中率")
-    expect(html).toContain("runtime-ring-tooltip")
+    expect(html).toContain("ui-tooltip-anchor")
     expect(html.split("class=\"phase-list\"")[0]).not.toContain("当前阶段检索轮次")
     expect(html).toContain("上下文压缩总次数")
     expect(html).toContain("1 活动链累计")
@@ -388,7 +616,7 @@ describe("right rail process UI contract", () => {
     expect(html).toContain("平均 KV 缓存命中率")
     expect(html).toContain("平均请求时间")
     expect(html).toContain("当前阶段检索轮次")
-    expect(html).toContain("phase-metric-tooltip")
+    expect(html).toContain("ui-tooltip-anchor")
     expect(html).toContain("平均上下文请求 Token 数: 400")
     expect(html).toContain("68%")
   })

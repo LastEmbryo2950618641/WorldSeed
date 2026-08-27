@@ -8,6 +8,7 @@ import {
   modelContextMessageSchema,
   turnContextSchema,
   type ModelContextMessage,
+  type ProjectId,
   type ResettableRuntimeMetricId,
   type RuntimeMetric,
   type RuntimeMetricsSnapshot,
@@ -126,6 +127,7 @@ export class SqliteTurnPersistence implements TurnPersistencePort {
     contentRef: string
     contentDigest: string
     tokenEstimate: number
+    metadata: import("@worldseed/contracts").ChapterRevisionContextMetadata
     createdAtMs: number
   }>): Promise<void> {
     await this.database.transaction().execute(async (transaction) => {
@@ -148,6 +150,7 @@ export class SqliteTurnPersistence implements TurnPersistencePort {
         content_ref: input.contentRef,
         content_digest: input.contentDigest,
         token_estimate: input.tokenEstimate,
+        metadata_json: JSON.stringify(input.metadata),
         origin_phase_run_id: null,
         origin_index: null,
         hidden_at: null,
@@ -159,6 +162,44 @@ export class SqliteTurnPersistence implements TurnPersistencePort {
         updated_at: input.createdAtMs,
       }).where("id", "=", input.chainId).executeTakeFirstOrThrow()
     })
+  }
+
+  public async listCanonicalChapterMessageSources(projectId: ProjectId): Promise<readonly Readonly<{
+    messageId: string
+    sourceId: string
+    contentDigest: string
+  }>[]> {
+    const rows = await this.database.selectFrom("canonical_chapter_messages").select([
+      "id",
+      "source_id",
+      "content_digest",
+    ]).where("project_id", "=", projectId).orderBy("chapter_sequence").execute()
+    return rows.map((row) => ({
+      messageId: row.id,
+      sourceId: row.source_id,
+      contentDigest: row.content_digest,
+    }))
+  }
+
+  public async findChapterRevisionSummaryByTaskId(taskId: string): Promise<Readonly<{
+    chapterId: string
+    proposedSourceId: string
+    baseSourceId: string
+    contentDigest: string
+  }> | undefined> {
+    const row = await this.database.selectFrom("chapter_revision_tasks").select([
+      "chapter_id",
+      "proposed_source_id",
+      "base_source_id",
+      "content_digest",
+    ]).where("id", "=", taskId).executeTakeFirst()
+    if (row === undefined) return undefined
+    return {
+      chapterId: row.chapter_id,
+      proposedSourceId: row.proposed_source_id,
+      baseSourceId: row.base_source_id,
+      contentDigest: row.content_digest,
+    }
   }
 
   public async listModelContextMessages(chainId: string): Promise<readonly ModelContextMessage[]> {
@@ -974,6 +1015,43 @@ export class SqliteTurnPersistence implements TurnPersistencePort {
         error_json: null,
         updated_at: updatedAtMs,
       }).where("id", "=", finalizationId).executeTakeFirstOrThrow()
+
+      const documentVersion = await transaction.selectFrom("document_versions").select(["chapter_id", "publish_path"])
+        .where("project_id", "=", row.project_id)
+        .where("source_id", "=", row.source_id)
+        .orderBy("created_at", "desc")
+        .executeTakeFirst()
+      if (documentVersion !== undefined) {
+        const existingByChapter = await transaction.selectFrom("chapter_index").selectAll()
+          .where("project_id", "=", row.project_id)
+          .where("chapter_id", "=", documentVersion.chapter_id)
+          .executeTakeFirst()
+        if (existingByChapter !== undefined) {
+          await transaction.updateTable("chapter_index").set({
+            current_source_id: row.source_id,
+            current_publish_path: row.chapter_path,
+          }).where("project_id", "=", row.project_id).where("chapter_id", "=", documentVersion.chapter_id).execute()
+        } else {
+          const existingBySequence = await transaction.selectFrom("chapter_index").selectAll()
+            .where("project_id", "=", row.project_id)
+            .where("sequence", "=", row.chapter_sequence)
+            .executeTakeFirst()
+          if (existingBySequence !== undefined) {
+            await transaction.deleteFrom("chapter_index")
+              .where("project_id", "=", row.project_id)
+              .where("chapter_id", "=", existingBySequence.chapter_id)
+              .execute()
+          }
+          await transaction.insertInto("chapter_index").values({
+            project_id: row.project_id,
+            chapter_id: documentVersion.chapter_id,
+            sequence: row.chapter_sequence,
+            current_source_id: row.source_id,
+            current_publish_path: row.chapter_path,
+            assigned_at_ms: updatedAtMs,
+          }).executeTakeFirstOrThrow()
+        }
+      }
     })
   }
 
