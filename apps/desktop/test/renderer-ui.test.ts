@@ -118,7 +118,8 @@ describe("renderer workbench UI contract", () => {
     expect(html).toContain("剧情梗概讨论")
     expect(html).toContain("data-testid=\"creation-desk-toolbar\"")
     expect(html).toContain("data-testid=\"creation-desk-goals-trigger\"")
-    expect(html).toContain("data-testid=\"creation-desk-start-turn\"")
+    expect(html).toContain("data-testid=\"creation-desk-advanced-trigger\"")
+    expect(html).not.toContain("data-testid=\"creation-desk-start-turn\"")
     expect(html).not.toContain("创作台首页")
     expect(html).not.toContain("从本轮输入开始")
     expect(html).toContain("近景跟随.md")
@@ -775,6 +776,46 @@ describe("right rail process UI contract", () => {
     expect(html.match(/disabled=""/gu)?.length).toBeGreaterThanOrEqual(2)
   })
 
+  it("renders settings extraction review checkpoint without blocked metrics", () => {
+    const html = renderToStaticMarkup(React.createElement(TaskCheckpointDialog, {
+      task: {
+        handle: { taskId: "task-settings", status: "waiting_for_review" },
+        status: "waiting_for_review",
+        lastPhase: "settings_extraction",
+        interruption: {
+          kind: "settings_extraction_review",
+          message: "正文已生成，抽取了 1 条设定修订提案，请确认后再继续图治理",
+          blockedMetrics: [],
+          phase: "settings_extraction",
+        },
+        phaseRuns: [{
+          phaseRunId: "phase-settings",
+          phase: "settings_extraction",
+          status: "completed",
+          attempt: 1,
+          usage: { modelCalls: 1, inputTokens: 100, outputTokens: 30 },
+          startedAtMs: 1,
+          finishedAtMs: 2,
+        }],
+      },
+      project: {
+        projectId: "project-test",
+        displayName: "测试",
+        workspaceRootRef: "C:\\Worldseed\\test",
+      },
+      onClose: vi.fn(),
+      onResume: vi.fn(() => Promise.resolve()),
+      onPause: vi.fn(() => Promise.resolve()),
+    }))
+
+    expect(html).toContain("设定抽取待确认")
+    expect(html).toContain("settings_extraction")
+    expect(html).toContain("继续图治理")
+    expect(html).not.toContain("阻塞指标")
+    expect(html).toContain("checkpoint-settings-review")
+    expect(html).toContain("没有待确认的设定提案")
+  })
+
   it("renders finalization recovery without implying another AI request", () => {
     const html = renderToStaticMarkup(React.createElement(TaskCheckpointDialog, {
       task: {
@@ -921,6 +962,8 @@ describe("project settings UI contract", () => {
     expect(html).toContain("推演历史")
     expect(html).toContain("模型服务")
     expect(html).toContain("最大模型调用次数")
+    expect(html).toContain("推演发散程度")
+    expect(html).toContain("基于世界观生成设定")
     expect(html).toContain("下一轮推演开始生效")
   })
 })

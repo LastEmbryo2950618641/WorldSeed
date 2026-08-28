@@ -54,6 +54,14 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       encoding: "utf8",
       flag: "wx",
     })
+    await writeFile(resolveInside(root, "世界推演规则/基础规则/settings-query-guide.md"), defaults.settingsQueryGuide, {
+      encoding: "utf8",
+      flag: "wx",
+    })
+    await writeFile(resolveInside(root, "世界推演规则/基础规则/settings-revision-guide.md"), defaults.settingsRevisionGuide, {
+      encoding: "utf8",
+      flag: "wx",
+    })
     await writeFile(resolveInside(root, "设定集/readme.md"), defaults.settingsReadme, {
       encoding: "utf8",
       flag: "wx",
@@ -71,6 +79,26 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       flag: "wx",
     })
     return this.validate(root)
+  }
+
+  public async ensurePlatformDocuments(
+    workspaceRootRef: string,
+    defaults: WorkspaceDefaultDocuments,
+  ): Promise<void> {
+    const root = await realpath(resolve(workspaceRootRef))
+    await mkdir(resolveInside(root, "世界推演规则/基础规则"), { recursive: true })
+    await writeFileIfMissing(
+      resolveInside(root, "世界推演规则/基础规则/plot-synopsis-guide.md"),
+      defaults.plotSynopsisGuide,
+    )
+    await writeFileIfMissing(
+      resolveInside(root, "世界推演规则/基础规则/settings-query-guide.md"),
+      defaults.settingsQueryGuide,
+    )
+    await writeFileIfMissing(
+      resolveInside(root, "世界推演规则/基础规则/settings-revision-guide.md"),
+      defaults.settingsRevisionGuide,
+    )
   }
 
   public async validate(workspaceRootRef: string): Promise<WorkspaceValidationReport> {
@@ -251,6 +279,14 @@ function isAlreadyExistsError(error: unknown): boolean {
     && error !== null
     && "code" in error
     && error.code === "EEXIST"
+}
+
+async function writeFileIfMissing(path: string, content: string): Promise<void> {
+  try {
+    await writeFile(path, content, { encoding: "utf8", flag: "wx" })
+  } catch (error) {
+    if (!isAlreadyExistsError(error)) throw error
+  }
 }
 
 function resolveInside(root: string, relativePath: string): string {

@@ -16,6 +16,7 @@ import {
   ChapterResolveService,
   ChapterSynopsisService,
   DeductionGoalsService,
+  SettingsExtractionService,
   SynopsisConversationService,
   buildSourceUnitExactKeys,
   HistoryManifestBuilder,
@@ -35,6 +36,7 @@ import {
   SqliteSynopsisConversationRepository,
   SqliteChapterSynopsisRepository,
   SqliteDeductionGoalsRepository,
+  SqliteSettingsExtractionRepository,
   SqliteChapterIndexRepository,
   SqliteEvidenceStore,
   SqliteGraphRepository,
@@ -104,6 +106,7 @@ export class ProjectRuntime {
       internalStore: this.internalStorePort,
       workspace: this.workspace,
       chapterSynopsis: this.createChapterSynopsisService(),
+      settingsExtraction: this.createSettingsExtractionService(),
       createId,
       idAllocator: new SqliteProjectIdAllocator(this.database, now),
       now,
@@ -323,7 +326,7 @@ export class ProjectRuntime {
       now: Date.now,
       prompts: this.createPromptResourcePort(),
       appendChapterRevisionContext: async (input) => {
-        const baseRules = await this.createPromptResourcePort().loadBaseRules()
+        const baseRules = await this.createPromptResourcePort().loadTurnSystemRules()
         const chain = await persistence.ensureModelContextChain({
           projectId: input.revision.projectId,
           protocolVersion: "1.0",
@@ -419,6 +422,15 @@ export class ProjectRuntime {
   public createDeductionGoalsService(): DeductionGoalsService {
     return new DeductionGoalsService({
       goals: new SqliteDeductionGoalsRepository(this.database),
+      createId: randomUUID,
+      now: Date.now,
+    })
+  }
+
+  public createSettingsExtractionService(): SettingsExtractionService {
+    return new SettingsExtractionService({
+      proposals: new SqliteSettingsExtractionRepository(this.database),
+      workspace: this.workspace,
       createId: randomUUID,
       now: Date.now,
     })

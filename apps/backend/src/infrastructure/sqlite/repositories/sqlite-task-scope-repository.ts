@@ -95,7 +95,7 @@ export class SqliteTaskScopeRepository implements TaskScopeRepository {
   public async listRecoverableTasks(projectId: ProjectId): Promise<readonly StoredTask[]> {
     const rows = await this.database.selectFrom("tasks").selectAll()
       .where("project_id", "=", projectId)
-      .where("status", "in", ["awaiting_user_decision", "paused"])
+      .where("status", "in", ["awaiting_user_decision", "paused", "waiting_for_review"])
       .orderBy("updated_at", "desc")
       .orderBy("id", "desc")
       .execute()

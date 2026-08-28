@@ -938,8 +938,8 @@ describe("TurnOrchestrator", () => {
       projectSettings: defaultProjectSettings,
     })
 
-    expect(modelCalls).toBe(16)
-    expect(result.modelCalls).toBe(16)
+    expect(modelCalls).toBe(17)
+    expect(result.modelCalls).toBe(17)
     expect(result.modelProvider).toBe("fake")
     expect(result.modelName).toBe("deterministic-contract-fixture")
     expect(result.kvCacheHitRate).toBeCloseTo(0.5, 2)
@@ -1019,10 +1019,10 @@ describe("TurnOrchestrator", () => {
     const retrievalRequest = phaseRuns.find((run) => run.phase === "source_retrieval")?.request as {
       remainingBudget?: { retrievalExecutionDeadlineAtMs?: number; retrievalPhaseDeadlineAtMs?: number }
     }
-    expect(phaseRuns).toHaveLength(16)
+    expect(phaseRuns).toHaveLength(17)
     expect(retrievalRequest.remainingBudget?.retrievalExecutionDeadlineAtMs).toBeTypeOf("number")
     expect(retrievalRequest.remainingBudget?.retrievalPhaseDeadlineAtMs).toBeTypeOf("number")
-    expect(context?.segments).toHaveLength(20)
+    expect(context?.segments).toHaveLength(21)
     expect(context?.budget.maxTokens).toBe(62_080)
     expect(context?.ruleSnapshotId).toBeDefined()
     expect(await fixture.database.selectFrom("ai_decision_records").selectAll().execute()).toHaveLength(1)
@@ -1034,7 +1034,7 @@ describe("TurnOrchestrator", () => {
     expect(await fixture.database.selectFrom("frontier_refs").selectAll().execute()).toEqual([
       expect.objectContaining({ disposition: "active" }),
     ])
-    expect(await fixture.database.selectFrom("kv_usage").selectAll().execute()).toHaveLength(16)
+    expect(await fixture.database.selectFrom("kv_usage").selectAll().execute()).toHaveLength(17)
     const commitReview = phaseRuns.find((run) => run.phase === "commit_review")?.result as {
       artifact?: { continuityAdvice?: readonly { verdict?: string }[] }
     } | undefined
@@ -1198,7 +1198,7 @@ describe("TurnOrchestrator", () => {
       chapterSequence: 1,
     })).rejects.toThrow("simulated model failure")
 
-    expect(calls).toBe(9)
+    expect(calls).toBe(10)
     expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual([])
     const interruptedTask = await fixture.database.selectFrom("tasks").selectAll().executeTakeFirstOrThrow()
     expect(interruptedTask.status).toBe("awaiting_user_decision")
@@ -2802,6 +2802,7 @@ describe("TurnOrchestrator", () => {
       "emergence_review",
       "draft",
       "dependency_audit",
+      "settings_extraction",
     ])
     expect(observed.get("graph_structure_plan")?.artifacts.chapter_naming).toBeUndefined()
   })
@@ -2963,7 +2964,7 @@ describe("TurnOrchestrator", () => {
 
     expect(observedPhases.slice(0, callsBeforeResume)).toEqual(["interpret"])
     expect(observedPhases[callsBeforeResume]).toBe("rule_assembly")
-    expect(result.modelCalls).toBe(16)
+    expect(result.modelCalls).toBe(17)
     expect((await fixture.taskScopes.findTask(task.id))?.status).toBe("completed")
     expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual(["第一章 世界种子.md"])
   })
@@ -3956,6 +3957,8 @@ async function createFixture() {
     defaults: {
       baseRules: "# base\n",
       plotSynopsisGuide: "# synopsis guide\n",
+      settingsQueryGuide: "# settings query guide\n",
+      settingsRevisionGuide: "# settings revision guide\n",
       settingsReadme: "# settings\n",
       referencesReadme: "# references\n",
       descriptionRules: "# description\n",

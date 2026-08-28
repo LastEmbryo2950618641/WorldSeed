@@ -85,16 +85,7 @@ export class BackendContainer {
   }
 
   public async createProject(input: Omit<CreateProjectInput, "defaults" | "nowMs">): Promise<CreatedProject> {
-    const baseRules = await new NodePromptResourceAdapter(this.promptPackageRoot).loadBaseRules()
-    const plotSynopsisGuide = await new NodePromptResourceAdapter(this.promptPackageRoot).loadPlotSynopsisGuide()
-    const defaults = this.workspaceDefaults ?? {
-      baseRules: baseRules.text,
-      plotSynopsisGuide: plotSynopsisGuide.text,
-      settingsReadme: "# 设定集索引\n\n请在这里说明设定文件的内容、路径与适用条件，供 AI 按需选择读取。\n",
-      referencesReadme: "# 参考文件索引\n\n请在这里说明参考资料的内容、路径与使用条件，供 AI 按需选择读取。\n",
-      descriptionRules: "# 默认描写规则\n\n由用户在表现输出目录中继续定义。\n",
-      proseStyleRules: "# 默认笔风规则\n\n由用户在表现输出目录中继续定义。\n",
-    }
+    const defaults = await this.resolveWorkspaceDefaults()
     const created = await this.lifecycle.create({
       ...input,
       defaults,
@@ -105,7 +96,8 @@ export class BackendContainer {
   }
 
   public async openProject(workspaceRootRef: string): Promise<CreatedProject> {
-    const opened = await this.lifecycle.openByWorkspace(workspaceRootRef, this.now())
+    const defaults = await this.resolveWorkspaceDefaults()
+    const opened = await this.lifecycle.openByWorkspace(workspaceRootRef, this.now(), defaults)
     await this.openRuntime(opened.internalStore, opened.manifest.workspaceRootRef, opened.manifest.id)
     return opened
   }
@@ -151,5 +143,26 @@ export class BackendContainer {
       this.promptPackageRoot,
       this.workspace,
     )
+  }
+
+  private async resolveWorkspaceDefaults(): Promise<WorkspaceDefaultDocuments> {
+    if (this.workspaceDefaults !== undefined) return this.workspaceDefaults
+    const prompts = new NodePromptResourceAdapter(this.promptPackageRoot)
+    const [baseRules, plotSynopsisGuide, settingsQueryGuide, settingsRevisionGuide] = await Promise.all([
+      prompts.loadBaseRules(),
+      prompts.loadPlotSynopsisGuide(),
+      prompts.loadSettingsQueryGuide(),
+      prompts.loadSettingsRevisionGuide(),
+    ])
+    return {
+      baseRules: baseRules.text,
+      plotSynopsisGuide: plotSynopsisGuide.text,
+      settingsQueryGuide: settingsQueryGuide.text,
+      settingsRevisionGuide: settingsRevisionGuide.text,
+      settingsReadme: "# 设定集索引\n\n请在这里说明设定文件的内容、路径与适用条件，供 AI 按需选择读取。\n",
+      referencesReadme: "# 参考文件索引\n\n请在这里说明参考资料的内容、路径与使用条件，供 AI 按需选择读取。\n",
+      descriptionRules: "# 默认描写规则\n\n由用户在表现输出目录中继续定义。\n",
+      proseStyleRules: "# 默认笔风规则\n\n由用户在表现输出目录中继续定义。\n",
+    }
   }
 }

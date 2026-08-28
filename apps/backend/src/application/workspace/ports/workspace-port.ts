@@ -10,6 +10,8 @@ import type { ProjectRepository } from "../../projects/index.js"
 export type WorkspaceDefaultDocuments = Readonly<{
   baseRules: string
   plotSynopsisGuide: string
+  settingsQueryGuide: string
+  settingsRevisionGuide: string
   settingsReadme: string
   referencesReadme: string
   descriptionRules: string
@@ -25,6 +27,12 @@ export type WorkspaceValidationReport = Readonly<{
 
 export interface WorkspacePort {
   createLayout(workspaceRootRef: string, defaults: WorkspaceDefaultDocuments): Promise<WorkspaceValidationReport>
+  /**
+   * Idempotently materialize platform-owned fixed Markdown that may be missing on
+   * older workspaces after a product upgrade (e.g. new base-rules guides).
+   * Never overwrites existing files.
+   */
+  ensurePlatformDocuments(workspaceRootRef: string, defaults: WorkspaceDefaultDocuments): Promise<void>
   validate(workspaceRootRef: string): Promise<WorkspaceValidationReport>
   readMarkdown(workspaceRootRef: string, relativePath: string): Promise<string>
   saveUserMarkdown(workspaceRootRef: string, relativePath: string, content: string): Promise<void>

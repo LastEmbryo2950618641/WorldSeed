@@ -159,7 +159,8 @@ try {
   record("G3_proposal_approved")
   await closeGoalsPopover(page)
 
-  // G4 — begin turn via confirm bar (DOM only)
+  // G4 — begin turn via advanced menu (DOM only)
+  await page.getByTestId("creation-desk-advanced-trigger").click()
   const startButton = page.getByTestId("creation-desk-start-turn")
   await startButton.waitFor({ state: "visible", timeout: 10_000 })
   await startButton.click()

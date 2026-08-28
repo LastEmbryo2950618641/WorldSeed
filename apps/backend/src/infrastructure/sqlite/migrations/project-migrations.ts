@@ -946,4 +946,21 @@ export const projectMigrations = Object.freeze([
     )`,
     "CREATE INDEX deduction_goal_proposals_pending ON deduction_goal_proposals(project_id, status, created_at_ms DESC)",
   ]),
+  defineSqlMigration<ProjectDatabase>(33, "033_settings_extraction_proposals", [
+    `CREATE TABLE settings_extraction_proposals (
+      proposal_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      task_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('create', 'update', 'merge')),
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
+      phase_run_id TEXT,
+      reason TEXT,
+      conflict_notes TEXT,
+      created_at_ms INTEGER NOT NULL,
+      resolved_at_ms INTEGER
+    )`,
+    "CREATE INDEX settings_extraction_proposals_task ON settings_extraction_proposals(task_id, status, created_at_ms ASC)",
+    "CREATE INDEX settings_extraction_proposals_pending ON settings_extraction_proposals(project_id, status, created_at_ms DESC)",
+  ]),
 ])

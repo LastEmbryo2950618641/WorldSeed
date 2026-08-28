@@ -69,7 +69,12 @@ export class ProjectLifecycleService {
     return { manifest, internalStore: store }
   }
 
-  public async openByWorkspace(workspaceRootRef: string, nowMs: number): Promise<CreatedProject> {
+  public async openByWorkspace(
+    workspaceRootRef: string,
+    nowMs: number,
+    defaults: WorkspaceDefaultDocuments,
+  ): Promise<CreatedProject> {
+    await this.workspace.ensurePlatformDocuments(workspaceRootRef, defaults)
     const workspaceReport = await this.workspace.validate(workspaceRootRef)
     assertWorkspaceReport(workspaceReport.issues)
     const registered = await this.registry.findByWorkspaceRoot(workspaceReport.workspaceRootRef)
@@ -160,8 +165,13 @@ function calculateManifestDigest(
   })
 }
 
-function assertWorkspaceReport(issues: readonly { message: string }[]): void {
+function assertWorkspaceReport(issues: readonly { path?: string; message: string }[]): void {
   if (issues.length > 0) {
-    throw new ProjectLifecycleError("workspace_invalid", issues.map((issue) => issue.message).join("; "))
+    throw new ProjectLifecycleError(
+      "workspace_invalid",
+      issues.map((issue) => (issue.path === undefined || issue.path.length === 0
+        ? issue.message
+        : `${issue.message}: ${issue.path}`)).join("; "),
+    )
   }
 }

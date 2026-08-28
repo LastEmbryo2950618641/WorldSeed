@@ -146,6 +146,8 @@ const demoInventory: InventoryEntry[] = [
   { path: "世界推演规则/基础规则", kind: "directory" },
   { path: "世界推演规则/基础规则/base-rules.md", kind: "file" },
   { path: "世界推演规则/基础规则/plot-synopsis-guide.md", kind: "file" },
+  { path: "世界推演规则/基础规则/settings-query-guide.md", kind: "file" },
+  { path: "世界推演规则/基础规则/settings-revision-guide.md", kind: "file" },
   { path: "世界推演规则/用户规则", kind: "directory" },
   { path: "世界推演规则/用户规则/人物出场节奏.md", kind: "file" },
   { path: "设定集", kind: "directory" },

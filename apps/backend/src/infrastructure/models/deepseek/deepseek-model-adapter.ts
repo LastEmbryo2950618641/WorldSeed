@@ -109,7 +109,7 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
       deadlineRemainingMs: request.remainingBudget.deadlineAtMs - Date.now(),
     })
     const [baseRules, phasePrompt, client] = await Promise.all([
-      options?.contextMessages === undefined ? this.prompts.loadBaseRules() : Promise.resolve(undefined),
+      options?.contextMessages === undefined ? this.prompts.loadTurnSystemRules() : Promise.resolve(undefined),
       options?.phasePrompt === undefined
         ? this.prompts.loadPhase(request.phase)
         : Promise.resolve(options.phasePrompt),

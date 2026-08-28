@@ -57,6 +57,9 @@ import {
   deductionGoalsProposalApprovePayloadSchema,
   deductionGoalsProposalRejectPayloadSchema,
   deductionGoalsImportLegacyPayloadSchema,
+  settingsExtractionListPayloadSchema,
+  settingsExtractionProposalApprovePayloadSchema,
+  settingsExtractionProposalRejectPayloadSchema,
   modelListPayloadSchema,
   modelProfilesReadPayloadSchema,
   modelProfilesSavePayloadSchema,
@@ -81,6 +84,7 @@ import {
   RevisionInvalidStateError,
   RevisionNotFoundError,
   SynopsisInvalidStateError,
+  SettingsExtractionReviewPendingError,
   TurnBudgetExceededError,
   TurnPauseRequestedError,
 } from "../application/index.js"
@@ -223,7 +227,8 @@ export class BackendFacade {
           task.handle.projectId === payload.projectId
           && !this.automaticEvolutionTasks.has(task.handle.taskId)
           && (task.status === "created" || task.status === "running" || task.status === "committing"
-            || task.status === "paused" || task.status === "awaiting_user_decision")
+            || task.status === "paused" || task.status === "awaiting_user_decision"
+            || task.status === "waiting_for_review")
         ))
         const stableCheckpoint = activeTask === undefined
           ? undefined
@@ -559,6 +564,28 @@ export class BackendFacade {
         return runtime.createDeductionGoalsService().importLegacy({
           projectId: payload.projectId,
           goals: payload.goals,
+        })
+      }
+      case "settings.extraction.list": {
+        const payload = settingsExtractionListPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSettingsExtractionService().listByTask(payload.taskId)
+      }
+      case "settings.extraction.proposal.approve": {
+        const payload = settingsExtractionProposalApprovePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSettingsExtractionService().approveProposals({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          proposalIds: payload.proposalIds,
+        })
+      }
+      case "settings.extraction.proposal.reject": {
+        const payload = settingsExtractionProposalRejectPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSettingsExtractionService().rejectProposals({
+          projectId: payload.projectId,
+          proposalIds: payload.proposalIds,
         })
       }
       case "model.list": {
@@ -905,6 +932,11 @@ export class BackendFacade {
       (error: unknown) => {
         const current = this.tasks.get(taskId)
         if (current?.abortController !== abortController || current.status === "cancelled" || current.status === "paused") return
+        if (error instanceof SettingsExtractionReviewPendingError) {
+          void this.syncSettingsExtractionReview(taskId, current, handle, storedTurnInput, orchestrator, abortController)
+          this.handleAutomaticEvolutionStopped(input.projectId, taskId, false)
+          return
+        }
         const backendError = this.errorFrom(error)
         this.tasks.set(taskId, { ...current, handle: { ...handle, status: "awaiting_user_decision" }, status: "awaiting_user_decision", error: backendError, turnInput: storedTurnInput, orchestrator, abortController })
         runtimeLog("warn", "backend-facade", `${input.workflow}.interrupted`, {
@@ -962,7 +994,7 @@ export class BackendFacade {
         phaseRuns,
       }
     }
-    if (inMemory?.status === "completed" || inMemory?.status === "failed" || inMemory?.status === "awaiting_user_decision" || inMemory?.status === "paused" || inMemory?.status === "cancelled") {
+    if (inMemory?.status === "completed" || inMemory?.status === "failed" || inMemory?.status === "awaiting_user_decision" || inMemory?.status === "waiting_for_review" || inMemory?.status === "paused" || inMemory?.status === "cancelled") {
       return {
         ...toPublicTaskSnapshot(inMemory),
         phaseRuns,
@@ -1021,14 +1053,16 @@ export class BackendFacade {
       await runtime.resetRuntimeMetrics(payload.taskId, payload.resetMetricIds, this.container.now())
     }
     const storedTask = await runtime.taskScopes.findTask(payload.taskId)
-    const blockedMetrics = readFacadeBlockedMetrics(storedTask?.error)
-    const interruptedAtMs = readFacadeInterruptionTimestamp(storedTask?.error)
-    if (!await runtime.wereRuntimeMetricsResetAfter(payload.taskId, blockedMetrics, interruptedAtMs)) {
-      throw new FacadeOperationError(
-        "budget_exhausted",
-        `Explicit budget reset required before resume: ${blockedMetrics.join(", ")}`,
-        true,
-      )
+    if (storedTask?.status !== "waiting_for_review") {
+      const blockedMetrics = readFacadeBlockedMetrics(storedTask?.error)
+      const interruptedAtMs = readFacadeInterruptionTimestamp(storedTask?.error)
+      if (!await runtime.wereRuntimeMetricsResetAfter(payload.taskId, blockedMetrics, interruptedAtMs)) {
+        throw new FacadeOperationError(
+          "budget_exhausted",
+          `Explicit budget reset required before resume: ${blockedMetrics.join(", ")}`,
+          true,
+        )
+      }
     }
     const input: TurnOrchestratorInput = {
       ...record.turnInput,
@@ -1063,6 +1097,11 @@ export class BackendFacade {
       async (error: unknown) => {
         const current = this.tasks.get(payload.taskId)
         if (current?.abortController !== abortController || current.status === "cancelled" || current.status === "paused") return
+        if (error instanceof SettingsExtractionReviewPendingError) {
+          await this.syncSettingsExtractionReview(payload.taskId, { ...record, abortController }, handle, record.turnInput, record.orchestrator, abortController)
+          this.handleAutomaticEvolutionStopped(record.turnInput.projectId, payload.taskId, false)
+          return
+        }
         const backendError = this.errorFrom(error)
         const runtime = this.container.getCurrentRuntime()
         const stored = await runtime?.taskScopes.findTask(payload.taskId)
@@ -1256,7 +1295,7 @@ export class BackendFacade {
     if (runtime === undefined || stored === undefined) {
       throw new Error("The task is not loaded in the current project runtime")
     }
-    if (stored.status !== "awaiting_user_decision" && stored.status !== "paused") {
+    if (stored.status !== "awaiting_user_decision" && stored.status !== "paused" && stored.status !== "waiting_for_review") {
       throw new Error(`Task cannot resume from status: ${stored.status}`)
     }
     const storedRuns = await runtime.listPhaseRuns(taskId)
@@ -1311,7 +1350,7 @@ export class BackendFacade {
     const runtime = this.container.getCurrentRuntime()
     const stored = await runtime?.taskScopes.findTask(taskId)
     if (stored === undefined && record === undefined) throw new Error(`Task is not loaded: ${taskId}`)
-    const pausableStatuses: readonly TaskStatus[] = ["created", "running", "committing", "awaiting_user_decision"]
+    const pausableStatuses: readonly TaskStatus[] = ["created", "running", "committing", "awaiting_user_decision", "waiting_for_review"]
     if (!(stored !== undefined && pausableStatuses.includes(stored.status))
       && !(record !== undefined && pausableStatuses.includes(record.status))) {
       throw new FacadeOperationError("validation_error", "The task is not in a pausable state")
@@ -1353,6 +1392,34 @@ export class BackendFacade {
     if (activeTask !== undefined) {
       throw new FacadeOperationError("history_busy", "History checkout is busy while a task is running")
     }
+  }
+
+  private async syncSettingsExtractionReview(
+    taskId: string,
+    current: TaskRecord,
+    handle: TaskHandle,
+    turnInput: TurnOrchestratorInput,
+    orchestrator: import("../application/index.js").TurnOrchestrator,
+    abortController: AbortController,
+  ): Promise<void> {
+    const runtime = this.container.getCurrentRuntime()
+    const stored = await runtime?.taskScopes.findTask(taskId)
+    const status: TaskStatus = "waiting_for_review"
+    this.tasks.set(taskId, {
+      ...current,
+      handle: { ...handle, status },
+      status,
+      turnInput,
+      orchestrator,
+      abortController,
+    })
+    runtimeLog("info", "backend-facade", "turn.settings_extraction_review", {
+      taskId,
+      proposalCount: stored?.error !== undefined && typeof stored.error === "object" && stored.error !== null && "proposalCount" in stored.error
+        ? stored.error.proposalCount
+        : undefined,
+      lastPhase: stored?.lastPhase,
+    })
   }
 
   private errorFrom(error: unknown): BackendError {

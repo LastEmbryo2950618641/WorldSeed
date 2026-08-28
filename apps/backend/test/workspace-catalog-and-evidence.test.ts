@@ -51,6 +51,8 @@ describe("workspace catalog", () => {
     await workspace.createLayout(workspaceRoot, {
       baseRules: "# 基础规则\n",
       plotSynopsisGuide: "# 剧情梗概讨论引导\n",
+      settingsQueryGuide: "# 设定集默认查询规则\n",
+      settingsRevisionGuide: "# 设定集修订规则\n",
       settingsReadme: "# 设定集索引\n",
       referencesReadme: "# 参考文件索引\n",
       descriptionRules: "# 描写规则\n",
@@ -104,6 +106,8 @@ describe("sqlite workspace catalog snapshot repository", () => {
     await workspace.createLayout(workspaceRoot, {
       baseRules: "# 基础规则\n",
       plotSynopsisGuide: "# 剧情梗概讨论引导\n",
+      settingsQueryGuide: "# 设定集默认查询规则\n",
+      settingsRevisionGuide: "# 设定集修订规则\n",
       settingsReadme: "# 设定集索引\n",
       referencesReadme: "# 参考文件索引\n",
       descriptionRules: "# 描写规则\n",
@@ -179,6 +183,8 @@ describe("sqlite evidence store", () => {
     await workspace.createLayout(workspaceRoot, {
       baseRules: "# 基础规则\n",
       plotSynopsisGuide: "# 剧情梗概讨论引导\n",
+      settingsQueryGuide: "# 设定集默认查询规则\n",
+      settingsRevisionGuide: "# 设定集修订规则\n",
       settingsReadme: "# 设定集索引\n",
       referencesReadme: "# 参考文件索引\n",
       descriptionRules: "# 描写规则\n",

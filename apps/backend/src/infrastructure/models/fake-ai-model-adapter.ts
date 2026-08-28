@@ -193,6 +193,27 @@ export class FakeAiModelAdapter implements AIModelPort {
           }] : [],
           informationBoundary: "pass",
         }
+      case "settings_extraction":
+        if (process.env.WORLDSEED_FAKE_SETTINGS_EXTRACTION?.trim() === "1") {
+          return {
+            summary: "The acceptance fixture proposes one settings file for DOM review.",
+            proposals: [{
+              payload: {
+                kind: "create",
+                relativePath: "设定集/人物/验收旅人.md",
+                markdown: "# 验收旅人\n\n> 适用范围：DOM 回归测试\n\n## 身份摘要\n旧站台尽头的无名持灯者。\n",
+                readmeEntry: "`设定集/人物/验收旅人.md` · 验收旅人 · DOM",
+              },
+              reason: "正文首次出现该人物，适合沉淀为设定。",
+            }],
+            finalSelfReview: "One create proposal is emitted for settings extraction review.",
+          }
+        }
+        return {
+          summary: "The deterministic fixture found no new settings to persist for this turn.",
+          proposals: [],
+          finalSelfReview: "No settings proposals were required for the fixture chapter.",
+        }
       case "response_review":
         return {
           evidenceClosed: true,

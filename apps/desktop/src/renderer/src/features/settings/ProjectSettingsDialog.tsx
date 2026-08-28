@@ -11,12 +11,15 @@ import {
   type LucideIcon,
 } from "lucide-react"
 
-import { projectSettingsSchema, type ProjectSettings } from "@worldseed/contracts"
+import { projectSettingsSchema, type ProjectSettings, type WorldDivergenceMode } from "@worldseed/contracts"
 
 import { UiTooltip } from "../../components/UiTooltip.js"
 
 type SettingsSection = "execution" | "retrieval" | "graph" | "history" | "model"
-type NumericExecutionSetting = Exclude<keyof ProjectSettings["execution"], "outputTokenLimitMode">
+type NumericExecutionSetting = Exclude<
+  keyof ProjectSettings["execution"],
+  "outputTokenLimitMode" | "worldDivergenceMode"
+>
 
 type Props = Readonly<{
   projectName: string
@@ -37,7 +40,7 @@ type SectionDefinition = Readonly<{
 }>
 
 const sections: readonly SectionDefinition[] = [
-  { id: "execution", label: "推演执行", group: "项目", keywords: "模型调用 token 耗时 预算 检索轮次", icon: Gauge },
+  { id: "execution", label: "推演执行", group: "项目", keywords: "模型调用 token 耗时 预算 检索轮次 发散 设定 世界观", icon: Gauge },
   { id: "retrieval", label: "资料检索", group: "项目", keywords: "读取 请求 候选 深度 证据 token", icon: Database },
   { id: "graph", label: "世界图", group: "项目", keywords: "出度 入度 合并 预警 展开 节点 连接 入口 布局", icon: Network },
   { id: "history", label: "推演历史", group: "项目", keywords: "保存 历史 世界线 保留 上限 删除", icon: History },
@@ -82,6 +85,10 @@ export function ProjectSettingsDialog({
 
   const updateExecution = (key: NumericExecutionSetting, value: number): void => {
     setDraft((current) => ({ ...current, execution: { ...current.execution, [key]: value } }))
+    setSaveError(undefined)
+  }
+  const updateWorldDivergenceMode = (worldDivergenceMode: WorldDivergenceMode): void => {
+    setDraft((current) => ({ ...current, execution: { ...current.execution, worldDivergenceMode } }))
     setSaveError(undefined)
   }
   const updateRetrieval = (key: keyof ProjectSettings["retrieval"], value: number): void => {
@@ -138,7 +145,7 @@ export function ProjectSettingsDialog({
           </div>
         </aside>
         <div className="settings-editor">
-          {section === "execution" ? <ExecutionSettings value={draft.execution} onChange={updateExecution} /> : null}
+          {section === "execution" ? <ExecutionSettings value={draft.execution} onChange={updateExecution} onDivergenceModeChange={updateWorldDivergenceMode} /> : null}
           {section === "retrieval" ? <RetrievalSettings value={draft.retrieval} onChange={updateRetrieval} /> : null}
           {section === "graph" ? <GraphSettings value={draft.graph} onChange={updateGraph} /> : null}
           {section === "history" ? <HistorySettings value={draft.history} entryCount={historyEntryCount} onChange={updateHistoryLimit} /> : null}
@@ -154,11 +161,41 @@ export function ProjectSettingsDialog({
   </div>
 }
 
-function ExecutionSettings({ value, onChange }: {
+function ExecutionSettings({ value, onChange, onDivergenceModeChange }: {
   value: ProjectSettings["execution"]
   onChange: (key: NumericExecutionSetting, value: number) => void
+  onDivergenceModeChange: (mode: WorldDivergenceMode) => void
 }): React.JSX.Element {
   return <SettingsPage icon={Gauge} title="推演执行" description="默认按每轮可能失败并保留约 30% 重试冗余计算。">
+    <div className="settings-field-row">
+      <span>
+        <strong>推演发散程度</strong>
+        <small>约束下一章是否可创造新设定；写入设定集仍须用户确认</small>
+      </span>
+      <div className="settings-segmented settings-segmented-3" role="group" aria-label="推演发散程度">
+        <button
+          className={value.worldDivergenceMode === "strict" ? "active" : ""}
+          type="button"
+          onClick={() => { onDivergenceModeChange("strict"); }}
+        >
+          严格遵循设定
+        </button>
+        <button
+          className={value.worldDivergenceMode === "world_consistent" ? "active" : ""}
+          type="button"
+          onClick={() => { onDivergenceModeChange("world_consistent"); }}
+        >
+          基于世界观生成设定
+        </button>
+        <button
+          className={value.worldDivergenceMode === "free" ? "active" : ""}
+          type="button"
+          onClick={() => { onDivergenceModeChange("free"); }}
+        >
+          自由发挥
+        </button>
+      </div>
+    </div>
     <NumberSetting label="最大模型调用次数" description="包含阶段调用和业务 Schema 修复调用" value={value.maxModelCalls} min={1} max={400} onChange={(next) => { onChange("maxModelCalls", next); }} />
     <NumberSetting label="主动压缩阈值" description="按当前模型 Profile 的最大上下文容量计算，达到该比例时开始机械压缩" value={Math.round(value.contextCompactionThresholdRatio * 100)} min={50} max={99} suffix="%" onChange={(next) => { onChange("contextCompactionThresholdRatio", next / 100); }} />
     <NumberSetting label="压缩目标" description="触发压缩后，将当前可见上下文降到模型容量的该比例以内" value={Math.round(value.contextCompressionTargetRatio * 100)} min={10} max={90} suffix="%" onChange={(next) => { onChange("contextCompressionTargetRatio", next / 100); }} />

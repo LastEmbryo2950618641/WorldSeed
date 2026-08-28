@@ -342,6 +342,20 @@ export type DeductionGoalProposalRow = {
   resolved_at_ms: Timestamp | null
 }
 
+export type SettingsExtractionProposalRow = {
+  proposal_id: string
+  project_id: string
+  task_id: string
+  kind: "create" | "update" | "merge"
+  payload_json: string
+  status: "pending" | "approved" | "rejected"
+  phase_run_id: string | null
+  reason: string | null
+  conflict_notes: string | null
+  created_at_ms: Timestamp
+  resolved_at_ms: Timestamp | null
+}
+
 export type ActiveScopeRefRow = {
   project_id: string
   scope_id: string
@@ -806,6 +820,7 @@ export type ProjectDatabase = {
   deduction_goals: DeductionGoalRow
   deduction_goal_progress: DeductionGoalProgressRow
   deduction_goal_proposals: DeductionGoalProposalRow
+  settings_extraction_proposals: SettingsExtractionProposalRow
   model_context_chains: ModelContextChainRow
   model_context_messages: ModelContextMessageRow
   active_scope_refs: ActiveScopeRefRow

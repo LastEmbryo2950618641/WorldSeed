@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Bot, FileText, Play, Send, Settings2, Sparkles, UserRound } from "lucide-react"
+import { Bot, Ellipsis, FileText, Play, Send, Settings2, Sparkles, UserRound } from "lucide-react"
 import type { SynopsisConversationMessage, SynopsisConversationSession } from "@worldseed/contracts"
 
 import { UiTooltip } from "../../components/UiTooltip.js"
@@ -36,6 +36,7 @@ type Props = Readonly<{
 
 export function SynopsisConversationComposer(props: Props): React.JSX.Element {
   const [draft, setDraft] = useState("")
+  const [advancedMenuOpen, setAdvancedMenuOpen] = useState(false)
   const [goalsOpen, setGoalsOpen] = useState(false)
   const [focusUnfilled, setFocusUnfilled] = useState(false)
   const goals = useDeductionGoals({
@@ -44,6 +45,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
   })
   const chapterSequence = props.session?.chapterSequence ?? 1
   const threadRef = useRef<HTMLDivElement>(null)
+  const advancedMenuRef = useRef<HTMLDivElement>(null)
 
   const submit = async (): Promise<void> => {
     const message = draft.trim()
@@ -58,6 +60,24 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
     if (thread === undefined) return
     thread.scrollTop = thread.scrollHeight
   }, [props.messages.length, props.busy])
+
+  useEffect(() => {
+    if (!advancedMenuOpen) return
+    const onPointerDown = (event: MouseEvent): void => {
+      const target = event.target
+      if (target instanceof Node && advancedMenuRef.current?.contains(target)) return
+      setAdvancedMenuOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setAdvancedMenuOpen(false)
+    }
+    window.addEventListener("mousedown", onPointerDown)
+    window.addEventListener("keydown", onKeyDown)
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown)
+      window.removeEventListener("keydown", onKeyDown)
+    }
+  }, [advancedMenuOpen])
 
   useEffect(() => {
     const thread = threadRef.current
@@ -230,15 +250,41 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
             >
               <Send size={15} aria-hidden="true" />{props.busy ? "处理中" : "发送"}
             </button>
-            <button
-              type="button"
-              className="creation-desk-start-turn"
-              data-testid="creation-desk-start-turn"
-              disabled={props.running || props.busy}
-              onClick={props.onStartTurn}
-            >
-              <Play size={15} aria-hidden="true" />{props.running ? "推演中" : "开始推演"}
-            </button>
+            <div className="creation-desk-advanced-menu" ref={advancedMenuRef}>
+              <UiTooltip label="更多操作">
+                <button
+                  type="button"
+                  className={`creation-desk-advanced-trigger${advancedMenuOpen ? " open" : ""}`}
+                  data-testid="creation-desk-advanced-trigger"
+                  aria-label="更多操作"
+                  aria-expanded={advancedMenuOpen}
+                  aria-haspopup="menu"
+                  disabled={props.busy && !props.running}
+                  onClick={() => { setAdvancedMenuOpen((open) => !open); }}
+                >
+                  <Ellipsis size={16} aria-hidden="true" />
+                </button>
+              </UiTooltip>
+              {advancedMenuOpen
+                ? <div className="creation-desk-advanced-panel" role="menu" data-testid="creation-desk-advanced-menu">
+                    <p className="creation-desk-advanced-hint">建议先与 Agent 讨论并确认梗概</p>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="creation-desk-start-turn"
+                      data-testid="creation-desk-start-turn"
+                      disabled={props.running || props.busy}
+                      onClick={() => {
+                        setAdvancedMenuOpen(false)
+                        props.onStartTurn()
+                      }}
+                    >
+                      <span><Play size={15} aria-hidden="true" />{props.running ? "推演中" : "开始推演"}</span>
+                      <small>使用当前梗概直接推演</small>
+                    </button>
+                  </div>
+                : null}
+            </div>
           </div>
         </div>
       </footer>

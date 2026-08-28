@@ -210,6 +210,8 @@ export function App(): React.JSX.Element {
       setTask(latest)
       if (latest?.status === "awaiting_user_decision") {
         setPostCommitNotice("已恢复最近一次暂停的推演任务；请在右侧运行监控中决定继续、重试或保持暂停。")
+      } else if (latest?.status === "waiting_for_review") {
+        setPostCommitNotice("正文已生成，请在检查点中确认设定抽取提案后再继续图治理。")
       }
     }).catch((cause: unknown) => {
       if (active) setError(cause instanceof Error ? cause.message : String(cause))
@@ -593,7 +595,7 @@ export function App(): React.JSX.Element {
         }
         return
       }
-      if (["awaiting_user_decision", "paused", "cancelled", "failed"].includes(snapshot.status)) return
+      if (["awaiting_user_decision", "waiting_for_review", "paused", "cancelled", "failed"].includes(snapshot.status)) return
       await new Promise((resolve) => setTimeout(resolve, 350))
     }
   }
@@ -989,6 +991,7 @@ export function App(): React.JSX.Element {
                 />}
                 defaultPanel={<RightRail
                   task={task}
+                  project={project}
                   graphSlice={graphSlice}
                   graphSettings={projectSettings?.graph}
                   historyRetentionLimit={projectSettings?.history.retentionLimit}
@@ -1002,6 +1005,13 @@ export function App(): React.JSX.Element {
                   onRestoreHistory={(entryId) => applyHistoryCheckout("history.restore", entryId)}
                   onContinueFromHistory={(entryId) => applyHistoryCheckout("history.continueFrom", entryId)}
                   onReturnPreviousRound={returnPreviousRound}
+                  onRefreshTask={async () => {
+                    const taskId = task?.handle?.taskId
+                    if (taskId === undefined) return
+                    const snapshot = await invokeBackend<TaskSnapshot>("turn.status", { taskId })
+                    setTask(snapshot)
+                  }}
+                  onRefreshWorkspace={refreshWorkspace}
                 />}
               />
             </Panel>

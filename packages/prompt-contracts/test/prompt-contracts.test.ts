@@ -6,6 +6,9 @@ import { describe, expect, it } from "vitest"
 
 import {
   BASE_RULES_RESOURCE,
+  PLOT_SYNOPSIS_GUIDE_RESOURCE,
+  SETTINGS_QUERY_GUIDE_RESOURCE,
+  SETTINGS_REVISION_GUIDE_RESOURCE,
   assertFrontierSettlementCoversReview,
   assertGraphGovernanceReferenceContract,
   assertPhaseReferenceContract,
@@ -53,9 +56,15 @@ describe("prompt contracts", () => {
 
   it("ships one immutable resource for every phase", () => {
     const packageRoot = resolve(process.cwd(), "packages/prompt-contracts")
-    const resources = [BASE_RULES_RESOURCE, ...aiPhaseValues.map((phase) => promptDefinitions[phase].resourcePath)]
+    const resources = [
+      BASE_RULES_RESOURCE,
+      PLOT_SYNOPSIS_GUIDE_RESOURCE,
+      SETTINGS_QUERY_GUIDE_RESOURCE,
+      SETTINGS_REVISION_GUIDE_RESOURCE,
+      ...aiPhaseValues.map((phase) => promptDefinitions[phase].resourcePath),
+    ]
 
-    expect(new Set(resources).size).toBe(aiPhaseValues.length + 1)
+    expect(new Set(resources).size).toBe(aiPhaseValues.length + 4)
     for (const resource of resources) {
       const path = resolve(packageRoot, resource)
       expect(existsSync(path), resource).toBe(true)
@@ -119,6 +128,9 @@ describe("prompt contracts", () => {
     expect(commitReview).toContain("`continuityAdvice`")
     expect(commitReview).toContain("不能阻断提交")
     expect(ruleAssembly).toContain("这些内容只作为判断输入，绝不能复制到输出")
+    expect(ruleAssembly).toContain("设定集默认查询规则")
+    expect(sourceRetrieval).toContain("设定集默认查询规则")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("设定集修订规则")
     expect(ruleAssembly).toContain("本阶段没有正文或长文本字段")
     expect(ruleAssembly).toContain("不要为了表示“已完整阅读”而重复路径")
     expect(ruleAssembly).toContain("每个路径和冲突各只出现一次")

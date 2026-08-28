@@ -67,6 +67,11 @@ export type PromptResource = Readonly<{
 
 export interface PromptResourcePort {
   loadBaseRules(): Promise<PromptResource>
+  loadPlotSynopsisGuide(): Promise<PromptResource>
+  loadSettingsQueryGuide(): Promise<PromptResource>
+  loadSettingsRevisionGuide(): Promise<PromptResource>
+  loadTurnSystemRules(): Promise<PromptResource>
+  loadSynopsisDiscussSystemRules(): Promise<PromptResource>
   loadPhase(phase: AIPhase): Promise<PromptResource>
 }
 

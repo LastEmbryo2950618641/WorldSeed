@@ -35,6 +35,7 @@ export const aiPhaseValues = [
   "draft",
   "chapter_naming",
   "dependency_audit",
+  "settings_extraction",
   "response_review",
   "graph_governance",
   "graph_structure_plan",

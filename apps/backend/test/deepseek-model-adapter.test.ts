@@ -54,6 +54,14 @@ describe("DeepSeekAiModelAdapter", () => {
           promptReads.push("base")
           throw new Error("Inherited context must not reload base rules")
         },
+        loadTurnSystemRules: () => {
+          promptReads.push("turn-system")
+          throw new Error("Inherited context must not reload turn system rules")
+        },
+        loadPlotSynopsisGuide: () => Promise.reject(new Error("unused")),
+        loadSettingsQueryGuide: () => Promise.reject(new Error("unused")),
+        loadSettingsRevisionGuide: () => Promise.reject(new Error("unused")),
+        loadSynopsisDiscussSystemRules: () => Promise.reject(new Error("unused")),
         loadPhase: () => {
           promptReads.push("phase")
           throw new Error("Prepared phase prompt must not be reloaded")

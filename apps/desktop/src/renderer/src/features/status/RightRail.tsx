@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { aiPhaseValues, type HistoryOverview, type ProjectSettings, type ResettableRuntimeMetricId } from "@worldseed/contracts"
 
-import type { GraphSlice, PhaseRunSnapshot, TaskSnapshot } from "../../api/client.js"
+import type { GraphSlice, OpenProject, PhaseRunSnapshot, TaskSnapshot } from "../../api/client.js"
 import { UiTooltip, uiTooltipRich } from "../../components/UiTooltip.js"
 import { useWorkbenchStore, type RightTab } from "../../state/workbench-store.js"
 import { WorldGraph } from "./WorldGraph.js"
@@ -13,6 +13,7 @@ import { RuntimeMonitor, TaskCheckpointDialog } from "./TaskCheckpointPrototype.
 
 type Props = Readonly<{
   task: TaskSnapshot | undefined
+  project?: OpenProject | undefined
   graphSlice: GraphSlice | undefined
   graphSettings?: ProjectSettings["graph"] | undefined
   historyRetentionLimit?: number | null | undefined
@@ -26,6 +27,8 @@ type Props = Readonly<{
   onRestoreHistory?(entryId: string): Promise<void>
   onContinueFromHistory?(entryId: string): Promise<void>
   onReturnPreviousRound?(): Promise<void>
+  onRefreshTask?(): Promise<void>
+  onRefreshWorkspace?(): Promise<void>
 }>
 
 const labels: Record<string, string> = {
@@ -37,6 +40,7 @@ const labels: Record<string, string> = {
   draft: "撰写正文",
   chapter_naming: "生成章节标题",
   dependency_audit: "检查依赖闭合",
+  settings_extraction: "抽取设定提案",
   response_review: "审查正文响应",
   graph_governance: "治理世界图",
   graph_structure_plan: "候选结构规划",
@@ -64,12 +68,12 @@ const visibleTopLevelPhases = aiPhaseValues.filter((phase) => (
   && !stagedGraphPhases.includes(phase as typeof stagedGraphPhases[number])
 ))
 
-export function RightRail({ task, graphSlice, graphSettings, historyRetentionLimit = null, history, historyLoading, onOpenProjectSettings, onResumeTask, onResetTaskMetrics, onPauseTask, onSaveHistory, onRestoreHistory, onContinueFromHistory, onReturnPreviousRound }: Props): React.JSX.Element {
+export function RightRail({ task, project, graphSlice, graphSettings, historyRetentionLimit = null, history, historyLoading, onOpenProjectSettings, onResumeTask, onResetTaskMetrics, onPauseTask, onSaveHistory, onRestoreHistory, onContinueFromHistory, onReturnPreviousRound, onRefreshTask, onRefreshWorkspace }: Props): React.JSX.Element {
   const [checkpointOpen, setCheckpointOpen] = useState(false)
   const tab = useWorkbenchStore((state) => state.rightTab)
   const setTab = useWorkbenchStore((state) => state.setRightTab)
   useEffect(() => {
-    if (task?.status === "awaiting_user_decision") setCheckpointOpen(true)
+    if (task?.status === "awaiting_user_decision" || task?.status === "waiting_for_review") setCheckpointOpen(true)
   }, [task?.status])
   return <><aside className="right-rail">
     <div className="right-tabs">
@@ -101,10 +105,13 @@ export function RightRail({ task, graphSlice, graphSettings, historyRetentionLim
     <div className="world-summary"><span>世界时间 <strong>当前章节锚点</strong></span><span>图局部 <strong>{graphSlice === undefined ? "未读取" : `${String(graphSlice.nodes.length)} 节点 / ${String(graphSlice.links.length)} 连接`}</strong></span><span>任务状态 <strong>{task?.status ?? "未运行"}</strong></span></div>
   </aside>{checkpointOpen && task !== undefined ? <TaskCheckpointDialog
     task={task}
+    project={project}
     onClose={() => { setCheckpointOpen(false); }}
     onResume={onResumeTask ?? (() => Promise.reject(new Error("恢复接口尚未连接")))}
     onResetMetrics={onResetTaskMetrics ?? (() => Promise.reject(new Error("指标重置接口尚未连接")))}
     onPause={onPauseTask ?? (() => Promise.reject(new Error("暂停接口尚未连接")))}
+    onRefreshTask={onRefreshTask}
+    onRefreshWorkspace={onRefreshWorkspace}
   /> : null}</>
 }
 

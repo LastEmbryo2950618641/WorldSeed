@@ -30,6 +30,8 @@ const temporaryDirectories: string[] = []
 const defaults = {
   baseRules: "# Worldseed V1 基础规则\n\n平台只读规则。\n",
   plotSynopsisGuide: "# 剧情梗概讨论引导\n\n平台只读引导。\n",
+  settingsQueryGuide: "# 设定集默认查询规则\n\n平台只读引导。\n",
+  settingsRevisionGuide: "# 设定集修订规则\n\n平台只读引导。\n",
   settingsReadme: "# 设定集索引\n",
   referencesReadme: "# 参考文件索引\n",
   descriptionRules: "# 默认描写规则\n\n自动选择描写方式。\n",
@@ -169,7 +171,7 @@ describe("project lifecycle", () => {
     expect(readFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "base-rules.md"), "utf8"))
       .toBe(defaults.baseRules)
 
-    const opened = await lifecycle.openByWorkspace(workspaceRoot, 200)
+    const opened = await lifecycle.openByWorkspace(workspaceRoot, 200, defaults)
     expect(opened.manifest.id).toBe(projectId)
     expect((await registry.findById(projectId))?.lastOpenedAtMs).toBe(200)
 
@@ -200,12 +202,12 @@ describe("project lifecycle", () => {
     })
 
     writeFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "base-rules.md"), "modified", "utf8")
-    await expect(lifecycle.openByWorkspace(workspaceRoot, 200)).rejects.toMatchObject<Partial<ProjectLifecycleError>>({
+    await expect(lifecycle.openByWorkspace(workspaceRoot, 200, defaults)).rejects.toMatchObject<Partial<ProjectLifecycleError>>({
       code: "manifest_mismatch",
     })
     writeFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "base-rules.md"), defaults.baseRules, "utf8")
     mkdirSync(join(workspaceRoot, "第六目录"))
-    await expect(lifecycle.openByWorkspace(workspaceRoot, 300)).rejects.toMatchObject<Partial<ProjectLifecycleError>>({
+    await expect(lifecycle.openByWorkspace(workspaceRoot, 300, defaults)).rejects.toMatchObject<Partial<ProjectLifecycleError>>({
       code: "workspace_invalid",
     })
     await registryDatabase.destroy()
@@ -238,7 +240,11 @@ describe("project lifecycle", () => {
     const session = await new SqliteProjectRepositoryFactory().open(store, workspaceRoot)
     try {
       const manifest = (await session.repository.readManifest(projectId))!
-      const legacyFixedEntries = manifest.fixedEntries.filter((entry) => entry.key !== "plot-synopsis-guide")
+      const legacyFixedEntries = manifest.fixedEntries.filter((entry) => (
+        entry.key !== "plot-synopsis-guide"
+        && entry.key !== "settings-query-guide"
+        && entry.key !== "settings-revision-guide"
+      ))
       const legacyDigest = digest({
         protocolVersion: manifest.protocolVersion,
         manifestVersion: manifest.manifestVersion,
@@ -254,8 +260,19 @@ describe("project lifecycle", () => {
       await session.close()
     }
 
-    const opened = await lifecycle.openByWorkspace(workspaceRoot, 200)
+    // Simulate an older on-disk workspace that never received the new platform guides.
+    unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "plot-synopsis-guide.md"))
+    unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "settings-query-guide.md"))
+    unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "settings-revision-guide.md"))
+
+    const opened = await lifecycle.openByWorkspace(workspaceRoot, 200, defaults)
     expect(opened.manifest.fixedEntries.some((entry) => entry.key === "plot-synopsis-guide")).toBe(true)
+    expect(opened.manifest.fixedEntries.some((entry) => entry.key === "settings-query-guide")).toBe(true)
+    expect(opened.manifest.fixedEntries.some((entry) => entry.key === "settings-revision-guide")).toBe(true)
+    expect(readFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "settings-query-guide.md"), "utf8"))
+      .toBe(defaults.settingsQueryGuide)
+    expect(readFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "settings-revision-guide.md"), "utf8"))
+      .toBe(defaults.settingsRevisionGuide)
     await registryDatabase.destroy()
   })
 
@@ -276,7 +293,7 @@ describe("project lifecycle", () => {
     const internalStore = new NodeInternalStoreAdapter(appDataRoot)
     const store = await internalStore.prepareProject(projectId, workspaceRoot)
     const database = await openProjectDatabase(store.projectDatabaseRef)
-    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(31)
+    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(33)
     await database.destroy()
   })
 })

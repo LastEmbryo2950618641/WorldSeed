@@ -535,6 +535,34 @@ export const synopsisDiscussArtifactSchema = z.object({
   finalSelfReview: z.string().min(1),
 })
 
+export const settingsExtractionArtifactSchema = z.object({
+  summary: z.string().min(1),
+  proposals: z.array(z.object({
+    payload: z.discriminatedUnion("kind", [
+      z.object({
+        kind: z.literal("create"),
+        relativePath: z.string().min(1),
+        markdown: z.string().min(1),
+        readmeEntry: z.string().max(500).optional(),
+      }),
+      z.object({
+        kind: z.literal("update"),
+        relativePath: z.string().min(1),
+        markdown: z.string().min(1),
+      }),
+      z.object({
+        kind: z.literal("merge"),
+        targetPath: z.string().min(1),
+        markdown: z.string().min(1),
+        mergedFromPaths: z.array(z.string().min(1)).min(1),
+      }),
+    ]),
+    reason: z.string().max(1_000).optional(),
+    conflictNotes: z.string().max(2_000).optional(),
+  })),
+  finalSelfReview: z.string().min(1),
+})
+
 export const phaseArtifactSchemas: Record<AIPhase, z.ZodType> = {
   interpret: interpretArtifactSchema,
   rule_assembly: ruleAssemblyArtifactSchema,
@@ -544,6 +572,7 @@ export const phaseArtifactSchemas: Record<AIPhase, z.ZodType> = {
   draft: internalDraftArtifactSchema,
   chapter_naming: chapterNamingArtifactSchema,
   dependency_audit: dependencyAuditArtifactSchema,
+  settings_extraction: settingsExtractionArtifactSchema,
   response_review: responseReviewArtifactSchema,
   graph_governance: graphGovernanceArtifactSchema,
   graph_structure_plan: graphStructurePlanArtifactSchema,
@@ -586,3 +615,4 @@ export type CommitReviewArtifact = z.infer<typeof commitReviewArtifactSchema>
 export type RevisionReviewArtifact = z.infer<typeof revisionReviewArtifactSchema>
 export type RevisionAssistArtifact = z.infer<typeof revisionAssistArtifactSchema>
 export type SynopsisDiscussArtifact = z.infer<typeof synopsisDiscussArtifactSchema>
+export type SettingsExtractionArtifact = z.infer<typeof settingsExtractionArtifactSchema>

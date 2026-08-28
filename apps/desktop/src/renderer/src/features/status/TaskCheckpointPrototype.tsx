@@ -1,5 +1,5 @@
-import { useState, type CSSProperties } from "react"
-import type { ResettableRuntimeMetricId, RuntimeMetric } from "@worldseed/contracts"
+import { useEffect, useMemo, useState, type CSSProperties } from "react"
+import type { ResettableRuntimeMetricId, RuntimeMetric, SettingsExtractionProposal, SettingsExtractionSnapshot } from "@worldseed/contracts"
 import {
   AlertTriangle,
   Check,
@@ -16,7 +16,8 @@ import {
   X,
 } from "lucide-react"
 
-import type { TaskSnapshot } from "../../api/client.js"
+import type { OpenProject, TaskSnapshot } from "../../api/client.js"
+import { invokeBackend } from "../../api/client.js"
 import { UiTooltip, uiTooltipRich } from "../../components/UiTooltip.js"
 
 type ResetMetrics = (metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>
@@ -109,26 +110,82 @@ function RuntimeRing({ metric, label }: { metric: RuntimeMetric | undefined; lab
   </UiTooltip>
 }
 
-export function TaskCheckpointDialog({ task, onClose, onResume, onPause, onResetMetrics }: {
+export function TaskCheckpointDialog({ task, project, onClose, onResume, onPause, onResetMetrics, onRefreshTask, onRefreshWorkspace }: {
   task: TaskSnapshot
+  project?: OpenProject | undefined
   onClose: () => void
   onResume: (mode: "continue" | "retry_phase") => Promise<void>
   onPause: () => Promise<void>
   onResetMetrics?: ResetMetrics | undefined
+  onRefreshTask?: () => Promise<void>
+  onRefreshWorkspace?: () => Promise<void>
 }): React.JSX.Element {
   const [pendingAction, setPendingAction] = useState<"pause" | "retry" | "continue" | "reset">()
   const [actionError, setActionError] = useState<string>()
-  const blockedMetricIds = task.interruption?.blockedMetrics ?? []
+  const isSettingsReview = task.interruption?.kind === "settings_extraction_review" || task.status === "waiting_for_review"
+  const blockedMetricIds = isSettingsReview ? [] as const : (task.interruption?.blockedMetrics ?? [])
   const blockedMetrics = blockedMetricIds.map((metricId) => task.runtimeMetrics?.metrics.find((metric) => metric.metricId === metricId))
   const unresolvedMetrics = blockedMetrics.filter((metric) => metric === undefined || metric.blocking)
   const allBlockedMetricsReset = unresolvedMetrics.length === 0
-  const finalizationActive = task.finalization !== undefined && task.finalization.status !== "completed"
+  const finalizationActive = !isSettingsReview && task.finalization !== undefined && task.finalization.status !== "completed"
   const latestPhase = finalizationActive
     ? `正式章节收尾 · ${finalizationLabel(task.finalization.status)}`
     : task.interruption?.phase ?? task.lastPhase ?? task.phaseRuns?.at(-1)?.phase ?? "尚未进入模型阶段"
-  const interruptionMessage = task.interruption?.message ?? task.error?.message ?? "推演执行被暂停，已保存最近稳定检查点。"
+  const interruptionMessage = task.interruption?.message ?? task.error?.message ?? (isSettingsReview
+    ? "正文已生成，请确认设定抽取提案后再继续图治理。"
+    : "推演执行被暂停，已保存最近稳定检查点。")
   const completedPhases = new Set(task.phaseRuns?.filter((run) => run.status === "completed").map((run) => run.phase) ?? []).size
   const modelCalls = task.runtimeMetrics?.metrics.find((metric) => metric.metricId === "model_calls")
+  const taskId = task.handle?.taskId
+  const [settingsSnapshot, setSettingsSnapshot] = useState<SettingsExtractionSnapshot>()
+  const [settingsBusy, setSettingsBusy] = useState(false)
+  const [settingsError, setSettingsError] = useState<string>()
+  const pendingSettingsProposals = useMemo(
+    () => (settingsSnapshot?.proposals ?? []).filter((proposal) => proposal.status === "pending"),
+    [settingsSnapshot?.proposals],
+  )
+  const settingsReadyToContinue = !isSettingsReview || pendingSettingsProposals.length === 0
+
+  useEffect(() => {
+    if (!isSettingsReview || project === undefined || taskId === undefined) {
+      setSettingsSnapshot(undefined)
+      return
+    }
+    let active = true
+    void invokeBackend<SettingsExtractionSnapshot>("settings.extraction.list", {
+      projectId: project.projectId,
+      workspaceRootRef: project.workspaceRootRef,
+      taskId,
+    }).then((snapshot) => {
+      if (active) setSettingsSnapshot(snapshot)
+    }).catch((cause: unknown) => {
+      if (active) setSettingsError(cause instanceof Error ? cause.message : String(cause))
+    })
+    return () => { active = false }
+  }, [isSettingsReview, project, taskId, task.status])
+
+  const resolveSettingsProposals = async (proposalIds: readonly string[], action: "approve" | "reject"): Promise<void> => {
+    if (project === undefined || taskId === undefined || proposalIds.length === 0) return
+    setSettingsBusy(true)
+    setSettingsError(undefined)
+    try {
+      const method = action === "approve" ? "settings.extraction.proposal.approve" as const : "settings.extraction.proposal.reject" as const
+      const snapshot = await invokeBackend<SettingsExtractionSnapshot>(method, {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        taskId,
+        proposalIds,
+      })
+      setSettingsSnapshot(snapshot)
+      await onRefreshTask?.()
+      // Approve writes files under 设定集/; reject does not. Refresh tree so new paths appear immediately.
+      if (action === "approve") await onRefreshWorkspace?.()
+    } catch (cause) {
+      setSettingsError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setSettingsBusy(false)
+    }
+  }
 
   const runResume = async (mode: "continue" | "retry_phase"): Promise<void> => {
     setPendingAction(mode === "continue" ? "continue" : "retry")
@@ -173,25 +230,33 @@ export function TaskCheckpointDialog({ task, onClose, onResume, onPause, onReset
     <section className="checkpoint-dialog" role="dialog" aria-modal="true" aria-labelledby="checkpoint-dialog-title" data-testid="checkpoint-dialog">
       <header className="checkpoint-dialog-header">
         <span className="checkpoint-status-icon"><Pause size={17} /></span>
-        <div><strong id="checkpoint-dialog-title">推演已暂停</strong><small>{latestPhase} · 最近稳定检查点</small></div>
-        <span className="checkpoint-state">等待决定</span>
+        <div><strong id="checkpoint-dialog-title">{isSettingsReview ? "设定抽取待确认" : "推演已暂停"}</strong><small>{latestPhase} · 最近稳定检查点</small></div>
+        <span className="checkpoint-state">{isSettingsReview ? "等待确认" : "等待决定"}</span>
         <UiTooltip label="保持暂停并关闭"><button type="button" aria-label="保持暂停并关闭" onClick={onClose}><X size={16} /></button></UiTooltip>
       </header>
 
       <div className="checkpoint-dialog-body">
         <div className="checkpoint-callout">
           <AlertTriangle size={18} />
-          <div><strong>{blockedMetricIds.length === 0 ? "本轮执行遇到可恢复错误" : "本轮执行指标已达到上限"}</strong><p>{interruptionMessage} {finalizationActive ? "正文与世界提交进度已经保存，恢复不会重新调用 AI。" : "此前阶段、读取结果和待提交作用域均已保存。"}</p></div>
+          <div><strong>{isSettingsReview ? "正文已生成，设定提案待确认" : blockedMetricIds.length === 0 ? "本轮执行遇到可恢复错误" : "本轮执行指标已达到上限"}</strong><p>{interruptionMessage} {finalizationActive ? "正文与世界提交进度已经保存，恢复不会重新调用 AI。" : isSettingsReview ? "采纳或拒绝全部提案后，可继续进入图治理与自洽演化。" : "此前阶段、读取结果和待提交作用域均已保存。"}</p></div>
         </div>
+
+        {isSettingsReview ? <SettingsExtractionReviewPanel
+          proposals={pendingSettingsProposals}
+          busy={settingsBusy}
+          error={settingsError}
+          onApprove={(proposalIds) => resolveSettingsProposals(proposalIds, "approve")}
+          onReject={(proposalIds) => resolveSettingsProposals(proposalIds, "reject")}
+        /> : null}
 
         <div className="checkpoint-facts">
           <span><small>恢复位置</small><strong>{latestPhase}</strong></span>
-          <span><small>已完成阶段</small><strong>{completedPhases} / 16</strong></span>
+          <span><small>已完成阶段</small><strong>{completedPhases} / 17</strong></span>
           <span><small>模型调用</small><strong>{modelCalls === undefined ? "-" : formatMetric(modelCalls)}</strong></span>
           <span><small>世界作用域</small><strong>{finalizationActive && task.finalization.status !== "prepared" ? "committed" : "pending"}</strong></span>
         </div>
 
-        <section className="checkpoint-limit-section">
+        {isSettingsReview ? null : <section className="checkpoint-limit-section">
           <header>
             <div><strong>阻塞指标</strong><small>重置创建持久额度窗口，累计成本不会清零</small></div>
             <em>{allBlockedMetricsReset ? "已解除" : `${String(unresolvedMetrics.length)} 项阻塞`}</em>
@@ -208,7 +273,7 @@ export function TaskCheckpointDialog({ task, onClose, onResume, onPause, onReset
               {metric?.resettable === true ? <button type="button" disabled={resolved || pendingAction !== undefined} onClick={() => { void reset([metric.metricId as ResettableRuntimeMetricId]); }}><RotateCcw size={12} />{resolved ? "已重置" : "重置"}</button> : <em>只读</em>}
             </div>
           })}
-        </section>
+        </section>}
 
         <div className="checkpoint-details-grid">
           <details open>
@@ -234,12 +299,66 @@ export function TaskCheckpointDialog({ task, onClose, onResume, onPause, onReset
 
       <footer className="checkpoint-dialog-footer">
         <button className="checkpoint-pause-command" type="button" disabled={pendingAction !== undefined} onClick={() => { void keepPaused(); }}><Pause size={13} />保持暂停</button>
-        <span>{allBlockedMetricsReset ? "可以选择恢复方式" : `请先重置 ${String(unresolvedMetrics.length)} 项限制`}</span>
-        <button type="button" disabled={!allBlockedMetricsReset || pendingAction !== undefined} onClick={() => { void runResume("retry_phase"); }}><RotateCcw size={13} />{finalizationActive ? "重试收尾步骤" : "重试当前阶段"}</button>
-        <button className="checkpoint-continue-command" type="button" disabled={!allBlockedMetricsReset || pendingAction !== undefined} onClick={() => { void runResume("continue"); }}><Play size={13} />继续执行</button>
+        <span>{settingsReadyToContinue && allBlockedMetricsReset ? (isSettingsReview ? "全部设定提案已处理，可继续图治理" : "可以选择恢复方式") : isSettingsReview ? `仍有 ${String(pendingSettingsProposals.length)} 条设定提案待确认` : `请先重置 ${String(unresolvedMetrics.length)} 项限制`}</span>
+        <button type="button" disabled={!settingsReadyToContinue || !allBlockedMetricsReset || pendingAction !== undefined} onClick={() => { void runResume("retry_phase"); }}><RotateCcw size={13} />{finalizationActive ? "重试收尾步骤" : isSettingsReview ? "重试设定抽取" : "重试当前阶段"}</button>
+        <button className="checkpoint-continue-command" type="button" disabled={!settingsReadyToContinue || !allBlockedMetricsReset || pendingAction !== undefined} data-testid="checkpoint-continue" onClick={() => { void runResume("continue"); }}><Play size={13} />{isSettingsReview ? "继续图治理" : "继续执行"}</button>
       </footer>
     </section>
   </div>
+}
+
+function SettingsExtractionReviewPanel({ proposals, busy, error, onApprove, onReject }: {
+  proposals: readonly SettingsExtractionProposal[]
+  busy: boolean
+  error?: string | undefined
+  onApprove: (proposalIds: readonly string[]) => void
+  onReject: (proposalIds: readonly string[]) => void
+}): React.JSX.Element {
+  const pendingIds = proposals.map((proposal) => proposal.proposalId)
+  return <section className="checkpoint-settings-review" data-testid="checkpoint-settings-review">
+    <header>
+      <div><strong>设定集提案</strong><small>确认后写入 `设定集/`，拒绝则跳过</small></div>
+      <em>{proposals.length === 0 ? "已全部处理" : `${String(proposals.length)} 条待确认`}</em>
+      {proposals.length > 1 ? <>
+        <button type="button" disabled={busy} onClick={() => { onApprove(pendingIds); }}><Check size={12} />全部采纳</button>
+        <button type="button" disabled={busy} onClick={() => { onReject(pendingIds); }}><X size={12} />全部拒绝</button>
+      </> : null}
+    </header>
+    {error === undefined ? null : <p className="checkpoint-decision-result" role="alert"><AlertTriangle size={14} />{error}</p>}
+    {proposals.length === 0 ? <p className="phase-empty">没有待确认的设定提案，可以继续图治理。</p> : proposals.map((proposal) => (
+      <article className="checkpoint-settings-proposal" data-testid="checkpoint-settings-proposal" key={proposal.proposalId}>
+        <header>
+          <strong>{settingsProposalKindLabel(proposal.kind)}</strong>
+          <code>{settingsProposalPath(proposal)}</code>
+        </header>
+        {proposal.reason === undefined ? null : <p>{proposal.reason}</p>}
+        {proposal.conflictNotes === undefined ? null : <p><small>冲突说明：{proposal.conflictNotes}</small></p>}
+        <details>
+          <summary>预览 Markdown</summary>
+          <pre>{settingsProposalMarkdown(proposal)}</pre>
+        </details>
+        <footer>
+          <button type="button" disabled={busy} data-testid="checkpoint-settings-reject" onClick={() => { onReject([proposal.proposalId]); }}>拒绝</button>
+          <button type="button" disabled={busy} data-testid="checkpoint-settings-approve" onClick={() => { onApprove([proposal.proposalId]); }}>采纳并写入</button>
+        </footer>
+      </article>
+    ))}
+  </section>
+}
+
+function settingsProposalKindLabel(kind: SettingsExtractionProposal["kind"]): string {
+  if (kind === "create") return "新增"
+  if (kind === "update") return "更新"
+  return "合并"
+}
+
+function settingsProposalPath(proposal: SettingsExtractionProposal): string {
+  if (proposal.payload.kind === "merge") return proposal.payload.targetPath
+  return proposal.payload.relativePath
+}
+
+function settingsProposalMarkdown(proposal: SettingsExtractionProposal): string {
+  return proposal.payload.markdown
 }
 
 function finalizationLabel(status: NonNullable<TaskSnapshot["finalization"]>["status"] | undefined): string {

@@ -311,6 +311,21 @@ export type DeductionGoalsProposalApprovePayload = z.infer<typeof deductionGoals
 export type DeductionGoalsProposalRejectPayload = z.infer<typeof deductionGoalsProposalRejectPayloadSchema>
 export type DeductionGoalsImportLegacyPayload = z.infer<typeof deductionGoalsImportLegacyPayloadSchema>
 
+export const settingsExtractionListPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  taskId: idSchema,
+})
+export const settingsExtractionProposalApprovePayloadSchema = projectSettingsReadPayloadSchema.extend({
+  taskId: idSchema,
+  proposalIds: z.array(idSchema).min(1).max(50),
+})
+export const settingsExtractionProposalRejectPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  taskId: idSchema,
+  proposalIds: z.array(idSchema).min(1).max(50),
+})
+export type SettingsExtractionListPayload = z.infer<typeof settingsExtractionListPayloadSchema>
+export type SettingsExtractionProposalApprovePayload = z.infer<typeof settingsExtractionProposalApprovePayloadSchema>
+export type SettingsExtractionProposalRejectPayload = z.infer<typeof settingsExtractionProposalRejectPayloadSchema>
+
 export const modelListPayloadSchema = z.object({
   baseUrl: z.url(),
   apiKey: z.string().trim().min(1).max(4096),
@@ -433,6 +448,9 @@ export const backendPayloadSchemas = {
   "deduction.goals.proposal.approve": deductionGoalsProposalApprovePayloadSchema,
   "deduction.goals.proposal.reject": deductionGoalsProposalRejectPayloadSchema,
   "deduction.goals.importLegacy": deductionGoalsImportLegacyPayloadSchema,
+  "settings.extraction.list": settingsExtractionListPayloadSchema,
+  "settings.extraction.proposal.approve": settingsExtractionProposalApprovePayloadSchema,
+  "settings.extraction.proposal.reject": settingsExtractionProposalRejectPayloadSchema,
   "model.list": modelListPayloadSchema,
   "model.profiles.read": modelProfilesReadPayloadSchema,
   "model.profiles.save": modelProfilesSavePayloadSchema,

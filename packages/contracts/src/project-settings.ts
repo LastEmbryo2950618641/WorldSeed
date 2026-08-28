@@ -2,6 +2,15 @@ import { z } from "zod"
 
 const positiveInteger = z.number().int().positive()
 
+export const worldDivergenceModeValues = [
+  "strict",
+  "world_consistent",
+  "free",
+] as const
+
+export const worldDivergenceModeSchema = z.enum(worldDivergenceModeValues)
+export type WorldDivergenceMode = z.infer<typeof worldDivergenceModeSchema>
+
 const retrievalSettingsSchema = z.object({
   maxRequestsPerRound: positiveInteger.max(50),
   maxCandidates: positiveInteger.max(200),
@@ -35,6 +44,7 @@ export const projectSettingsSchema = z.object({
     maxWallTimeMs: positiveInteger.max(7_200_000),
     maxModelRequestTimeMs: positiveInteger.max(3_600_000).default(3_600_000),
     maxRetrievalRounds: positiveInteger.max(10),
+    worldDivergenceMode: worldDivergenceModeSchema.default("world_consistent"),
   }),
   retrieval: retrievalSettingsSchema,
   graph: graphSettingsSchema,

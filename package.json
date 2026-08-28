@@ -15,6 +15,7 @@
     "verify:baseline": "pnpm test && pnpm typecheck && pnpm build",
     "verify:electron": "node scripts/acceptance/electron-smoke.mjs",
     "verify:deduction-goals-dom": "node scripts/acceptance/run-deduction-goals-dom-e2e.mjs",
+    "verify:settings-extraction-dom": "node scripts/acceptance/run-settings-extraction-dom-e2e.mjs",
     "verify:audit": "node apps/backend/acceptance/audit-project.mjs",
     "verify:recovery": "node apps/backend/acceptance/audit-recovery.mjs",
     "verify:history": "node scripts/acceptance/history-roundtrip.mjs",

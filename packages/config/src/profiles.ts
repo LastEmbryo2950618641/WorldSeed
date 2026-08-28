@@ -166,6 +166,7 @@ export const defaultProjectSettings = Object.freeze(projectSettingsSchema.parse(
     maxWallTimeMs: defaultTurnExecutionProfile.maxTurnWallTimeMs,
     maxModelRequestTimeMs: 3_600_000,
     maxRetrievalRounds: 10,
+    worldDivergenceMode: "world_consistent",
   },
   retrieval: {
     maxRequestsPerRound: 10,

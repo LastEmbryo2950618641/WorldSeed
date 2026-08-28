@@ -325,6 +325,44 @@ describe("shared contracts", () => {
     })
 
     expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.execution.worldDivergenceMode).toBe("world_consistent")
+    }
+  })
+
+  it("accepts explicit world divergence modes", () => {
+    const result = projectSettingsSchema.safeParse({
+      version: 2,
+      execution: {
+        maxModelCalls: 128,
+        contextCompactionThresholdRatio: 0.97,
+        contextCompressionTargetRatio: 0.5,
+        outputTokenLimitMode: "model",
+        maxWallTimeMs: 3_600_000,
+        maxRetrievalRounds: 4,
+        worldDivergenceMode: "strict",
+      },
+      retrieval: {
+        maxRequestsPerRound: 10,
+        maxCandidates: 20,
+        maxDepth: 2,
+        maxEvidenceTokens: 12_000,
+      },
+      graph: {
+        maxDirectOutDegree: 12,
+        maxDirectInDegree: 12,
+        mergeWarningThreshold: 10,
+        preferredExpansionDepth: 2,
+        maxExpansionDepth: 4,
+        maxVisitedNodes: 96,
+        maxVisitedLinks: 192,
+        layoutMode: "layered_collision_avoidance",
+      },
+    })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.execution.worldDivergenceMode).toBe("strict")
+    }
   })
 
   it("rejects obsolete project settings instead of migrating them", () => {

@@ -40,6 +40,7 @@ describe("current configuration", () => {
       maxWallTimeMs: 7_200_000,
       maxModelRequestTimeMs: 3_600_000,
       maxRetrievalRounds: 10,
+      worldDivergenceMode: "world_consistent",
     })
     expect(defaultProjectSettings.history.retentionLimit).toBeNull()
   })

@@ -1,3 +1,4 @@
+export * from "./sqlite-settings-extraction-repository.js"
 export * from "./sqlite-deduction-goals-repository.js"
 export * from "./sqlite-document-repository.js"
 export * from "./sqlite-chapter-index-repository.js"

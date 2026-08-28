@@ -106,6 +106,13 @@ import { canonicalizeRetrievalProjections } from "./retrieval-projection-canonic
 import { decideAdaptiveGraphGovernance } from "./adaptive-graph-governance-coordinator.js"
 import { ChapterContextResolver } from "../chapters/chapter-context-resolver.js"
 import type { ChapterSynopsisService } from "../chapters/chapter-synopsis-service.js"
+import type { SettingsExtractionService } from "../settings/settings-extraction-service.js"
+import { SettingsExtractionReviewPendingError } from "../settings/settings-extraction-review-pending-error.js"
+import {
+  resolveWorldDivergenceMode,
+  worldDivergencePhaseAppendix,
+} from "../settings/world-divergence-policy.js"
+import { settingsExtractionArtifactSchema } from "@worldseed/prompt-contracts"
 
 const turnModelPhases: readonly AIPhase[] = [
   "interpret",
@@ -115,6 +122,7 @@ const turnModelPhases: readonly AIPhase[] = [
   "draft",
   "chapter_naming",
   "dependency_audit",
+  "settings_extraction",
   "graph_structure_plan",
   "graph_capacity_rewrite",
   "graph_spacetime_settlement",
@@ -182,17 +190,18 @@ const phaseInternalArtifactDependencies = {
   draft: ["interpret", "rule_assembly", "source_retrieval", "emergence_planning", "emergence_review"],
   chapter_naming: ["draft"],
   dependency_audit: ["source_retrieval", "emergence_planning", "emergence_review", "draft"],
+  settings_extraction: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "dependency_audit"],
   response_review: ["source_retrieval", "draft", "dependency_audit"],
-  graph_governance: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "dependency_audit"],
-  graph_structure_plan: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "dependency_audit"],
+  graph_governance: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "dependency_audit", "settings_extraction"],
+  graph_structure_plan: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "dependency_audit", "settings_extraction"],
   graph_capacity_rewrite: ["graph_structure_plan"],
   graph_spacetime_settlement: ["dependency_audit", "graph_structure_plan"],
   graph_retrieval_design: ["graph_structure_plan", "graph_spacetime_settlement"],
   graph_governance_review: ["dependency_audit", "graph_structure_plan", "graph_spacetime_settlement", "graph_retrieval_design", "graph_governance"],
-  semantic_review: ["draft", "dependency_audit", "graph_governance"],
-  settlement_review: ["dependency_audit", "graph_governance", "semantic_review"],
+  semantic_review: ["draft", "dependency_audit", "settings_extraction", "graph_governance"],
+  settlement_review: ["dependency_audit", "settings_extraction", "graph_governance", "semantic_review"],
   frontier_settlement: ["graph_governance", "semantic_review", "settlement_review"],
-  commit_review: ["draft", "dependency_audit", "graph_governance", "graph_governance_review", "semantic_review", "settlement_review", "frontier_settlement"],
+  commit_review: ["draft", "dependency_audit", "settings_extraction", "graph_governance", "graph_governance_review", "semantic_review", "settlement_review", "frontier_settlement"],
   revision_review: [],
   revision_assist: [],
   synopsis_discuss: [],
@@ -336,6 +345,7 @@ export type TurnOrchestratorDependencies = Readonly<{
   internalStore: InternalStorePort
   workspace: WorkspacePort
   chapterSynopsis?: ChapterSynopsisService
+  settingsExtraction?: SettingsExtractionService
   createId: () => string
   idAllocator?: ProjectIdAllocatorPort
   now: () => number
@@ -398,7 +408,7 @@ export class TurnOrchestrator {
     const contextId = input.contextId ?? this.dependencies.createId()
     const sourceId = input.sourceId ?? await this.nextPersistentId(input.projectId, "source")
     const createdAtMs = input.nowMs ?? this.dependencies.now()
-    const baseRules = await this.dependencies.prompts.loadBaseRules()
+    const baseRules = await this.dependencies.prompts.loadTurnSystemRules()
     const modelContextChain = await this.dependencies.persistence.ensureModelContextChain({
       projectId: input.projectId,
       protocolVersion: PROTOCOL_VERSION,
@@ -769,8 +779,11 @@ export class TurnOrchestrator {
     if (input.taskId === undefined) throw new Error("A taskId is required to resume a turn")
     const task = await this.dependencies.taskScopes.findTask(input.taskId)
     if (task === undefined) throw new Error(`Cannot resume missing task: ${input.taskId}`)
-    if (task.status !== "awaiting_user_decision" && task.status !== "paused") {
+    if (task.status !== "awaiting_user_decision" && task.status !== "paused" && task.status !== "waiting_for_review") {
       throw new Error(`Task cannot resume from status: ${task.status}`)
+    }
+    if (task.status === "waiting_for_review" && this.dependencies.settingsExtraction !== undefined) {
+      await this.dependencies.settingsExtraction.assertTaskReadyToContinue(input.taskId)
     }
     await this.dependencies.taskScopes.assertCurrentGeneration(task.scopeId)
     const resumeRequestedAtMs = input.nowMs ?? this.dependencies.now()
@@ -792,7 +805,7 @@ export class TurnOrchestrator {
     if (!await this.dependencies.persistence.wereRuntimeMetricsResetAfter(input.taskId, blockedMetrics, interruptedAtMs)) {
       throw new Error(`Explicit budget reset required before resume: ${blockedMetrics.join(", ")}`)
     }
-    const baseRules = await this.dependencies.prompts.loadBaseRules()
+    const baseRules = await this.dependencies.prompts.loadTurnSystemRules()
     const modelContextChain = await this.dependencies.persistence.ensureModelContextChain({
       projectId: input.projectId,
       protocolVersion: PROTOCOL_VERSION,
@@ -1517,6 +1530,39 @@ export class TurnOrchestrator {
           modelContextChainId: state.modelContextChainId,
           savedAtMs: this.dependencies.now(),
         })
+        if (phase === "settings_extraction" && workflow === "turn" && this.dependencies.settingsExtraction !== undefined) {
+          const extraction = settingsExtractionArtifactSchema.parse(result.artifact)
+          if (extraction.proposals.length > 0) {
+            const created = await this.dependencies.settingsExtraction.createProposalsFromArtifact({
+              projectId: input.projectId,
+              taskId: state.taskId,
+              phaseRunId: result.phaseRunId,
+              proposals: extraction.proposals,
+              worldDivergenceMode: resolveWorldDivergenceMode(input.projectSettings),
+            })
+            if (created.length > 0) {
+              const interruptedAtMs = this.dependencies.now()
+              const interruption = {
+                kind: "settings_extraction_review",
+                message: `正文已生成，抽取了 ${String(created.length)} 条设定修订提案，请确认后再继续图治理`,
+                recoverable: true,
+                blockedMetrics: [] as const,
+                phase,
+                phaseRunId: result.phaseRunId,
+                interruptedAtMs,
+                proposalCount: created.length,
+              }
+              await this.dependencies.persistence.updateTask(
+                state.taskId,
+                "waiting_for_review",
+                phase,
+                interruptedAtMs,
+                interruption,
+              )
+              throw new SettingsExtractionReviewPendingError(created.length)
+            }
+          }
+        }
         if (workflow === "query" && phase === "response_review") {
           const reviewDecision = queryReviewDecision(result)
           if (reviewDecision.requiresRevision) {
@@ -1554,6 +1600,9 @@ export class TurnOrchestrator {
       }
       return await this.completeTurn(input, state, artifacts, phaseRuns, sourceUnitIds, readEvidence, totalUsage)
     } catch (error) {
+      if (error instanceof SettingsExtractionReviewPendingError) {
+        throw error
+      }
       if (state.signal?.aborted) {
         const cancelledPhase = phaseRuns.size === 0 ? undefined : [...phaseRuns.keys()].at(-1)
         const cancelledAtMs = this.dependencies.now()
@@ -1952,7 +2001,18 @@ export class TurnOrchestrator {
 
   private async executePhase(input: ExecutePhaseInput): Promise<ExecutePhaseResult> {
     throwIfExecutionCancelled(input.signal)
-    const prompt = await this.dependencies.prompts.loadPhase(input.phase)
+    const basePrompt = await this.dependencies.prompts.loadPhase(input.phase)
+    const divergenceAppendix = worldDivergencePhaseAppendix(
+      resolveWorldDivergenceMode(input.input.projectSettings),
+      input.phase,
+    )
+    const prompt = divergenceAppendix === undefined
+      ? basePrompt
+      : {
+          ...basePrompt,
+          text: `${basePrompt.text}\n\n${divergenceAppendix}`,
+          digest: digest(`${basePrompt.text}\n\n${divergenceAppendix}`),
+        }
     let currentContext = input.context
     let currentPhaseRunId = input.phaseRunId
     let attempt = input.attempt

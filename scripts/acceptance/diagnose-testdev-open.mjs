@@ -65,7 +65,16 @@ const lifecycle = new ProjectLifecycleService(
 
 let openResult = "pending"
 try {
-  await lifecycle.openByWorkspace(workspaceRootRef, Date.now())
+  await lifecycle.openByWorkspace(workspaceRootRef, Date.now(), {
+    baseRules: "",
+    plotSynopsisGuide: "# plot\n",
+    settingsQueryGuide: "# settings query\n",
+    settingsRevisionGuide: "# settings revision\n",
+    settingsReadme: "",
+    referencesReadme: "",
+    descriptionRules: "",
+    proseStyleRules: "",
+  })
   openResult = "pass"
 } catch (error) {
   openResult = error instanceof Error ? error.message : String(error)

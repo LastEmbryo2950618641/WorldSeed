@@ -343,6 +343,7 @@ export class SynopsisConversationService {
     goalProposals?: readonly Readonly<{ payload: GoalProposalPayload; reason?: string }>[]
   }>> {
     const phasePrompt = await this.dependencies.prompts.loadPhase("synopsis_discuss")
+    const systemRules = await this.dependencies.prompts.loadSynopsisDiscussSystemRules()
     const nowMs = this.dependencies.now()
     const deadlineAtMs = nowMs + (input.deadlineMs ?? 600_000)
     const request = phaseRequestEnvelopeSchema.parse({
@@ -391,7 +392,16 @@ export class SynopsisConversationService {
         },
       },
     })
-    const execution = await input.model.execute(request)
+    const execution = await input.model.execute(request, {
+      phasePrompt,
+      contextMessages: [{
+        messageId: this.dependencies.createId(),
+        sequence: 0,
+        role: "system",
+        kind: "system_rules",
+        content: systemRules.text,
+      }],
+    })
     const artifact = synopsisDiscussArtifactSchema.parse(execution.result.artifact)
     return {
       content: artifact.assistantMessage,
