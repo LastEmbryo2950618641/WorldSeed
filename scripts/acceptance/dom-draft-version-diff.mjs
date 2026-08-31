@@ -34,12 +34,11 @@ async function invokeBackend(page, method, payload) {
 }
 
 async function ensureTestDevProject(page) {
-  const onLauncher = await page.getByText("建立一个新世界", { exact: true }).isVisible().catch(() => false)
-    || await page.getByText("打开已有世界", { exact: true }).isVisible().catch(() => false)
+  const onLauncher = await page.getByTestId("launcher-open-project").isVisible().catch(() => false)
   if (onLauncher) {
-    await page.locator(".launcher-switch button").filter({ hasText: "打开项目" }).click()
-    await page.getByPlaceholder("选择一个空目录或已有项目目录").fill(workspaceRootRef)
-    await page.locator(".primary-command").click()
+    await page.evaluate((dir) => { window.sessionStorage.setItem("worldseed:e2e-workspace", dir) }, workspaceRootRef)
+    await page.getByTestId("launcher-open-project").click()
+    await page.evaluate(() => { window.sessionStorage.removeItem("worldseed:e2e-workspace") })
     record("launcher_open_project")
     await page.getByText("创作台首页", { exact: true }).waitFor({ timeout: 30_000 })
   }

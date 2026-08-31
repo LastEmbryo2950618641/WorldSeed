@@ -3,6 +3,7 @@ import {
   Binary,
   Bot,
   Database,
+  FolderOpen,
   Gauge,
   History,
   Network,
@@ -14,8 +15,9 @@ import {
 import { projectSettingsSchema, type ProjectSettings, type WorldDivergenceMode } from "@worldseed/contracts"
 
 import { UiTooltip } from "../../components/UiTooltip.js"
+import { WorkDirectorySettingsPanel } from "./WorkDirectorySettingsPanel.js"
 
-type SettingsSection = "execution" | "retrieval" | "graph" | "history" | "model"
+type SettingsSection = "execution" | "retrieval" | "graph" | "history" | "model" | "workDirectory"
 type NumericExecutionSetting = Exclude<
   keyof ProjectSettings["execution"],
   "outputTokenLimitMode" | "worldDivergenceMode"
@@ -41,10 +43,11 @@ type SectionDefinition = Readonly<{
 
 const sections: readonly SectionDefinition[] = [
   { id: "execution", label: "推演执行", group: "项目", keywords: "模型调用 token 耗时 预算 检索轮次 发散 设定 世界观", icon: Gauge },
-  { id: "retrieval", label: "资料检索", group: "项目", keywords: "读取 请求 候选 深度 证据 token", icon: Database },
+  { id: "retrieval", label: "资料检索", group: "项目", keywords: "读取 请求 候选 深度 证据 token 联网 网页 搜索", icon: Database },
   { id: "graph", label: "世界图", group: "项目", keywords: "出度 入度 合并 预警 展开 节点 连接 入口 布局", icon: Network },
   { id: "history", label: "推演历史", group: "项目", keywords: "保存 历史 世界线 保留 上限 删除", icon: History },
   { id: "model", label: "模型服务", group: "应用", keywords: "base url api key deepseek 模型", icon: Bot },
+  { id: "workDirectory", label: "工作目录", group: "应用", keywords: "书籍 存放 路径 目录 新建 默认", icon: FolderOpen },
 ]
 
 export function ProjectSettingsDialog({
@@ -91,7 +94,10 @@ export function ProjectSettingsDialog({
     setDraft((current) => ({ ...current, execution: { ...current.execution, worldDivergenceMode } }))
     setSaveError(undefined)
   }
-  const updateRetrieval = (key: keyof ProjectSettings["retrieval"], value: number): void => {
+  const updateRetrieval = <K extends keyof ProjectSettings["retrieval"]>(
+    key: K,
+    value: ProjectSettings["retrieval"][K],
+  ): void => {
     setDraft((current) => ({ ...current, retrieval: { ...current.retrieval, [key]: value } }))
     setSaveError(undefined)
   }
@@ -150,12 +156,17 @@ export function ProjectSettingsDialog({
           {section === "graph" ? <GraphSettings value={draft.graph} onChange={updateGraph} /> : null}
           {section === "history" ? <HistorySettings value={draft.history} entryCount={historyEntryCount} onChange={updateHistoryLimit} /> : null}
           {section === "model" ? <ModelSettings activeModelName={activeModelName} onOpen={onOpenModelSettings} /> : null}
+          {section === "workDirectory" ? <WorkDirectorySettingsPanel /> : null}
         </div>
       </div>
       <footer className="model-dialog-footer settings-footer">
-        <p>{saveError ?? validationMessage ?? "项目参数保存到内部数据库；新设置从下一轮推演开始生效。"}</p>
+        <p>{section === "workDirectory"
+          ? "工作目录变更会立即生效，无需点击应用。"
+          : saveError ?? validationMessage ?? "项目参数保存到内部数据库；新设置从下一轮推演开始生效。"}</p>
         <button className="secondary-command" onClick={onClose}>取消</button>
-        <button className="dialog-primary-command" data-testid="save-project-settings" onClick={() => void save()} disabled={saving || !validation.success}>{saving ? "保存中..." : "应用"}</button>
+        {section === "workDirectory"
+          ? null
+          : <button className="dialog-primary-command" data-testid="save-project-settings" onClick={() => void save()} disabled={saving || !validation.success}>{saving ? "保存中..." : "应用"}</button>}
       </footer>
     </section>
   </div>
@@ -211,13 +222,21 @@ function ExecutionSettings({ value, onChange, onDivergenceModeChange }: {
 
 function RetrievalSettings({ value, onChange }: {
   value: ProjectSettings["retrieval"]
-  onChange: (key: keyof ProjectSettings["retrieval"], value: number) => void
+  onChange: <K extends keyof ProjectSettings["retrieval"]>(key: K, value: ProjectSettings["retrieval"][K]) => void
 }): React.JSX.Element {
-  return <SettingsPage icon={Database} title="资料检索" description="限制每轮选择性读取的广度、深度和证据体积。">
+  return <SettingsPage icon={Database} title="资料检索" description="限制每轮选择性读取的广度、深度和证据体积；可允许模型联网查询公开资料。">
     <NumberSetting label="每轮最大读取请求" description="模型一次返回中可执行的资料读取请求数" value={value.maxRequestsPerRound} min={1} max={50} onChange={(next) => { onChange("maxRequestsPerRound", next); }} />
     <NumberSetting label="单请求最大候选" description="每个检索请求最多返回的候选资料数" value={value.maxCandidates} min={1} max={200} onChange={(next) => { onChange("maxCandidates", next); }} />
     <NumberSetting label="最大检索深度" description="图检索请求允许使用的最大局部深度" value={value.maxDepth} min={1} max={8} onChange={(next) => { onChange("maxDepth", next); }} />
     <NumberSetting label="证据 Token 上限" description="单轮组装进动态上下文的证据预算" value={value.maxEvidenceTokens} min={1} max={200_000} step={1000} onChange={(next) => { onChange("maxEvidenceTokens", next); }} />
+    <div className="settings-field-row">
+      <span><strong>允许联网查资料</strong><small>开启后，资料检索阶段可用 sourceKinds: web 搜索公开网页；结果只作外部参考</small></span>
+      <div className="settings-segmented" role="group" aria-label="允许联网查资料">
+        <button className={value.webResearchEnabled ? "active" : ""} type="button" onClick={() => { onChange("webResearchEnabled", true); }}>开启</button>
+        <button className={value.webResearchEnabled ? "" : "active"} type="button" onClick={() => { onChange("webResearchEnabled", false); }}>关闭</button>
+      </div>
+    </div>
+    <NumberSetting label="单次联网结果上限" description="每个 web 读取请求最多返回的搜索命中或页面摘录数" value={value.maxWebResults} min={1} max={20} onChange={(next) => { onChange("maxWebResults", next); }} />
   </SettingsPage>
 }
 

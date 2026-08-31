@@ -6,7 +6,7 @@ import {
   fixedWorkspaceEntries,
   type ProjectManifest,
 } from "../../core/index.js"
-import type { ProjectRegistryRepository, StoredProject } from "../projects/index.js"
+import type { ProjectRegistryRepository, RegisteredProject, StoredProject } from "../projects/index.js"
 import type {
   CreatedProject,
   InternalStorePort,
@@ -67,6 +67,25 @@ export class ProjectLifecycleService {
       createdAtMs: input.nowMs,
     })
     return { manifest, internalStore: store }
+  }
+
+  public async listRegistered(limit = 100): Promise<readonly RegisteredProject[]> {
+    return this.registry.listOrderedByLastOpened(limit)
+  }
+
+  public async peekDisplayName(project: RegisteredProject): Promise<string | undefined> {
+    const store = await this.internalStore.inspectProject(
+      project.projectId,
+      project.workspaceRootRef,
+      project.internalStoreRef,
+    )
+    const session = await this.projectRepositories.open(store, project.workspaceRootRef)
+    try {
+      const manifest = await session.repository.readManifest(project.projectId)
+      return manifest?.displayName
+    } finally {
+      await session.close()
+    }
   }
 
   public async openByWorkspace(

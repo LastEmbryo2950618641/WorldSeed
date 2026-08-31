@@ -101,6 +101,49 @@ describe("synopsis conversation", () => {
     })
   })
 
+  it("refreshChoices appends hidden context and merges new chips onto the visible message", async () => {
+    await withHarness(async (harness) => {
+      const base = {
+        projectId: harness.projectId,
+        workspaceRootRef: harness.workspaceRootRef,
+      }
+      await invoke(harness, "synopsis.conversation.start", base)
+      const sent = await invoke<{
+        messages: Array<{
+          messageId: string
+          role: string
+          hidden?: boolean
+          choices?: Array<{ label: string }>
+        }>
+      }>(harness, "synopsis.conversation.send", {
+        ...base,
+        message: "这一章从雨夜站台开始",
+      })
+      const visibleAssistant = sent.messages.find((message) => message.role === "assistant" && message.hidden !== true)
+      expect(visibleAssistant?.choices?.length ?? 0).toBeGreaterThan(0)
+      const beforeLabels = new Set((visibleAssistant?.choices ?? []).map((choice) => choice.label))
+      const refreshed = await invoke<{
+        messages: Array<{
+          messageId: string
+          role: string
+          hidden?: boolean
+          choices?: Array<{ label: string }>
+        }>
+      }>(harness, "synopsis.conversation.refreshChoices", {
+        ...base,
+        messageId: visibleAssistant!.messageId,
+      })
+      const hidden = refreshed.messages.filter((message) => message.hidden === true)
+      expect(hidden.length).toBeGreaterThanOrEqual(2)
+      expect(hidden.some((message) => message.role === "user")).toBe(true)
+      expect(hidden.some((message) => message.role === "assistant")).toBe(true)
+      const updated = refreshed.messages.find((message) => message.messageId === visibleAssistant!.messageId)
+      expect((updated?.choices?.length ?? 0)).toBeGreaterThanOrEqual(beforeLabels.size)
+      const visibleCount = refreshed.messages.filter((message) => message.hidden !== true).length
+      expect(visibleCount).toBe(2)
+    })
+  })
+
   it("persists agent goal proposals from synopsis send without applying them", async () => {
     await withHarness(async (harness) => {
       const base = {
@@ -294,4 +337,29 @@ describe("synopsis conversation", () => {
       expect(response.error.message).toContain("冲突")
     })
   })
+
+  it("runs a request_read round before finalizing synopsis discuss", async () => {
+    await withHarness(async (harness) => {
+      await invoke(harness, "synopsis.conversation.start", {
+        projectId: harness.projectId,
+        workspaceRootRef: harness.workspaceRootRef,
+      })
+      const sent = await invoke<{
+        messages: Array<{
+          role: string
+          content: string
+          searching?: Array<{ query: string; status: string }>
+        }>
+      }>(harness, "synopsis.conversation.send", {
+        projectId: harness.projectId,
+        workspaceRootRef: harness.workspaceRootRef,
+        message: "这一章从雨夜站台开始",
+      })
+      const assistant = sent.messages.find((message) => message.role === "assistant")
+      expect(assistant?.content).toContain("设定集索引")
+      expect(assistant?.searching?.some((item) => (
+        item.query.includes("reference") || item.query.includes("设定集")
+      ))).toBe(true)
+    })
+  }, 20_000)
 })

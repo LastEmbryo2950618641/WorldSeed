@@ -91,9 +91,9 @@ async function ensureCreationDesk(page, workspacePath) {
     throw new Error("Neither creation desk nor project launcher is visible")
   }
 
-  await page.locator(".launcher-switch button").filter({ hasText: "打开项目" }).click()
-  await page.getByPlaceholder("选择一个空目录或已有项目目录").fill(workspacePath)
-  await page.locator("button.primary-command").click()
+  await page.evaluate((dir) => { window.sessionStorage.setItem("worldseed:e2e-workspace", dir) }, workspacePath)
+  await page.getByTestId("launcher-open-project").click()
+  await page.evaluate(() => { window.sessionStorage.removeItem("worldseed:e2e-workspace") })
   await page.getByTestId("synopsis-conversation").waitFor({ state: "visible", timeout: 45_000 })
 }
 

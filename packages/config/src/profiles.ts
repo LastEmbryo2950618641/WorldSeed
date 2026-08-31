@@ -173,6 +173,8 @@ export const defaultProjectSettings = Object.freeze(projectSettingsSchema.parse(
     maxCandidates: defaultGraphCapacityProfile.recallTopKPerExpression,
     maxDepth: defaultGraphCapacityProfile.preferredExpansionDepth,
     maxEvidenceTokens: defaultGraphCapacityProfile.contextTokenBudget,
+    webResearchEnabled: true,
+    maxWebResults: 5,
   },
   graph: {
     maxDirectOutDegree: defaultGraphCapacityProfile.maxDirectOutDegree,
@@ -187,6 +189,9 @@ export const defaultProjectSettings = Object.freeze(projectSettingsSchema.parse(
   },
   history: {
     retentionLimit: null,
+  },
+  staging: {
+    maxChars: 80_000,
   },
 }))
 

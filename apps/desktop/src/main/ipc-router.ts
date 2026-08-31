@@ -2,12 +2,16 @@ import { dialog, ipcMain, type BrowserWindow } from "electron"
 import { randomUUID } from "node:crypto"
 import {
   chapterReviewRevisionPayloadSchema,
+  chapterRevisionConversationSendPayloadSchema,
   chapterSubmitRevisionPayloadSchema,
   clientRequestSchema,
   modelCatalogRequestSchema,
   modelProfilesDraftSavePayloadSchema,
   modelProfilesReadPayloadSchema,
   PROTOCOL_VERSION,
+  synopsisBeginTurnPayloadSchema,
+  synopsisConversationSendPayloadSchema,
+  synopsisConversationRefreshChoicesPayloadSchema,
   turnResumePayloadSchema,
   turnStartPayloadSchema,
   worldEvolvePayloadSchema,
@@ -21,8 +25,36 @@ import type { DesktopModelProfiles } from "../preload/worldseed-bridge.js"
 import type { FileCredentialVault } from "./credential-vault.js"
 import { resolveModelCredential } from "./model-credential-resolution.js"
 import { errorDetails, runtimeLog } from "@worldseed/backend"
+import {
+  addWorkDirectory,
+  readAppSettings,
+  removeWorkDirectory,
+  setActiveWorkDirectory,
+  toAppSettingsReadResult,
+} from "./app-settings.js"
+import { allocateUniqueBookPath } from "./book-path.js"
 
-export function registerIpcRouter(backend: BackendProcess, window: BrowserWindow, vault: FileCredentialVault): void {
+const MODEL_CREDENTIAL_PAYLOAD_SCHEMAS = {
+  "turn.start": turnStartPayloadSchema,
+  "turn.resume": turnResumePayloadSchema,
+  "world.query": worldQueryPayloadSchema,
+  "world.evolve": worldEvolvePayloadSchema,
+  "chapter.reviewRevision": chapterReviewRevisionPayloadSchema,
+  "chapter.submitRevision": chapterSubmitRevisionPayloadSchema,
+  "chapter.revision.conversation.send": chapterRevisionConversationSendPayloadSchema,
+  "synopsis.conversation.send": synopsisConversationSendPayloadSchema,
+  "synopsis.conversation.refreshChoices": synopsisConversationRefreshChoicesPayloadSchema,
+  "synopsis.conversation.beginTurn": synopsisBeginTurnPayloadSchema,
+} as const
+
+type ModelCredentialMethod = keyof typeof MODEL_CREDENTIAL_PAYLOAD_SCHEMAS
+
+export function registerIpcRouter(
+  backend: BackendProcess,
+  window: BrowserWindow,
+  vault: FileCredentialVault,
+  applicationDataRoot: string,
+): void {
   ipcMain.handle("worldseed:request", async (_event, request: unknown) => {
     const parsed = clientRequestSchema.parse(request)
     const startedAtMs = Date.now()
@@ -54,10 +86,40 @@ export function registerIpcRouter(backend: BackendProcess, window: BrowserWindow
   ipcMain.handle("worldseed:model-profiles:read", () => readModelProfiles(backend, vault))
   ipcMain.handle("worldseed:model-profiles:save", (_event, input: unknown) => saveModelProfiles(backend, vault, input))
   ipcMain.handle("worldseed:model-list", (_event, input: unknown) => listModels(backend, vault, input))
-  ipcMain.handle("worldseed:select-directory", async () => {
+  ipcMain.handle("worldseed:app-settings:read", async () => {
+    const stored = await readAppSettings(applicationDataRoot)
+    return toAppSettingsReadResult(stored)
+  })
+  ipcMain.handle("worldseed:app-settings:save", async (_event, input: unknown) => {
+    const directoryPath = parseDirectoryPathPayload(input, "workDirectory")
+    const saved = await addWorkDirectory(applicationDataRoot, directoryPath)
+    return toAppSettingsReadResult(saved)
+  })
+  ipcMain.handle("worldseed:app-settings:work-directory:add", async (_event, input: unknown) => {
+    const directoryPath = parseDirectoryPathPayload(input, "directoryPath")
+    const saved = await addWorkDirectory(applicationDataRoot, directoryPath)
+    return toAppSettingsReadResult(saved)
+  })
+  ipcMain.handle("worldseed:app-settings:work-directory:set-active", async (_event, input: unknown) => {
+    const directoryPath = parseDirectoryPathPayload(input, "directoryPath")
+    const saved = await setActiveWorkDirectory(applicationDataRoot, directoryPath)
+    return toAppSettingsReadResult(saved)
+  })
+  ipcMain.handle("worldseed:app-settings:work-directory:remove", async (_event, input: unknown) => {
+    const payload = parseRemoveWorkDirectoryPayload(input)
+    const saved = await removeWorkDirectory(applicationDataRoot, payload)
+    return toAppSettingsReadResult(saved)
+  })
+  ipcMain.handle("worldseed:book-path:allocate", async (_event, input: unknown) => {
+    const workDirectory = parseWorkDirectoryPayload(input)
+    return allocateUniqueBookPath(workDirectory)
+  })
+  ipcMain.handle("worldseed:select-directory", async (_event, input: unknown) => {
+    const options = parseSelectDirectoryPayload(input)
     const result = await dialog.showOpenDialog(window, {
       properties: ["openDirectory", "createDirectory"],
-      title: "选择 Worldseed 项目目录",
+      title: options.title ?? "选择目录",
+      ...(options.defaultPath === undefined ? {} : { defaultPath: options.defaultPath }),
     })
     return result.canceled ? undefined : result.filePaths[0]
   })
@@ -68,7 +130,54 @@ export function unregisterIpcRouter(): void {
   ipcMain.removeHandler("worldseed:model-profiles:read")
   ipcMain.removeHandler("worldseed:model-profiles:save")
   ipcMain.removeHandler("worldseed:model-list")
+  ipcMain.removeHandler("worldseed:app-settings:read")
+  ipcMain.removeHandler("worldseed:app-settings:save")
+  ipcMain.removeHandler("worldseed:app-settings:work-directory:add")
+  ipcMain.removeHandler("worldseed:app-settings:work-directory:set-active")
+  ipcMain.removeHandler("worldseed:app-settings:work-directory:remove")
+  ipcMain.removeHandler("worldseed:book-path:allocate")
   ipcMain.removeHandler("worldseed:select-directory")
+}
+
+function parseDirectoryPathPayload(input: unknown, key: "directoryPath" | "workDirectory"): string {
+  if (input === null || typeof input !== "object" || !(key in input)) {
+    throw new Error("无效的目录参数")
+  }
+  const directoryPath = (input as Record<string, unknown>)[key]
+  if (typeof directoryPath !== "string" || directoryPath.trim().length === 0) {
+    throw new Error("目录路径不能为空")
+  }
+  return directoryPath.trim()
+}
+
+function parseWorkDirectoryPayload(input: unknown): string {
+  return parseDirectoryPathPayload(input, "workDirectory")
+}
+
+function parseRemoveWorkDirectoryPayload(input: unknown): Readonly<{
+  directoryPath: string
+  mode: "keep_data" | "include_data"
+}> {
+  if (input === null || typeof input !== "object") throw new Error("无效的移除参数")
+  const payload = input as { directoryPath?: unknown; mode?: unknown }
+  const directoryPath = typeof payload.directoryPath === "string" ? payload.directoryPath.trim() : ""
+  if (directoryPath.length === 0) throw new Error("目录路径不能为空")
+  if (payload.mode !== "keep_data" && payload.mode !== "include_data") {
+    throw new Error("无效的移除模式")
+  }
+  return { directoryPath, mode: payload.mode }
+}
+
+function parseSelectDirectoryPayload(input: unknown): { title?: string; defaultPath?: string } {
+  if (input === undefined || input === null) return {}
+  if (typeof input !== "object") throw new Error("无效的目录选择参数")
+  const payload = input as { title?: unknown; defaultPath?: unknown }
+  return {
+    ...(typeof payload.title === "string" && payload.title.length > 0 ? { title: payload.title } : {}),
+    ...(typeof payload.defaultPath === "string" && payload.defaultPath.length > 0
+      ? { defaultPath: payload.defaultPath }
+      : {}),
+  }
 }
 
 async function readModelProfiles(backend: BackendProcess, vault: FileCredentialVault): Promise<DesktopModelProfiles> {
@@ -121,31 +230,14 @@ async function resolveRequest(request: ClientRequest, vault: FileCredentialVault
   if (process.env.WORLDSEED_FAKE_MODEL?.trim() === "1") {
     return stripModelSelection(request)
   }
-  if (request.method === "turn.start") {
-    const payload = turnStartPayloadSchema.parse(request.payload)
-    return { ...request, payload: await resolveModelCredential(payload, vault) }
-  }
-  if (request.method === "turn.resume") {
-    const payload = turnResumePayloadSchema.parse(request.payload)
-    return { ...request, payload: await resolveModelCredential(payload, vault) }
-  }
-  if (request.method === "world.query") {
-    const payload = worldQueryPayloadSchema.parse(request.payload)
-    return { ...request, payload: await resolveModelCredential(payload, vault) }
-  }
-  if (request.method === "world.evolve") {
-    const payload = worldEvolvePayloadSchema.parse(request.payload)
-    return { ...request, payload: await resolveModelCredential(payload, vault) }
-  }
-  if (request.method === "chapter.reviewRevision") {
-    const payload = chapterReviewRevisionPayloadSchema.parse(request.payload)
-    return { ...request, payload: await resolveModelCredential(payload, vault) }
-  }
-  if (request.method === "chapter.submitRevision") {
-    const payload = chapterSubmitRevisionPayloadSchema.parse(request.payload)
-    return { ...request, payload: await resolveModelCredential(payload, vault) }
-  }
-  return request
+  if (!isModelCredentialMethod(request.method)) return request
+  const schema = MODEL_CREDENTIAL_PAYLOAD_SCHEMAS[request.method]
+  const payload = schema.parse(request.payload)
+  return { ...request, payload: await resolveModelCredential(payload, vault) }
+}
+
+function isModelCredentialMethod(method: ClientRequest["method"]): method is ModelCredentialMethod {
+  return Object.hasOwn(MODEL_CREDENTIAL_PAYLOAD_SCHEMAS, method)
 }
 
 function stripModelSelection(request: ClientRequest): ClientRequest {

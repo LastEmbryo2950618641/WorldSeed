@@ -19,6 +19,22 @@ export type OpenProject = Readonly<{
   workspaceRootRef: string
 }>
 
+export type AppSettingsReadResult = Readonly<{
+  defaultWorkDirectory: string
+  workDirectories: readonly string[]
+  activeWorkDirectory?: string
+}>
+
+export type RemoveWorkDirectoryMode = "keep_data" | "include_data"
+
+type LegacyAppSettings = Readonly<{
+  workDirectory: string
+}>
+
+type BridgeWithLegacyAppSettings = typeof window.worldseed & Readonly<{
+  saveAppSettings?(input: LegacyAppSettings): Promise<AppSettingsReadResult | LegacyAppSettings>
+}>
+
 export type DesktopModelProfile = Readonly<ModelProfileDraft>
 
 export type DesktopModelProfiles = Readonly<{
@@ -109,8 +125,130 @@ export async function invokeBackend<T>(method: BackendMethod, payload: unknown):
   return response.data as T
 }
 
-export async function selectDirectory(): Promise<string | undefined> {
-  return getWorldseedBridge()?.selectDirectory() ?? "C:\\Worldseed\\雾港纪事"
+export async function selectDirectory(input?: Readonly<{
+  title?: string
+  defaultPath?: string
+}>): Promise<string | undefined> {
+  if (typeof window !== "undefined") {
+    const forced = window.sessionStorage.getItem("worldseed:e2e-workspace")
+    if (forced !== null && forced.length > 0) return forced
+  }
+  return getWorldseedBridge()?.selectDirectory(input) ?? "C:\\Worldseed\\雾港纪事"
+}
+
+export function resolveDefaultWorkDirectoryPath(): string {
+  const bridge = getWorldseedBridge()
+  if (bridge !== undefined && typeof bridge.defaultWorkDirectoryPath === "string" && bridge.defaultWorkDirectoryPath.length > 0) {
+    return bridge.defaultWorkDirectoryPath
+  }
+  return "C:\\Users\\Example\\.worldseed"
+}
+
+function getWorldseedBridge(): BridgeWithLegacyAppSettings | undefined {
+  return typeof window === "undefined" ? undefined : window.worldseed as BridgeWithLegacyAppSettings | undefined
+}
+
+function normalizeAppSettingsReadResult(raw: unknown): AppSettingsReadResult {
+  const fallback = resolveDefaultWorkDirectoryPath()
+  if (raw === null || typeof raw !== "object") {
+    return { defaultWorkDirectory: fallback, workDirectories: [] }
+  }
+  const record = raw as {
+    defaultWorkDirectory?: unknown
+    workDirectories?: unknown
+    workDirectory?: unknown
+    activeWorkDirectory?: unknown
+  }
+  const legacyDirectory = typeof record.workDirectory === "string" ? record.workDirectory.trim() : ""
+  const workDirectories = Array.isArray(record.workDirectories)
+    ? record.workDirectories.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : legacyDirectory.length > 0
+      ? [legacyDirectory]
+      : []
+  const defaultWorkDirectory = typeof record.defaultWorkDirectory === "string" && record.defaultWorkDirectory.trim().length > 0
+    ? record.defaultWorkDirectory.trim()
+    : fallback
+  const activeCandidate = typeof record.activeWorkDirectory === "string"
+    ? record.activeWorkDirectory.trim()
+    : legacyDirectory.length > 0
+      ? legacyDirectory
+      : undefined
+  return {
+    defaultWorkDirectory,
+    workDirectories,
+    ...(activeCandidate !== undefined && activeCandidate.length > 0 && workDirectories.includes(activeCandidate)
+      ? { activeWorkDirectory: activeCandidate }
+      : workDirectories.length === 1
+        ? { activeWorkDirectory: workDirectories[0] }
+        : {}),
+  }
+}
+
+async function invokeBridgeReadAppSettings(): Promise<AppSettingsReadResult> {
+  const bridge = getWorldseedBridge()
+  if (bridge === undefined) return readAppSettings()
+  if (typeof bridge.readAppSettings !== "function") {
+    throw new Error("应用接口未更新，请完全退出并重启 Worldseed 后再试")
+  }
+  return normalizeAppSettingsReadResult(await bridge.readAppSettings())
+}
+
+async function invokeBridgeAddWorkDirectory(directoryPath: string): Promise<AppSettingsReadResult> {
+  const bridge = getWorldseedBridge()
+  if (bridge === undefined) return readAppSettings()
+  if (typeof bridge.addWorkDirectory === "function") {
+    return normalizeAppSettingsReadResult(await bridge.addWorkDirectory(directoryPath))
+  }
+  if (typeof bridge.saveAppSettings === "function") {
+    const saved = await bridge.saveAppSettings({ workDirectory: directoryPath })
+    return normalizeAppSettingsReadResult(saved)
+  }
+  throw new Error("应用接口未更新，请完全退出并重启 Worldseed 后再试")
+}
+
+export async function readAppSettings(): Promise<AppSettingsReadResult> {
+  const bridge = getWorldseedBridge()
+  const fallback = resolveDefaultWorkDirectoryPath()
+  if (bridge === undefined) {
+    return {
+      defaultWorkDirectory: fallback,
+      workDirectories: [fallback],
+      activeWorkDirectory: fallback,
+    }
+  }
+  try {
+    return await invokeBridgeReadAppSettings()
+  } catch {
+    return {
+      defaultWorkDirectory: fallback,
+      workDirectories: [],
+    }
+  }
+}
+
+export async function addWorkDirectory(directoryPath: string): Promise<AppSettingsReadResult> {
+  return invokeBridgeAddWorkDirectory(directoryPath)
+}
+
+export async function setActiveWorkDirectory(directoryPath: string): Promise<AppSettingsReadResult> {
+  const bridge = getWorldseedBridge()
+  if (bridge !== undefined) return bridge.setActiveWorkDirectory(directoryPath)
+  return readAppSettings()
+}
+
+export async function removeWorkDirectory(input: Readonly<{
+  directoryPath: string
+  mode: RemoveWorkDirectoryMode
+}>): Promise<AppSettingsReadResult> {
+  const bridge = getWorldseedBridge()
+  if (bridge !== undefined) return bridge.removeWorkDirectory(input)
+  return readAppSettings()
+}
+
+export async function allocateBookPath(workDirectory: string): Promise<string> {
+  const bridge = getWorldseedBridge()
+  if (bridge !== undefined) return bridge.allocateBookPath(workDirectory)
+  return `${workDirectory.replace(/[\\/]+$/u, "")}\\demo-book-${crypto.randomUUID().slice(0, 8)}`
 }
 
 export async function readModelProfiles(): Promise<DesktopModelProfiles> {
@@ -131,15 +269,11 @@ export async function listModelCatalog(input: { baseUrl: string; credentialRef: 
   return invokeBackend<ModelListResult>("model.list", { baseUrl: input.baseUrl, apiKey: input.apiKey?.trim() || "browser-demo" })
 }
 
-export const browserDemoProject: OpenProject | undefined = getWorldseedBridge() === undefined ? {
+export let browserDemoProject: OpenProject | undefined = getWorldseedBridge() === undefined ? {
   projectId: "11111111-1111-4111-8111-111111111111",
   displayName: "雾港纪事",
   workspaceRootRef: "C:\\Worldseed\\雾港纪事",
 } : undefined
-
-function getWorldseedBridge(): typeof window.worldseed | undefined {
-  return typeof window === "undefined" ? undefined : window.worldseed
-}
 
 const demoInventory: InventoryEntry[] = [
   { path: "世界推演规则", kind: "directory" },
@@ -234,6 +368,27 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
     case "project.create":
     case "project.open":
       return browserDemoProject
+    case "project.rename": {
+      if (browserDemoProject === undefined) return undefined
+      const displayName = typeof payload === "object" && payload !== null && "displayName" in payload
+        ? String((payload as { displayName: string }).displayName).trim()
+        : browserDemoProject.displayName
+      browserDemoProject = { ...browserDemoProject, displayName: displayName.length === 0 ? browserDemoProject.displayName : displayName }
+      return browserDemoProject
+    }
+    case "project.list":
+      return {
+        projects: browserDemoProject === undefined
+          ? []
+          : [
+              {
+                projectId: browserDemoProject.projectId,
+                displayName: browserDemoProject.displayName,
+                workspaceRootRef: browserDemoProject.workspaceRootRef,
+                lastOpenedAtMs: Date.now(),
+              },
+            ],
+      }
     case "project.validate":
     case "workspace.list":
       return { inventory: demoInventory, issues: [] }

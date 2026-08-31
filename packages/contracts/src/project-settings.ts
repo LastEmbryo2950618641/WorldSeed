@@ -16,6 +16,10 @@ const retrievalSettingsSchema = z.object({
   maxCandidates: positiveInteger.max(200),
   maxDepth: positiveInteger.max(8),
   maxEvidenceTokens: positiveInteger.max(200_000),
+  /** When true, `sourceKinds: ["web"]` may search the public internet and fetch http(s) pages. */
+  webResearchEnabled: z.boolean().default(true),
+  /** Max search hits or page fetches fulfilled per web read request. */
+  maxWebResults: positiveInteger.max(20).default(5),
 })
 
 const graphSettingsSchema = z.object({
@@ -34,6 +38,11 @@ const historySettingsSchema = z.object({
   retentionLimit: positiveInteger.max(100_000).nullable(),
 })
 
+const stagingSettingsSchema = z.object({
+  /** Max characters across 暂存区/*.md excluding readme.md. */
+  maxChars: positiveInteger.max(500_000).default(80_000),
+})
+
 export const projectSettingsSchema = z.object({
   version: z.literal(2),
   execution: z.object({
@@ -49,6 +58,7 @@ export const projectSettingsSchema = z.object({
   retrieval: retrievalSettingsSchema,
   graph: graphSettingsSchema,
   history: historySettingsSchema.default({ retentionLimit: null }),
+  staging: stagingSettingsSchema.default({ maxChars: 80_000 }),
 }).superRefine(validateGraphSettings)
 
 export type ProjectSettings = z.infer<typeof projectSettingsSchema>

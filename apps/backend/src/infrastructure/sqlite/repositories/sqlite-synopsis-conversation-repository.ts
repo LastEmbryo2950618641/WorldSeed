@@ -2,10 +2,14 @@ import type { Kysely } from "kysely"
 
 import type {
   ProjectId,
+  SynopsisConversationChoice,
   SynopsisConversationMessage,
   SynopsisConversationSession,
 } from "@worldseed/contracts"
-import { synopsisConversationChoiceSchema } from "@worldseed/contracts"
+import {
+  synopsisConversationChoiceSchema,
+  synopsisConversationStreamSearchSchema,
+} from "@worldseed/contracts"
 
 import type { ProjectDatabase } from "../database-types.js"
 import { decodeJson, encodeJson } from "../json-codec.js"
@@ -35,6 +39,16 @@ export class SqliteSynopsisConversationRepository {
       .where("chapter_sequence", "=", chapterSequence)
       .executeTakeFirst()
     return row === undefined ? undefined : mapSession(row)
+  }
+
+  public async maxChapterSequence(projectId: ProjectId): Promise<number | undefined> {
+    const row = await this.database.selectFrom("synopsis_conversation_sessions")
+      .select((eb) => eb.fn.max("chapter_sequence").as("max_sequence"))
+      .where("project_id", "=", projectId)
+      .executeTakeFirst()
+    const raw = row?.max_sequence
+    const value = typeof raw === "number" ? raw : Number(raw)
+    return Number.isFinite(value) ? value : undefined
   }
 
   public async createSession(input: Readonly<{
@@ -87,13 +101,31 @@ export class SqliteSynopsisConversationRepository {
     return rows.map(mapMessage)
   }
 
+  public async listMessagesForProject(projectId: ProjectId): Promise<readonly SynopsisConversationMessage[]> {
+    const rows = await this.database.selectFrom("synopsis_conversation_messages").selectAll()
+      .where("project_id", "=", projectId)
+      .orderBy("created_at_ms", "asc")
+      .execute()
+    return rows.map(mapMessage)
+  }
+
+  public async findMessage(messageId: string): Promise<SynopsisConversationMessage | undefined> {
+    const row = await this.database.selectFrom("synopsis_conversation_messages").selectAll()
+      .where("id", "=", messageId)
+      .executeTakeFirst()
+    return row === undefined ? undefined : mapMessage(row)
+  }
+
   public async appendMessage(input: Readonly<{
     messageId: string
     projectId: ProjectId
     sessionId: string
     role: SynopsisConversationMessage["role"]
     content: string
+    reasoningContent?: string
+    searching?: SynopsisConversationMessage["searching"]
     choices?: SynopsisConversationMessage["choices"]
+    hidden?: boolean
     createdAtMs: number
   }>): Promise<SynopsisConversationMessage> {
     await this.database.insertInto("synopsis_conversation_messages").values({
@@ -102,7 +134,10 @@ export class SqliteSynopsisConversationRepository {
       session_id: input.sessionId,
       role: input.role,
       content_text: input.content,
+      reasoning_content: input.reasoningContent ?? null,
+      searching_json: input.searching === undefined ? null : encodeJson(input.searching),
       choices_json: input.choices === undefined ? null : encodeJson(input.choices),
+      hidden: input.hidden === true ? 1 : 0,
       created_at_ms: input.createdAtMs,
     }).executeTakeFirstOrThrow()
     return {
@@ -111,9 +146,21 @@ export class SqliteSynopsisConversationRepository {
       sessionId: input.sessionId,
       role: input.role,
       content: input.content,
+      ...(input.reasoningContent === undefined ? {} : { reasoningContent: input.reasoningContent }),
+      ...(input.searching === undefined ? {} : { searching: input.searching }),
       ...(input.choices === undefined ? {} : { choices: input.choices }),
+      ...(input.hidden === true ? { hidden: true } : {}),
       createdAtMs: input.createdAtMs,
     }
+  }
+
+  public async updateMessageChoices(
+    messageId: string,
+    choices: readonly SynopsisConversationChoice[],
+  ): Promise<void> {
+    await this.database.updateTable("synopsis_conversation_messages").set({
+      choices_json: encodeJson(choices),
+    }).where("id", "=", messageId).executeTakeFirstOrThrow()
   }
 }
 
@@ -149,19 +196,30 @@ function mapMessage(row: {
   session_id: string
   role: "user" | "assistant" | "system"
   content_text: string
+  reasoning_content: string | null
+  searching_json: string | null
   choices_json: string | null
+  hidden: number
   created_at_ms: number
 }): SynopsisConversationMessage {
   const choices = row.choices_json === null
     ? undefined
     : parseChoices(decodeJson(row.choices_json))
+  const searching = row.searching_json === null
+    ? undefined
+    : parseSearching(decodeJson(row.searching_json))
   return {
     messageId: row.id,
     projectId: row.project_id,
     sessionId: row.session_id,
     role: row.role,
     content: row.content_text,
+    ...(row.reasoning_content === null || row.reasoning_content.length === 0
+      ? {}
+      : { reasoningContent: row.reasoning_content }),
+    ...(searching === undefined ? {} : { searching }),
     ...(choices === undefined ? {} : { choices }),
+    ...(row.hidden === 1 ? { hidden: true } : {}),
     createdAtMs: row.created_at_ms,
   }
 }
@@ -169,4 +227,9 @@ function mapMessage(row: {
 function parseChoices(value: unknown): SynopsisConversationMessage["choices"] {
   if (!Array.isArray(value)) return undefined
   return value.map((item) => synopsisConversationChoiceSchema.parse(item))
+}
+
+function parseSearching(value: unknown): SynopsisConversationMessage["searching"] {
+  if (!Array.isArray(value)) return undefined
+  return value.map((item) => synopsisConversationStreamSearchSchema.parse(item))
 }

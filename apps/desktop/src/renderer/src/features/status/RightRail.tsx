@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Activity, Check, Circle, GitBranch, History, LoaderCircle, Network, Orbit } from "lucide-react"
+import { Activity, Check, Circle, GitBranch, History, Network, Orbit } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { aiPhaseValues, type HistoryOverview, type ProjectSettings, type ResettableRuntimeMetricId } from "@worldseed/contracts"
@@ -22,7 +22,6 @@ type Props = Readonly<{
   onOpenProjectSettings?(): void
   onResumeTask?(mode: "continue" | "retry_phase"): Promise<void>
   onResetTaskMetrics?(metricIds: readonly ResettableRuntimeMetricId[]): Promise<void>
-  onPauseTask?(): Promise<void>
   onSaveHistory?(): Promise<void>
   onRestoreHistory?(entryId: string): Promise<void>
   onContinueFromHistory?(entryId: string): Promise<void>
@@ -34,7 +33,7 @@ type Props = Readonly<{
 const labels: Record<string, string> = {
   interpret: "理解用户输入",
   rule_assembly: "装配规则快照",
-  source_retrieval: "选择性读取资料",
+  source_retrieval: "选择性检索资料",
   emergence_planning: "规划内容出现",
   emergence_review: "审查出现依据",
   draft: "撰写正文",
@@ -68,7 +67,7 @@ const visibleTopLevelPhases = aiPhaseValues.filter((phase) => (
   && !stagedGraphPhases.includes(phase as typeof stagedGraphPhases[number])
 ))
 
-export function RightRail({ task, project, graphSlice, graphSettings, historyRetentionLimit = null, history, historyLoading, onOpenProjectSettings, onResumeTask, onResetTaskMetrics, onPauseTask, onSaveHistory, onRestoreHistory, onContinueFromHistory, onReturnPreviousRound, onRefreshTask, onRefreshWorkspace }: Props): React.JSX.Element {
+export function RightRail({ task, project, graphSlice, graphSettings, historyRetentionLimit = null, history, historyLoading, onOpenProjectSettings, onResumeTask, onResetTaskMetrics, onSaveHistory, onRestoreHistory, onContinueFromHistory, onReturnPreviousRound, onRefreshTask, onRefreshWorkspace }: Props): React.JSX.Element {
   const [checkpointOpen, setCheckpointOpen] = useState(false)
   const tab = useWorkbenchStore((state) => state.rightTab)
   const setTab = useWorkbenchStore((state) => state.setRightTab)
@@ -76,14 +75,14 @@ export function RightRail({ task, project, graphSlice, graphSettings, historyRet
     if (task?.status === "awaiting_user_decision" || task?.status === "waiting_for_review") setCheckpointOpen(true)
   }, [task?.status])
   return <><aside className="right-rail">
-    <div className="right-tabs">
+    <div className="right-tabs" role="tablist" aria-label="右侧面板">
       <Tab id="process" tab={tab} onChange={setTab} icon={<Activity size={15} />} label="流程" />
       <Tab id="graph" tab={tab} onChange={setTab} icon={<Network size={15} />} label="世界图" />
       <Tab id="evolution" tab={tab} onChange={setTab} icon={<Orbit size={15} />} label="自洽演化" />
       <Tab id="history" tab={tab} onChange={setTab} icon={<History size={15} />} label="历史" />
     </div>
     <div className="right-content">
-      {tab === "process" ? <ProcessPanel task={task} onOpenCheckpoint={() => { setCheckpointOpen(true); }} onResetMetrics={onResetTaskMetrics} /> : null}
+      {tab === "process" ? <ProcessPanel task={task} onResetMetrics={onResetTaskMetrics} /> : null}
       {tab === "graph" ? <WorldGraph slice={graphSlice} settings={graphSettings} /> : null}
       {tab === "evolution" ? <EvolutionPanel /> : null}
       {tab === "history" ? <HistoryPanel
@@ -109,19 +108,31 @@ export function RightRail({ task, project, graphSlice, graphSettings, historyRet
     onClose={() => { setCheckpointOpen(false); }}
     onResume={onResumeTask ?? (() => Promise.reject(new Error("恢复接口尚未连接")))}
     onResetMetrics={onResetTaskMetrics ?? (() => Promise.reject(new Error("指标重置接口尚未连接")))}
-    onPause={onPauseTask ?? (() => Promise.reject(new Error("暂停接口尚未连接")))}
+    onRollbackRound={onReturnPreviousRound ?? (() => Promise.reject(new Error("回退本轮接口尚未连接")))}
     onRefreshTask={onRefreshTask}
     onRefreshWorkspace={onRefreshWorkspace}
   /> : null}</>
 }
 
 function Tab({ id, tab, onChange, icon, label }: { id: RightTab; tab: RightTab; onChange: (tab: RightTab) => void; icon: React.ReactNode; label: string }): React.JSX.Element {
-  return <button className={tab === id ? "active" : ""} onClick={() => { onChange(id); }}>{icon}{label}</button>
+  return <UiTooltip label={label}>
+    <button
+      type="button"
+      className={tab === id ? "active" : ""}
+      role="tab"
+      aria-selected={tab === id}
+      aria-label={label}
+      onClick={() => { onChange(id); }}
+    >
+      <span className="right-tab-icon" aria-hidden="true">{icon}</span>
+      <span className="right-tab-label">{label}</span>
+    </button>
+  </UiTooltip>
 }
 
-function ProcessPanel({ task, onOpenCheckpoint, onResetMetrics }: { task: TaskSnapshot | undefined; onOpenCheckpoint: () => void; onResetMetrics?: ((metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>) | undefined }): React.JSX.Element {
+function ProcessPanel({ task, onResetMetrics }: { task: TaskSnapshot | undefined; onResetMetrics?: ((metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>) | undefined }): React.JSX.Element {
   return <div className="process-panel">
-    <RuntimeMonitor task={task} onOpenCheckpoint={onOpenCheckpoint} onResetMetrics={onResetMetrics} />
+    <RuntimeMonitor task={task} onResetMetrics={onResetMetrics} />
     {task?.finalization === undefined || task.finalization.status === "completed" ? null : <p className="phase-empty">正式章节收尾：{task.finalization.status} · {task.finalization.chapterHeading}</p>}
     <div className="phase-list">{visibleTopLevelPhases.flatMap((phase) => {
       const rows: React.ReactNode[] = []
@@ -132,8 +143,13 @@ function ProcessPanel({ task, onOpenCheckpoint, onResetMetrics }: { task: TaskSn
       const isCurrent = latest?.status === "running" || latest?.status === "failed"
       rows.push(<details className={`phase-detail ${isDone ? "done" : isCurrent ? "current" : ""}`} key={phase}>
         <summary className={`phase-row ${isDone ? "done" : isCurrent ? "current" : ""}`}>
-          <span className="phase-icon">{isDone ? <Check size={13} /> : isCurrent ? <LoaderCircle size={13} /> : <Circle size={10} />}</span>
-          <span><strong>{phase}</strong><small>{labels[phase]}</small></span>
+          <UiTooltip label={uiTooltipRich(labels[phase] ?? phase, phase)} rich>
+            <span className="phase-icon">{isDone ? <Check size={13} /> : isCurrent ? <span className="phase-spinner" aria-hidden="true" /> : <Circle size={10} />}</span>
+          </UiTooltip>
+          <span className="phase-row-copy">
+            <strong>{labels[phase] ?? phase}</strong>
+            <small>{phase}</small>
+          </span>
           <PhaseMetricRings runs={runs} />
         </summary>
         {latest?.result === undefined ? <PhasePending latestStatus={latest?.status} /> : <PhaseDetails result={latest.result} />}
@@ -161,8 +177,13 @@ function GraphGovernanceGroup({ task }: { task: TaskSnapshot | undefined }): Rea
   ]
   return <details className={`phase-detail graph-governance-group ${done ? "done" : active === undefined ? "" : "current"}`}>
     <summary className={`phase-row ${done ? "done" : active === undefined ? "" : "current"}`}>
-      <span className="phase-icon">{done ? <Check size={13} /> : active === undefined ? <Circle size={10} /> : <LoaderCircle size={13} />}</span>
-      <span><strong>graph_governance</strong><small>分步治理世界图</small></span>
+      <UiTooltip label={uiTooltipRich("分步治理世界图", "graph_governance")} rich>
+        <span className="phase-icon">{done ? <Check size={13} /> : active === undefined ? <Circle size={10} /> : <span className="phase-spinner" aria-hidden="true" />}</span>
+      </UiTooltip>
+      <span className="phase-row-copy">
+        <strong>分步治理世界图</strong>
+        <small>graph_governance</small>
+      </span>
       <PhaseMetricRings runs={runs} />
     </summary>
     <div className="governance-step-list">{steps.map((step) => {
@@ -175,8 +196,10 @@ function GraphGovernanceGroup({ task }: { task: TaskSnapshot | undefined }): Rea
       const stepCurrent = latest?.status === "running" || latest?.status === "failed"
       return <details className={`governance-step ${stepDone ? "done" : stepCurrent ? "current" : ""}`} key={step.id}>
         <summary>
-          <span>{stepDone ? <Check size={12} /> : stepCurrent ? <LoaderCircle size={12} /> : <Circle size={9} />}</span>
-          <strong>{step.label}</strong>
+          <UiTooltip label={uiTooltipRich(step.label, step.id)} rich>
+            <span className="governance-step-icon">{stepDone ? <Check size={12} /> : stepCurrent ? <span className="phase-spinner phase-spinner-sm" aria-hidden="true" /> : <Circle size={9} />}</span>
+          </UiTooltip>
+          <strong className="governance-step-copy">{step.label}</strong>
           <PhaseMetricRings runs={phaseRuns} />
         </summary>
         {step.kind === "mechanical"
@@ -209,9 +232,7 @@ function PhaseMetricRings({ runs }: { runs: readonly PhaseRunSnapshot[] }): Reac
 function PhaseMetricRing({ value, label, progress }: { value: string; label: string; progress?: number }): React.JSX.Element {
   const style = { "--phase-ring-progress": progress === undefined ? "0%" : `${String(Math.round(progress * 100))}%` } as React.CSSProperties
   return <UiTooltip label={uiTooltipRich(label, value)} rich>
-    <span className={`phase-metric-ring${value === "--" ? " empty" : ""}`} style={style} aria-label={`${label}: ${value}`} tabIndex={0}>
-      <span>{value}</span>
-    </span>
+    <span className={`phase-metric-ring${value === "--" ? " empty" : ""}`} style={style} aria-label={`${label}: ${value}`} tabIndex={0} />
   </UiTooltip>
 }
 

@@ -13,8 +13,28 @@ type Props = Readonly<{
   settings?: ProjectSettings["graph"] | undefined
 }>
 
+/** Sigma 默认 hover 在 label 为字符串时会画出右侧标签白底框；空字符串也会触发，变成小白方块。 */
+function drawNodeSelectionRing(
+  context: CanvasRenderingContext2D,
+  data: { x: number; y: number; size: number },
+): void {
+  const padding = 2
+  context.fillStyle = "#FFF"
+  context.shadowOffsetX = 0
+  context.shadowOffsetY = 0
+  context.shadowBlur = 8
+  context.shadowColor = "#000"
+  context.beginPath()
+  context.arc(data.x, data.y, data.size + padding, 0, Math.PI * 2)
+  context.closePath()
+  context.fill()
+  context.shadowBlur = 0
+}
+
 export function WorldGraph({ slice, settings = defaultProjectSettings.graph }: Props): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
+  const graphRef = useRef<MultiDirectedGraph | null>(null)
+  const rendererRef = useRef<Sigma | null>(null)
   const [focusId, setFocusId] = useState<string | undefined>()
   const focusSummary = useMemo(() => slice?.nodes.find((node) => node.id === focusId), [focusId, slice])
 
@@ -37,29 +57,48 @@ export function WorldGraph({ slice, settings = defaultProjectSettings.graph }: P
         x,
         y,
         size: depth === 0 ? 18 : depth === 1 ? 14 : 12,
-        label: graphContentLabel(node.content),
-        color: depth === 0 ? "#176b57" : depth === 1 ? "#2f6f9f" : "#8b6b2d",
+        color: depth === 0 ? "#5865f2" : depth === 1 ? "#00a8fc" : "#f0b232",
+        highlighted: false,
       })
     })
     for (const link of slice.links) {
       if (!graph.hasNode(link.fromNodeId) || !graph.hasNode(link.toNodeId)) continue
       graph.addEdgeWithKey(link.id, link.fromNodeId, link.toNodeId, {
-        label: graphContentLabel(link.content),
         color: "#a0a7b0",
         size: 1.6,
         type: "arrow",
       })
     }
     const renderer = new Sigma(graph, containerRef.current, {
+      renderLabels: false,
       renderEdgeLabels: false,
-      labelDensity: 0.75,
-      labelRenderedSizeThreshold: 8,
       defaultEdgeType: "arrow",
       stagePadding: 54,
+      defaultDrawNodeHover: drawNodeSelectionRing,
     })
+    graphRef.current = graph
+    rendererRef.current = renderer
     renderer.on("clickNode", ({ node }) => { setFocusId(node); })
-    return () => { renderer.kill(); }
+    renderer.on("clickStage", () => { setFocusId(undefined); })
+    return () => {
+      renderer.kill()
+      graphRef.current = null
+      rendererRef.current = null
+    }
   }, [slice])
+
+  useEffect(() => {
+    const graph = graphRef.current
+    const renderer = rendererRef.current
+    if (graph === null || renderer === null) return
+    graph.forEachNode((nodeId) => {
+      const highlighted = nodeId === focusId
+      if (graph.getNodeAttribute(nodeId, "highlighted") !== highlighted) {
+        graph.setNodeAttribute(nodeId, "highlighted", highlighted)
+      }
+    })
+    renderer.refresh()
+  }, [focusId, slice])
 
   return <div className="graph-view">
     <div className="graph-toolbar">
@@ -71,9 +110,17 @@ export function WorldGraph({ slice, settings = defaultProjectSettings.graph }: P
     {slice === undefined || slice.nodes.length === 0 ? <div className="empty-state">完成一轮推演后，这里显示从本轮锚点读取的真实局部图。</div> : <div className="graph-stage">
       <div className="sigma-canvas" ref={containerRef} />
       <aside className="graph-inspector">
-        <small>局部详情</small>
-        <strong>{focusSummary === undefined ? "点击一个节点查看" : graphContentLabel(focusSummary.content)}</strong>
-        <p>{focusSummary === undefined ? "右侧显示当前节点、来源和局部连接说明。" : JSON.stringify(focusSummary.content, null, 2)}</p>
+        <small>节点详情</small>
+        {focusSummary === undefined
+          ? <>
+              <strong>未选中节点</strong>
+              <p>点击图中节点后，在此查看该节点内容。</p>
+            </>
+          : <>
+              <strong>{graphContentLabel(focusSummary.content)}</strong>
+              <code className="graph-inspector-id">{focusSummary.id}</code>
+              <GraphContentView content={focusSummary.content} />
+            </>}
       </aside>
     </div>}
   </div>
@@ -115,12 +162,102 @@ export function buildGraphLevelsForLayout(slice: GraphSlice): string[][] {
   return levels
 }
 
+const GRAPH_FIELD_LABELS: Readonly<Record<string, string>> = {
+  identity: "身份",
+  knowledge: "知识",
+  name: "名称",
+  title: "标题",
+  label: "标签",
+  text: "文本",
+  note: "备注",
+  anchor: "锚点",
+  calendarDate: "历法日期",
+  summary: "摘要",
+  description: "描述",
+  type: "类型",
+  status: "状态",
+  location: "地点",
+  place: "地点",
+  time: "时间",
+  role: "角色",
+}
+
+export function graphFieldLabel(key: string): string {
+  return GRAPH_FIELD_LABELS[key] ?? key
+}
+
 export function graphContentLabel(content: unknown): string {
-  if (typeof content === "string") return content
-  if (typeof content !== "object" || content === null) return "未命名节点"
-  const record = content as Record<string, unknown>
-  for (const key of ["name", "title", "text", "anchor", "note"]) {
-    if (typeof record[key] === "string") return record[key]
+  if (typeof content === "string") {
+    const trimmed = content.trim()
+    return trimmed.length === 0 ? "未命名节点" : trimmed
   }
-  return JSON.stringify(content).slice(0, 30)
+  if (typeof content !== "object" || content === null || Array.isArray(content)) return "未命名节点"
+  const record = content as Record<string, unknown>
+  for (const key of ["name", "title", "label", "identity", "text", "anchor", "note", "calendarDate"]) {
+    const value = record[key]
+    if (typeof value === "string" && value.trim().length > 0) return value.trim()
+  }
+  return "未命名节点"
+}
+
+export function formatGraphContent(content: unknown): string {
+  if (typeof content === "string") return content
+  if (content === undefined) return ""
+  try {
+    return JSON.stringify(content, null, 2)
+  } catch {
+    return String(content)
+  }
+}
+
+export function GraphContentView({ content }: Readonly<{ content: unknown }>): React.JSX.Element {
+  if (typeof content === "string") {
+    const trimmed = content.trim()
+    return <p className="graph-inspector-text">{trimmed.length === 0 ? "无内容" : trimmed}</p>
+  }
+  if (content === null || content === undefined) {
+    return <p className="graph-inspector-text">无内容</p>
+  }
+  if (typeof content !== "object") {
+    return <p className="graph-inspector-text">{String(content)}</p>
+  }
+  if (Array.isArray(content)) {
+    if (content.length === 0) return <p className="graph-inspector-text">空列表</p>
+    return <ul className="graph-inspector-list">
+      {content.map((item, index) => <li key={index}><GraphFieldValue value={item} /></li>)}
+    </ul>
+  }
+  const entries = Object.entries(content as Record<string, unknown>)
+  if (entries.length === 0) return <p className="graph-inspector-text">无内容</p>
+  return <dl className="graph-inspector-fields">
+    {entries.map(([key, value]) => <div className="graph-inspector-field" key={key}>
+      <dt>{graphFieldLabel(key)}</dt>
+      <dd><GraphFieldValue value={value} /></dd>
+    </div>)}
+  </dl>
+}
+
+function GraphFieldValue({ value }: Readonly<{ value: unknown }>): React.JSX.Element {
+  if (value === null || value === undefined) return <span className="graph-inspector-empty">—</span>
+  if (typeof value === "string") return <>{value}</>
+  if (typeof value === "number" || typeof value === "boolean") return <>{String(value)}</>
+  if (Array.isArray(value)) {
+    if (value.every((item) => item === null || ["string", "number", "boolean"].includes(typeof item))) {
+      return <span className="graph-inspector-chips">
+        {value.map((item, index) => <span className="graph-inspector-chip" key={index}>{item === null ? "—" : String(item)}</span>)}
+      </span>
+    }
+    return <pre className="graph-inspector-nested">{formatGraphContent(value)}</pre>
+  }
+  if (typeof value === "object") {
+    const nested = Object.entries(value as Record<string, unknown>)
+    if (nested.length === 0) return <span className="graph-inspector-empty">—</span>
+    return <dl className="graph-inspector-fields graph-inspector-fields-nested">
+      {nested.map(([key, nestedValue]) => <div className="graph-inspector-field" key={key}>
+        <dt>{graphFieldLabel(key)}</dt>
+        <dd><GraphFieldValue value={nestedValue} /></dd>
+      </div>)}
+    </dl>
+  }
+  return <pre className="graph-inspector-nested">{formatGraphContent(value)}</pre>
 }

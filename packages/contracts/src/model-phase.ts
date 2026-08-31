@@ -13,9 +13,14 @@ const modelReadQuerySchema = z.object({
   directions: z.array(z.enum(["out", "in", "both"])).optional(),
   maxCandidates: z.number().int().positive().optional(),
   maxDepth: z.number().int().nonnegative().optional(),
-  sourceKinds: z.array(z.enum(["graph", "revision", "source", "rule", "reference"])).optional(),
+  sourceKinds: z.array(z.enum(["graph", "revision", "source", "rule", "reference", "web"])).optional(),
   sourceIds: z.array(modelSourceReferenceSchema).optional(),
   sourceBoundary: z.enum(["start", "end"]).optional(),
+  readMode: z.enum(["read_full", "list", "grep"]).optional(),
+  grepContextLines: z.number().int().min(0).max(20).optional(),
+  grepMaxMatchesPerFile: z.number().int().positive().max(80).optional(),
+  lineStart: z.number().int().positive().optional(),
+  lineEnd: z.number().int().positive().optional(),
 }).strict()
 
 export const modelReadRequestSchema = z.object({

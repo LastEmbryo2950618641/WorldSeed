@@ -1,7 +1,8 @@
 import { Editor, type Monaco } from "@monaco-editor/react"
 import { useEffect, useRef, useState } from "react"
 import type { editor } from "monaco-editor"
-import type { ChapterRevision, ChapterRevisionConversationMessage, SynopsisConversationMessage, SynopsisConversationSession } from "@worldseed/contracts"
+import type { ChapterNarrativeIntent, ChapterRevision, ChapterRevisionConversationMessage, SynopsisConversationMessage, SynopsisConversationSession, SynopsisConversationStreamSnapshot, SynopsisStagingPromoteProposal } from "@worldseed/contracts"
+import { WORLDSEED_EDITOR_THEME, ensureWorldseedEditorTheme } from "../../monaco.js"
 import { SynopsisConversationComposer } from "./SynopsisConversationComposer.js"
 import { isSynopsisMarkdownPath } from "./synopsis-path.js"
 import { AlertTriangle, BookOpenText, RotateCcw, Save, Sparkles } from "lucide-react"
@@ -44,6 +45,7 @@ function syncChapterEditorWrap(
 
 type Props = Readonly<{
   selectedPath: string | undefined
+  openedDocumentPath: string | undefined
   content: string
   dirty: boolean
   readOnly: boolean
@@ -56,13 +58,18 @@ type Props = Readonly<{
   wordCountValid: boolean
   descriptionRules: readonly string[]
   proseRules: readonly string[]
+  boundaryPace: ChapterNarrativeIntent["boundaryPace"]
+  causalityFocus: ChapterNarrativeIntent["causalityFocus"]
   onContentChange(value: string): void
   onHome(): void
+  onOpenDocument(): void
   onPromptChange(value: string): void
   onDescriptionRuleChange(value: string): void
   onProseRuleChange(value: string): void
   onMinimumWordCountChange(value: string): void
   onMaximumWordCountChange(value: string): void
+  onBoundaryPaceChange(value: ChapterNarrativeIntent["boundaryPace"]): void
+  onCausalityFocusChange(value: ChapterNarrativeIntent["causalityFocus"]): void
   onSave(): void
   onRun(): void
   chapter: Readonly<{ chapterId: string; sourceId: string }> | undefined
@@ -80,7 +87,12 @@ type Props = Readonly<{
   synopsisSession: SynopsisConversationSession | undefined
   synopsisMessages: readonly SynopsisConversationMessage[]
   synopsisBusy: boolean
+  synopsisStream?: SynopsisConversationStreamSnapshot | undefined
+  pendingStagingPromotes?: readonly SynopsisStagingPromoteProposal[]
   onSynopsisSend(message: string): Promise<void>
+  onSynopsisRefreshChoices(messageId: string): Promise<void>
+  onPromoteStaging(): Promise<void>
+  onRejectStagingPromote?(proposalIds: readonly string[]): Promise<void>
   onOpenSynopsisFile(path: string): void
   diffFocusMessageId: string | undefined
   onDiffFocusHandled(): void
@@ -103,8 +115,17 @@ export function EditorArea(props: Props): React.JSX.Element {
         session={props.synopsisSession}
         messages={props.synopsisMessages}
         busy={props.synopsisBusy}
+        stream={props.synopsisStream}
         running={props.running}
+        {...(props.pendingStagingPromotes === undefined
+          ? {}
+          : { pendingStagingPromotes: props.pendingStagingPromotes })}
         onSend={props.onSynopsisSend}
+        onRefreshChoices={props.onSynopsisRefreshChoices}
+        onPromoteStaging={props.onPromoteStaging}
+        {...(props.onRejectStagingPromote === undefined
+          ? {}
+          : { onRejectStagingPromote: props.onRejectStagingPromote })}
         onStartTurn={props.onRun}
         onOpenSynopsisFile={props.onOpenSynopsisFile}
         descriptionRule={props.descriptionRule}
@@ -114,10 +135,14 @@ export function EditorArea(props: Props): React.JSX.Element {
         wordCountValid={props.wordCountValid}
         descriptionRules={props.descriptionRules}
         proseRules={props.proseRules}
+        boundaryPace={props.boundaryPace}
+        causalityFocus={props.causalityFocus}
         onDescriptionRuleChange={props.onDescriptionRuleChange}
         onProseRuleChange={props.onProseRuleChange}
         onMinimumWordCountChange={props.onMinimumWordCountChange}
         onMaximumWordCountChange={props.onMaximumWordCountChange}
+        onBoundaryPaceChange={props.onBoundaryPaceChange}
+        onCausalityFocusChange={props.onCausalityFocusChange}
       />
     : mode === "synopsis"
       ? <MarkdownEditor content={props.content} readOnly={false} onContentChange={props.onContentChange} />
@@ -145,9 +170,18 @@ export function EditorArea(props: Props): React.JSX.Element {
 
   return <section className="editor-area">
     <div className="editor-tabs">
-      <button className={props.selectedPath === undefined ? "active" : ""} onClick={props.onHome}><BookOpenText size={15} /> 创作台</button>
-      {props.selectedPath === undefined ? null : <button className="active"><span>{props.selectedPath.split("/").at(-1)}</span>{props.dirty ? <i /> : null}</button>}
-      <div className="editor-tab-actions"><UiTooltip label="保存"><button aria-label="保存" disabled={!props.dirty || props.readOnly} onClick={props.onSave}><Save size={15} /></button></UiTooltip></div>
+      <button type="button" className={props.selectedPath === undefined ? "active" : ""} onClick={props.onHome}><BookOpenText size={15} /> 创作台</button>
+      {props.openedDocumentPath === undefined ? null : (
+        <button
+          type="button"
+          className={props.selectedPath === props.openedDocumentPath ? "active" : ""}
+          onClick={props.onOpenDocument}
+        >
+          <span>{props.openedDocumentPath.split("/").at(-1)}</span>
+          {props.dirty ? <i /> : null}
+        </button>
+      )}
+      <div className="editor-tab-actions"><UiTooltip label="保存"><button aria-label="保存" disabled={!props.dirty || props.readOnly || props.selectedPath === undefined} onClick={props.onSave}><Save size={15} /></button></UiTooltip></div>
     </div>
     <div className="editor-document">{documentPane}</div>
   </section>
@@ -161,7 +195,9 @@ function MarkdownEditor(props: {
   return <Editor
         height="100%"
         language="markdown"
+        theme={WORLDSEED_EDITOR_THEME}
         value={props.content}
+        beforeMount={(monaco) => { ensureWorldseedEditorTheme(monaco); }}
         onChange={(value: string | undefined) => { props.onContentChange(value ?? ""); }}
         options={{
           readOnly: props.readOnly,
@@ -775,12 +811,14 @@ function ChapterRevisionEditor(props: {
                   <Editor
                     height="100%"
                     language="markdown"
+                    theme={WORLDSEED_EDITOR_THEME}
                     value={displayMode === "view" ? (viewingVersion?.body ?? draft) : draft}
                     onChange={(value: string | undefined) => {
                       if (displayMode === "view") return
                       setDraft(value ?? "")
                       if (reviewStage === "reviewed") setReviewStage("idle")
                     }}
+                    beforeMount={(monaco) => { ensureWorldseedEditorTheme(monaco); }}
                     onMount={(editorInstance, monaco) => {
                       chapterEditorLayoutCleanupRef.current?.()
                       chapterEditorRef.current = editorInstance

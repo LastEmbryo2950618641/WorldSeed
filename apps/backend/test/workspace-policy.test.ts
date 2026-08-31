@@ -20,7 +20,7 @@ describe("workspace policy", () => {
     expect(assertWorkspaceMutationAllowed("设定集/readme.md", "file", "user")).toBe("设定集/readme.md")
   })
 
-  it("rejects a sixth root and non-Markdown files", () => {
+  it("rejects a seventh unknown root and non-Markdown files", () => {
     const inventory = [
       ...fixedWorkspaceEntries.map((entry) => ({ path: entry.relativePath, kind: entry.entryKind })),
       { path: "内部索引", kind: "directory" as const },
@@ -30,6 +30,11 @@ describe("workspace policy", () => {
 
     expect(codes).toContain("unexpected_root_entry")
     expect(codes).toContain("invalid_file_type")
+  })
+
+  it("accepts staging root markdown edits", () => {
+    expect(assertWorkspaceMutationAllowed("暂存区/本章讨论笔记.md", "file", "user")).toBe("暂存区/本章讨论笔记.md")
+    expect(assertWorkspaceMutationAllowed("暂存区/readme.md", "file", "platform")).toBe("暂存区/readme.md")
   })
 
   it("separates user edits, platform projections, and chapter publishing", () => {

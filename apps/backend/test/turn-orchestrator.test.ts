@@ -42,9 +42,11 @@ import {
   estimateModelMessageTokens,
   openProjectDatabase,
   openRegistryDatabase,
+  FakeWebResearchAdapter,
   type AIModelPort,
   type ScopeCommitRepository,
   type TurnPhaseInput,
+  type WebResearchPort,
   type WorkspacePort,
 } from "../src/index.js"
 
@@ -1881,6 +1883,93 @@ describe("TurnOrchestrator", () => {
       kind: "query",
       status: "completed",
     })
+  })
+
+  it("fulfills sourceKinds web reads through the web research port", async () => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    let retrievalEvidence: TurnPhaseInput["readEvidence"] | undefined
+    let webRound = 0
+    const model: AIModelPort = {
+      info: fake.info,
+      execute: async (request) => {
+        const execution = await fake.execute(request)
+        if (request.phase !== "source_retrieval") return execution
+        webRound += 1
+        if (webRound === 1) {
+          return {
+            ...execution,
+            result: {
+              ...execution.result,
+              outcome: "request_read",
+              requestedReads: [{
+                requestId: randomUUID(),
+                reason: "核对公开背景资料",
+                expectedEvidence: "茶的公开背景",
+                query: {
+                  exactKeys: ["https://example.com/tea"],
+                  semanticTexts: ["tea history"],
+                  anchorIds: [],
+                  directions: ["both"],
+                  maxCandidates: 4,
+                  maxDepth: 1,
+                  sourceKinds: ["web"],
+                },
+              }],
+            },
+          }
+        }
+        retrievalEvidence = (request.input as TurnPhaseInput).readEvidence
+        return execution
+      },
+    }
+    const webResearch = new FakeWebResearchAdapter(
+      {
+        "tea history": [{
+          title: "Tea History",
+          url: "https://example.com/tea-history",
+          snippet: "Tea originated in China.",
+        }],
+      },
+      {
+        "https://example.com/tea": {
+          url: "https://example.com/tea",
+          title: "Tea",
+          text: "Tea is prepared from Camellia sinensis leaves.",
+        },
+      },
+    )
+
+    const result = await fixture.createOrchestrator(
+      model,
+      fixture.commit,
+      undefined,
+      new NodeWorkspaceAdapter(),
+      webResearch,
+    ).execute({
+      workflow: "query",
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "茶是什么？",
+      chapterSequence: 1,
+      allowWorkspaceChapterReads: false,
+      projectSettings: {
+        ...defaultProjectSettings,
+        retrieval: {
+          ...defaultProjectSettings.retrieval,
+          webResearchEnabled: true,
+          maxWebResults: 5,
+        },
+      },
+    })
+
+    expect(result.kind).toBe("query")
+    expect(webRound).toBeGreaterThanOrEqual(2)
+    expect(retrievalEvidence?.some((evidence) => evidence.ownerKind === "web:page" && evidence.ownerId === "https://example.com/tea")).toBe(true)
+    expect(retrievalEvidence?.some((evidence) => evidence.ownerKind === "web:search" && evidence.semanticText.includes("Tea originated in China."))).toBe(true)
+    const stored = await fixture.database.selectFrom("evidence_objects").select(["source_kind", "locator"]).execute()
+    expect(stored.some((row) => row.source_kind === "web")).toBe(true)
   })
 
   it("rewrites a query draft when response review finds the answer is not evidence closed", async () => {
@@ -3963,6 +4052,11 @@ async function createFixture() {
       referencesReadme: "# references\n",
       descriptionRules: "# description\n",
       proseStyleRules: "# prose\n",
+      stagingReadme: "# staging\n",
+      stagingNotes: "# notes\n",
+      stagingCharacters: "# characters\n",
+      stagingWorld: "# world\n",
+      stagingPromoteIndex: "# promote\n",
     },
     nowMs: 1,
   })
@@ -3993,6 +4087,7 @@ async function createFixture() {
       commitRepository: ScopeCommitRepository,
       diagnostics?: { log(level: "debug" | "info" | "warn" | "error", event: string, fields?: Readonly<Record<string, unknown>>): void },
       workspace: WorkspacePort = new NodeWorkspaceAdapter(),
+      webResearch?: WebResearchPort,
     ) {
       return new TurnOrchestrator({
         taskScopes,
@@ -4012,6 +4107,7 @@ async function createFixture() {
         commit: commitRepository,
         internalStore: new NodeInternalStoreAdapter(applicationDataRoot),
         workspace,
+        ...(webResearch === undefined ? {} : { webResearch }),
         createId: randomUUID,
         idAllocator: new SqliteProjectIdAllocator(database),
         now: () => Date.now(),

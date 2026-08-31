@@ -1,4 +1,5 @@
-import React from "react"
+import React, { act } from "react"
+import { createRoot } from "react-dom/client"
 import { renderToStaticMarkup } from "react-dom/server"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { defaultProjectSettings } from "@worldseed/config"
@@ -13,7 +14,7 @@ import { CreationDeskProgressReview } from "../src/renderer/src/features/editor/
 import { RightRail } from "../src/renderer/src/features/status/RightRail.js"
 import { RightPanelViewport } from "../src/renderer/src/features/status/RightPanelViewport.js"
 import { HistoryPanel } from "../src/renderer/src/features/status/HistoryPanel.js"
-import { TaskCheckpointDialog } from "../src/renderer/src/features/status/TaskCheckpointPrototype.js"
+import { TaskCheckpointDialog, resolveCheckpointPauseReason } from "../src/renderer/src/features/status/TaskCheckpointPrototype.js"
 import { ProjectSettingsDialog } from "../src/renderer/src/features/settings/ProjectSettingsDialog.js"
 import { ModelConfigurationDialog } from "../src/renderer/src/features/settings/ModelConfigurationDialog.js"
 import {
@@ -22,7 +23,9 @@ import {
 } from "../src/renderer/src/app/App.js"
 import {
   buildGraphLevelsForLayout,
+  GraphContentView,
   graphContentLabel,
+  graphFieldLabel,
   WorldGraph,
 } from "../src/renderer/src/features/status/WorldGraph.js"
 
@@ -35,14 +38,43 @@ vi.mock("@monaco-editor/react", () => ({
     },
     props.value,
   ),
+  loader: { config: () => {} },
+}))
+
+vi.mock("monaco-editor", () => ({
+  editor: {
+    defineTheme: () => {},
+    setTheme: () => {},
+  },
+}))
+
+vi.mock("monaco-editor/esm/vs/editor/editor.worker?worker", () => ({
+  default: class {},
+}))
+
+vi.mock("../src/renderer/src/monaco.js", () => ({
+  WORLDSEED_EDITOR_THEME: "worldseed-dark",
+  ensureWorldseedEditorTheme: () => {},
 }))
 
 vi.mock("sigma", () => ({
   default: class MockSigma {
     public on(): void {}
     public kill(): void {}
+    public refresh(): void {}
   },
 }))
+
+function renderPortaledHtml(element: React.ReactElement): string {
+  const mount = document.createElement("div")
+  document.body.appendChild(mount)
+  const root = createRoot(mount)
+  act(() => { root.render(element) })
+  const html = document.body.innerHTML
+  act(() => { root.unmount() })
+  mount.remove()
+  return html
+}
 
 function editorDefaults(overrides: Partial<React.ComponentProps<typeof EditorArea>> = {}): React.ComponentProps<typeof EditorArea> {
   return {
@@ -60,6 +92,8 @@ function editorDefaults(overrides: Partial<React.ComponentProps<typeof EditorAre
     wordCountValid: true,
     descriptionRules: ["表现输出/描写规则/近景跟随.md"],
     proseRules: ["表现输出/笔风规则/克制叙述.md"],
+    boundaryPace: "advance_allowed",
+    causalityFocus: "auto",
     onContentChange: vi.fn(),
     onHome: vi.fn(),
     onPromptChange: vi.fn(),
@@ -67,6 +101,8 @@ function editorDefaults(overrides: Partial<React.ComponentProps<typeof EditorAre
     onProseRuleChange: vi.fn(),
     onMinimumWordCountChange: vi.fn(),
     onMaximumWordCountChange: vi.fn(),
+    onBoundaryPaceChange: vi.fn(),
+    onCausalityFocusChange: vi.fn(),
     onSave: vi.fn(),
     onRun: vi.fn(),
     onEnsureRevision: vi.fn(async () => undefined),
@@ -126,6 +162,17 @@ describe("renderer workbench UI contract", () => {
     expect(html).toContain("克制叙述.md")
     expect(html).toContain("2000")
     expect(html).toContain("3000")
+    expect(html).toContain("边界节奏")
+    expect(html).toContain("可推进（仍贴梗概）")
+    expect(html).toContain("因果焦点")
+    expect(html).toContain("自动")
+    expect(html).not.toContain("data-testid=\"creation-desk-jump-latest\"")
+  })
+
+  it("detects when the creation-desk thread is away from the latest messages", async () => {
+    const { isCreationDeskNearBottom } = await import("../src/renderer/src/features/editor/SynopsisConversationComposer.js")
+    expect(isCreationDeskNearBottom({ scrollHeight: 1200, scrollTop: 1100, clientHeight: 100 })).toBe(true)
+    expect(isCreationDeskNearBottom({ scrollHeight: 1200, scrollTop: 200, clientHeight: 100 })).toBe(false)
   })
 
   it("renders post-turn progress review actions for locked planned rows", () => {
@@ -607,7 +654,8 @@ describe("right rail process UI contract", () => {
     expect(html).not.toContain("modelReasoning")
     expect(html).not.toContain("modelReasoningKind")
     expect(html).toContain("运行监控")
-    expect(html).toContain("最近稳定检查点")
+    expect(html).not.toContain("最近稳定检查点")
+    expect(html).not.toContain("实时状态")
     expect(html).toContain("全部重置")
     expect(html).toContain("读取当前场景锚点")
     expect(html).toContain("审查正文响应")
@@ -739,7 +787,7 @@ describe("right rail process UI contract", () => {
   })
 
   it("renders a blocked checkpoint with explicit user-controlled recovery", () => {
-    const html = renderToStaticMarkup(React.createElement(TaskCheckpointDialog, {
+    const html = renderPortaledHtml(React.createElement(TaskCheckpointDialog, {
       task: {
         handle: { taskId: "task-1", status: "awaiting_user_decision" },
         status: "awaiting_user_decision",
@@ -762,22 +810,24 @@ describe("right rail process UI contract", () => {
       },
       onClose: vi.fn(),
       onResume: vi.fn(() => Promise.resolve()),
-      onPause: vi.fn(() => Promise.resolve()),
+      onRollbackRound: vi.fn(() => Promise.resolve()),
     }))
 
     expect(html).toContain("推演已暂停")
     expect(html).toContain("draft")
-    expect(html).toContain("本轮执行指标已达到上限")
-    expect(html).toContain("Turn deadline exceeded")
-    expect(html).toContain("已保留内容")
-    expect(html).toContain("重试当前阶段")
-    expect(html).toContain("继续执行")
-    expect(html).toContain("请先重置 1 项限制")
+    expect(html).toContain("暂停原因")
+    expect(html).toContain("本轮执行时间已到上限")
+    expect(html).not.toContain("Turn deadline exceeded")
+    expect(html).toContain("请先在运行监控中重置 1 项限制后再继续")
+    expect(html).toContain("回退本轮")
+    expect(html).toContain("重试")
+    expect(html).toContain("继续")
+    expect(html).not.toContain("保持暂停")
     expect(html.match(/disabled=""/gu)?.length).toBeGreaterThanOrEqual(2)
   })
 
   it("renders settings extraction review checkpoint without blocked metrics", () => {
-    const html = renderToStaticMarkup(React.createElement(TaskCheckpointDialog, {
+    const html = renderPortaledHtml(React.createElement(TaskCheckpointDialog, {
       task: {
         handle: { taskId: "task-settings", status: "waiting_for_review" },
         status: "waiting_for_review",
@@ -805,19 +855,23 @@ describe("right rail process UI contract", () => {
       },
       onClose: vi.fn(),
       onResume: vi.fn(() => Promise.resolve()),
-      onPause: vi.fn(() => Promise.resolve()),
+      onRollbackRound: vi.fn(() => Promise.resolve()),
     }))
 
     expect(html).toContain("设定抽取待确认")
     expect(html).toContain("settings_extraction")
+    expect(html).toContain("暂停原因")
+    expect(html).toContain("正文已生成，抽取了 1 条设定修订提案，请确认后再继续图治理")
     expect(html).toContain("继续图治理")
+    expect(html).toContain("回退本轮")
+    expect(html).not.toContain("保持暂停")
     expect(html).not.toContain("阻塞指标")
     expect(html).toContain("checkpoint-settings-review")
     expect(html).toContain("没有待确认的设定提案")
   })
 
   it("renders finalization recovery without implying another AI request", () => {
-    const html = renderToStaticMarkup(React.createElement(TaskCheckpointDialog, {
+    const html = renderPortaledHtml(React.createElement(TaskCheckpointDialog, {
       task: {
         handle: { taskId: "task-finalize", status: "awaiting_user_decision" },
         status: "awaiting_user_decision",
@@ -841,14 +895,30 @@ describe("right rail process UI contract", () => {
       },
       onClose: vi.fn(),
       onResume: vi.fn(() => Promise.resolve()),
-      onPause: vi.fn(() => Promise.resolve()),
+      onRollbackRound: vi.fn(() => Promise.resolve()),
     }))
 
     expect(html).toContain("正式章节收尾 · 等待发布章节")
-    expect(html).toContain("恢复不会重新调用 AI")
+    expect(html).toContain("暂停原因")
+    expect(html).toContain("章节发布失败")
+    expect(html).not.toContain("Chapter publish failed")
     expect(html).toContain("重试收尾步骤")
+    expect(html).toContain("回退本轮")
     expect(html).toContain("committed")
     expect(html).not.toContain("继续执行会重发当前模型请求")
+    expect(html).not.toContain("此前阶段、读取结果和待提交作用域均已保存")
+    expect(html).not.toContain("保持暂停")
+  })
+})
+
+describe("checkpoint pause reason copy", () => {
+  it("localizes technical interruption messages into Chinese pause reasons", () => {
+    expect(resolveCheckpointPauseReason({
+      isSettingsReview: false,
+      blockedMetricCount: 0,
+      interruptionKind: "execution_error",
+      interruptionMessage: "driver has already been destroyed",
+    })).toBe("本地数据库连接已关闭")
   })
 })
 
@@ -996,7 +1066,22 @@ describe("world graph layout contract", () => {
     expect(graphContentLabel({ name: "林序" })).toBe("林序")
     expect(graphContentLabel({ title: "旧港封锁" })).toBe("旧港封锁")
     expect(graphContentLabel({ note: "桥下钥匙" })).toBe("桥下钥匙")
+    expect(graphContentLabel({ identity: "向桐镇二" })).toBe("向桐镇二")
     expect(graphContentLabel(null)).toBe("未命名节点")
+  })
+
+  it("renders object graph content as labeled fields instead of raw JSON", () => {
+    expect(graphFieldLabel("identity")).toBe("身份")
+    expect(graphFieldLabel("knowledge")).toBe("知识")
+    expect(graphFieldLabel("customKey")).toBe("customKey")
+    const html = renderToStaticMarkup(React.createElement(GraphContentView, {
+      content: { identity: "向桐镇二", knowledge: "保留原人生记忆" },
+    }))
+    expect(html).toContain("身份")
+    expect(html).toContain("向桐镇二")
+    expect(html).toContain("知识")
+    expect(html).toContain("保留原人生记忆")
+    expect(html).not.toContain("\"identity\"")
   })
 
   it("merges confirmed graph windows without duplicating nodes or links", () => {

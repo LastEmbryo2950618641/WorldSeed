@@ -36,6 +36,11 @@ const defaults = {
   referencesReadme: "# 参考文件索引\n",
   descriptionRules: "# 默认描写规则\n\n自动选择描写方式。\n",
   proseStyleRules: "# 默认笔风规则\n\n保持作品语言连续。\n",
+  stagingReadme: "# 暂存区\n",
+  stagingNotes: "# 本章讨论笔记\n\n（尚无条目）\n",
+  stagingCharacters: "# 人物草稿\n\n（尚无条目）\n",
+  stagingWorld: "# 世界与规则草稿\n\n（尚无条目）\n",
+  stagingPromoteIndex: "# 待落盘清单\n\n（尚无条目）\n",
 }
 
 function temporaryDirectory(): string {
@@ -59,11 +64,16 @@ describe("Node workspace adapter", () => {
 
     expect(report.issues).toEqual([])
     expect(report.inventory.filter((entry) => !entry.path.includes("/") && entry.kind === "directory"))
-      .toHaveLength(5)
+      .toHaveLength(6)
     expect(await adapter.readMarkdown(workspaceRoot, "世界推演规则/基础规则/base-rules.md"))
       .toBe(defaults.baseRules)
     expect(await adapter.readMarkdown(workspaceRoot, "设定集/readme.md")).toBe(defaults.settingsReadme)
     expect(await adapter.readMarkdown(workspaceRoot, "参考文件/readme.md")).toBe(defaults.referencesReadme)
+    expect(await adapter.readMarkdown(workspaceRoot, "暂存区/readme.md")).toBe(defaults.stagingReadme)
+    expect(await adapter.readMarkdown(workspaceRoot, "暂存区/本章讨论笔记.md")).toBe(defaults.stagingNotes)
+    expect(await adapter.readMarkdown(workspaceRoot, "暂存区/人物草稿.md")).toBe(defaults.stagingCharacters)
+    expect(await adapter.readMarkdown(workspaceRoot, "暂存区/世界与规则草稿.md")).toBe(defaults.stagingWorld)
+    expect(await adapter.readMarkdown(workspaceRoot, "暂存区/待落盘清单.md")).toBe(defaults.stagingPromoteIndex)
 
     await adapter.saveUserMarkdown(workspaceRoot, "设定集/readme.md", "# 已编辑的设定索引\n")
     expect(await adapter.readMarkdown(workspaceRoot, "设定集/readme.md")).toContain("已编辑")
@@ -293,7 +303,7 @@ describe("project lifecycle", () => {
     const internalStore = new NodeInternalStoreAdapter(appDataRoot)
     const store = await internalStore.prepareProject(projectId, workspaceRoot)
     const database = await openProjectDatabase(store.projectDatabaseRef)
-    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(33)
+    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(36)
     await database.destroy()
   })
 })

@@ -43,6 +43,7 @@ export type DeepSeekCompletionInput = Readonly<{
   signal?: AbortSignal
   thinking?: { type: "enabled" | "disabled" }
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+  onPartial?: (partial: Readonly<{ reasoningDelta?: string; contentDelta?: string }>) => void
 }>
 
 export type DeepSeekMessage = Readonly<{
@@ -207,13 +208,15 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
           : Math.max(1, request.remainingBudget.modelRequestDeadlineAtMs - Date.now()),
         Math.max(1, request.remainingBudget.deadlineAtMs - Date.now()),
       )
+      const thinkingEnabled = options?.forceThinking === true || this.config.thinkingModeEnabled
       const completionInput: DeepSeekCompletionInput = {
         model: this.config.model,
         messages,
         ...(this.config.jsonModeEnabled ? { responseFormat: { type: "json_object" as const } } : {}),
         signal: mergeExecutionSignals(options?.signal, AbortSignal.timeout(timeoutMs)),
-        thinking: { type: this.config.thinkingModeEnabled ? "enabled" : "disabled" },
-        ...(this.config.thinkingModeEnabled ? { reasoningEffort: this.config.reasoningEffort } : {}),
+        thinking: { type: thinkingEnabled ? "enabled" : "disabled" },
+        ...(thinkingEnabled ? { reasoningEffort: this.config.reasoningEffort } : {}),
+        ...(options?.onPartial === undefined ? {} : { onPartial: options.onPartial }),
       }
       runtimeLog("debug", "deepseek-model", "completion.requested", {
         taskId: request.taskId,
@@ -223,9 +226,10 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
         messageCount: messages.length,
         messageCharacters: messages.reduce((total, message) => total + message.content.length, 0),
         timeoutMs,
-        thinkingEnabled: this.config.thinkingModeEnabled,
-        reasoningEffort: this.config.thinkingModeEnabled ? this.config.reasoningEffort : undefined,
+        thinkingEnabled,
+        reasoningEffort: thinkingEnabled ? this.config.reasoningEffort : undefined,
         jsonModeEnabled: this.config.jsonModeEnabled,
+        streaming: options?.onPartial !== undefined,
         maxTokens: completionInput.maxTokens,
       })
       const response = await this.completeWithRetry(client, completionInput)
@@ -429,13 +433,58 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
             ...(usage === undefined ? {} : { usage }),
           }
         }
+        // Node OpenAI SDK has no Python-style extra_body; DeepSeek expects `thinking` at the top level.
         const requestBody = {
           model: input.model,
           messages: [...input.messages],
           ...(input.responseFormat === undefined ? {} : { response_format: input.responseFormat }),
           ...(input.maxTokens === undefined ? {} : { max_tokens: input.maxTokens }),
-          ...(input.thinking === undefined ? {} : { extra_body: { thinking: input.thinking } }),
+          ...(input.thinking === undefined ? {} : { thinking: input.thinking }),
           ...(input.reasoningEffort === undefined ? {} : { reasoning_effort: input.reasoningEffort }),
+        }
+        if (input.onPartial !== undefined) {
+          const stream = await client.chat.completions.create(
+            {
+              ...requestBody,
+              stream: true,
+              stream_options: { include_usage: true },
+            } as Parameters<typeof client.chat.completions.create>[0],
+            input.signal === undefined ? undefined : { signal: input.signal },
+          ) as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>
+          let content = ""
+          let reasoningContent = ""
+          let finishReason: string | null | undefined
+          let responseId: string | undefined
+          let usage: unknown
+          for await (const chunk of stream) {
+            const chunkRecord = asRecord(chunk)
+            if (responseId === undefined) responseId = readString(chunkRecord.id)
+            if (chunkRecord.usage !== undefined) usage = chunkRecord.usage
+            const choice = asRecord(Array.isArray(chunkRecord.choices) ? chunkRecord.choices[0] : undefined)
+            const delta = asRecord(choice?.delta)
+            const reasoningDelta = readString(delta?.reasoning_content)
+            const contentDelta = typeof delta?.content === "string" ? delta.content : undefined
+            if (reasoningDelta !== undefined && reasoningDelta.length > 0) {
+              reasoningContent += reasoningDelta
+              input.onPartial({ reasoningDelta })
+            }
+            if (contentDelta !== undefined && contentDelta.length > 0) {
+              content += contentDelta
+              input.onPartial({ contentDelta })
+            }
+            const chunkFinish = readString(choice?.finish_reason)
+            if (chunkFinish !== undefined) finishReason = chunkFinish
+          }
+          return {
+            content: content.length === 0 ? null : content,
+            finishReason: finishReason ?? null,
+            ...(responseId === undefined ? {} : { responseId }),
+            messageFieldNames: ["content", "reasoning_content"],
+            ...(reasoningContent.length === 0
+              ? {}
+              : { reasoningContent, reasoningKind: "provider_reasoning" as const }),
+            ...(usage === undefined ? {} : { usage }),
+          }
         }
         const response = await client.chat.completions.create(
           requestBody as Parameters<typeof client.chat.completions.create>[0],
@@ -576,6 +625,7 @@ function buildModelResultRules(request: PhaseRequestEnvelope, referenceView: Mod
     `- Read-evidence to graph-owner alias map: ${referenceView.graphReferencePairs.join(", ") || "none"}.`,
     "- Read requests contain semantic query intent only. Omit query fields that are not useful; infrastructure supplies bounded defaults.",
     "- sourceKinds source means the internal committed immutable source-unit projection. It is not a request to read Markdown from the workspace chapter directory, so a workspace chapter-read prohibition does not exclude source projections.",
+    "- sourceKinds web runs sandboxed public-internet search/fetch. Put search phrases in semanticTexts (or non-URL exactKeys) and page URLs in exactKeys. Web evidence is external reference only and must not override committed graph state or invent in-world facts.",
     "- For an exact quotation, title, or other exact persisted wording, provide exactKeys. When the same request searches graph or revision evidence, include source as well; summaries and semanticTexts must not impersonate exact source wording.",
     "- Source evidence may expose relatedOwnerRefs with bounded graph projection summaries: these are the graph owners mechanically linked to that exact immutable source unit by settlement. Use those summaries first when reconstructing the source unit's time, place, state, or causal context; do not replace them with an unrelated graph candidate that merely has similar wording, and do not request every related owner again unless the summary is insufficient.",
     "- input.resurfacedReadIds means your immediately preceding read request matched Evidence already visible in this context chain. The matching readEvidence entries are deliberately repeated in this delta; use them now and finish the current phase instead of requesting the same Evidence again.",
@@ -613,6 +663,17 @@ function collectDeclaredLocalReferences(request: PhaseRequestEnvelope): string[]
 
 function buildCrossPhaseChecklist(request: PhaseRequestEnvelope): string {
   const input = asRecord(request.input)
+  if (request.phase === "synopsis_discuss") {
+    const evidenceCount = Array.isArray(input.readEvidence) ? input.readEvidence.length : 0
+    return [
+      "- synopsis_discuss must either request_read OR return a complete artifact object; never omit artifact when outcome is continue.",
+      '- artifact must include assistantMessage (user-facing) and finalSelfReview; nest chapterTitle/synopsisBody/choices/goalProposals inside artifact when needed.',
+      "- Do not put '我先去读设定' style intentions into assistantMessage; use outcome=request_read instead.",
+      evidenceCount > 0
+        ? `- ${String(evidenceCount)} readEvidence item(s) are already visible. Prefer finishing with outcome=continue and a complete artifact; request_read only for missing files.`
+        : "- No readEvidence yet. If world/settings context is needed, start with outcome=request_read for 设定集/readme.md (sourceKinds reference).",
+    ].join("\n")
+  }
   const artifacts = Object.keys(asRecord(input.validationArtifacts)).length === 0
     ? asRecord(input.artifacts)
     : asRecord(input.validationArtifacts)

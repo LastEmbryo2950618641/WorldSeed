@@ -963,4 +963,53 @@ export const projectMigrations = Object.freeze([
     "CREATE INDEX settings_extraction_proposals_task ON settings_extraction_proposals(task_id, status, created_at_ms ASC)",
     "CREATE INDEX settings_extraction_proposals_pending ON settings_extraction_proposals(project_id, status, created_at_ms DESC)",
   ]),
+  defineSqlMigration<ProjectDatabase>(34, "034_evidence_web_source_kind", [
+    "DROP INDEX evidence_objects_context",
+    "DROP INDEX evidence_objects_source_version",
+    "ALTER TABLE evidence_objects RENAME TO evidence_objects_v33",
+    `CREATE TABLE evidence_objects (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      context_id TEXT,
+      source_kind TEXT NOT NULL CHECK (source_kind IN ('workspace', 'graph', 'revision', 'chapter', 'web')),
+      owner_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      locator TEXT NOT NULL,
+      content_ref TEXT NOT NULL,
+      read_reason TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+    `INSERT INTO evidence_objects(
+      id, project_id, context_id, source_kind, owner_id, version, digest, locator, content_ref, read_reason, created_at
+    ) SELECT
+      id, project_id, context_id, source_kind, owner_id, version, digest, locator, content_ref, read_reason, created_at
+    FROM evidence_objects_v33`,
+    "DROP TABLE evidence_objects_v33",
+    "CREATE INDEX evidence_objects_context ON evidence_objects(project_id, context_id, created_at)",
+    "CREATE INDEX evidence_objects_source_version ON evidence_objects(project_id, source_kind, owner_id, version)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(35, "035_synopsis_message_reasoning_search", [
+    "ALTER TABLE synopsis_conversation_messages ADD COLUMN reasoning_content TEXT",
+    "ALTER TABLE synopsis_conversation_messages ADD COLUMN searching_json TEXT",
+  ]),
+  defineSqlMigration<ProjectDatabase>(36, "036_synopsis_staging_promote", [
+    `CREATE TABLE synopsis_staging_promote_proposals (
+      proposal_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      session_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
+      settings_writes_json TEXT NOT NULL,
+      goal_proposals_json TEXT,
+      reason TEXT,
+      source_message_id TEXT,
+      created_at_ms INTEGER NOT NULL,
+      resolved_at_ms INTEGER
+    )`,
+    "CREATE INDEX synopsis_staging_promote_pending ON synopsis_staging_promote_proposals(project_id, status, created_at_ms ASC)",
+    "CREATE INDEX synopsis_staging_promote_session ON synopsis_staging_promote_proposals(session_id, status, created_at_ms ASC)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(37, "037_synopsis_message_hidden", [
+    "ALTER TABLE synopsis_conversation_messages ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
+  ]),
 ])

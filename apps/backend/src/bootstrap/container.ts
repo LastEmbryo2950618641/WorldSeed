@@ -10,6 +10,7 @@ import {
   type CreateProjectInput,
 } from "../application/index.js"
 import type { InternalProjectStore, ProjectRepositoryFactory, WorkspaceDefaultDocuments, WorkspacePort } from "../application/workspace/index.js"
+import type { RegisteredProject } from "../application/projects/index.js"
 import { NodeInternalStoreAdapter, NodeWorkspaceAdapter } from "../infrastructure/filesystem/index.js"
 import {
   createModelFromEnvironment,
@@ -102,15 +103,29 @@ export class BackendContainer {
     return opened
   }
 
+  public async listProjects(): Promise<readonly RegisteredProject[]> {
+    return this.lifecycle.listRegistered()
+  }
+
+  public async peekProjectDisplayName(project: RegisteredProject): Promise<string | undefined> {
+    return this.lifecycle.peekDisplayName(project)
+  }
+
   public async getRuntime(projectId: string, workspaceRootRef: string): Promise<ProjectRuntime> {
-    if (this.currentRuntime?.projectId === projectId && this.currentRuntime.workspaceRootRef === resolve(workspaceRootRef)) {
+    const resolvedRoot = resolve(workspaceRootRef)
+    if (
+      this.currentRuntime !== undefined
+      && this.currentRuntime.projectId === projectId
+      && this.currentRuntime.workspaceRootRef === resolvedRoot
+      && !this.currentRuntime.isClosed()
+    ) {
       return this.currentRuntime
     }
     const opened = await this.openProject(workspaceRootRef)
     if (opened.manifest.id !== projectId) {
       throw new Error("The workspace belongs to a different project")
     }
-    if (this.currentRuntime === undefined) {
+    if (this.currentRuntime === undefined || this.currentRuntime.isClosed()) {
       throw new Error("Project runtime failed to open")
     }
     return this.currentRuntime
@@ -134,7 +149,11 @@ export class BackendContainer {
   }
 
   private async openRuntime(store: InternalProjectStore, workspaceRootRef: string, projectId: string): Promise<void> {
-    await this.currentRuntime?.close()
+    const previous = this.currentRuntime
+    this.currentRuntime = undefined
+    if (previous !== undefined && !previous.isClosed()) {
+      await previous.close()
+    }
     this.currentRuntime = await ProjectRuntime.open(
       projectId,
       resolve(workspaceRootRef),
@@ -163,6 +182,20 @@ export class BackendContainer {
       referencesReadme: "# 参考文件索引\n\n请在这里说明参考资料的内容、路径与使用条件，供 AI 按需选择读取。\n",
       descriptionRules: "# 默认描写规则\n\n由用户在表现输出目录中继续定义。\n",
       proseStyleRules: "# 默认笔风规则\n\n由用户在表现输出目录中继续定义。\n",
+      stagingReadme: [
+        "# 暂存区",
+        "",
+        "创作台讨论中的**中间态**草稿。权威设定仍以 `设定集/` 为准。",
+        "",
+        "- 每轮讨论后 Agent 自动更新本目录固定文件",
+        "- 用户确认「落盘」后写入设定集；对应条目标记 `settled`，仍可检索",
+        "- 超字数上限时优先清理最旧的已落盘条目",
+        "",
+      ].join("\n"),
+      stagingNotes: "# 本章讨论笔记\n\n（尚无条目）\n",
+      stagingCharacters: "# 人物草稿\n\n（尚无条目）\n",
+      stagingWorld: "# 世界与规则草稿\n\n（尚无条目）\n",
+      stagingPromoteIndex: "# 待落盘清单\n\n（尚无条目）\n",
     }
   }
 }

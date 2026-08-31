@@ -35,6 +35,22 @@ export const projectCreatePayloadSchema = z.object({
 })
 export type ProjectCreatePayload = z.infer<typeof projectCreatePayloadSchema>
 
+export const projectListPayloadSchema = z.object({}).default({})
+export type ProjectListPayload = z.infer<typeof projectListPayloadSchema>
+
+export const projectListItemSchema = z.object({
+  projectId: idSchema,
+  displayName: z.string().min(1),
+  workspaceRootRef: z.string().min(1),
+  lastOpenedAtMs: z.number().int().nonnegative(),
+})
+export type ProjectListItem = z.infer<typeof projectListItemSchema>
+
+export const projectListResultSchema = z.object({
+  projects: z.array(projectListItemSchema),
+})
+export type ProjectListResult = z.infer<typeof projectListResultSchema>
+
 export const projectWorkspacePayloadSchema = z.object({
   workspaceRootRef: z.string().min(1),
 })
@@ -43,6 +59,10 @@ export type ProjectWorkspacePayload = z.infer<typeof projectWorkspacePayloadSche
 export const projectSettingsReadPayloadSchema = projectWorkspacePayloadSchema.extend({
   projectId: idSchema,
 })
+export const projectRenamePayloadSchema = projectSettingsReadPayloadSchema.extend({
+  displayName: z.string().trim().min(1).max(200),
+})
+export type ProjectRenamePayload = z.infer<typeof projectRenamePayloadSchema>
 export const projectSettingsSavePayloadSchema = projectSettingsReadPayloadSchema.extend({
   settings: projectSettingsSchema,
 })
@@ -50,6 +70,13 @@ export type ProjectSettingsReadPayload = z.infer<typeof projectSettingsReadPaylo
 export type ProjectSettingsSavePayload = z.infer<typeof projectSettingsSavePayloadSchema>
 export const turnRecoverableTasksPayloadSchema = projectSettingsReadPayloadSchema
 export type TurnRecoverableTasksPayload = z.infer<typeof turnRecoverableTasksPayloadSchema>
+
+/** Creation-desk narrative intent (orthogonal to project worldDivergenceMode). */
+export const chapterNarrativeIntentSchema = z.object({
+  boundaryPace: z.enum(["advance_allowed", "hold_without_resolution"]).default("advance_allowed"),
+  causalityFocus: z.enum(["auto", "buildup", "action", "payoff"]).default("auto"),
+})
+export type ChapterNarrativeIntent = z.infer<typeof chapterNarrativeIntentSchema>
 
 export const turnStartPayloadSchema = z.object({
   projectId: idSchema,
@@ -65,6 +92,7 @@ export const turnStartPayloadSchema = z.object({
     (value) => value.minimumWordCount <= value.maximumWordCount,
     { message: "Minimum word count must not exceed maximum word count" },
   ).optional(),
+  chapterIntent: chapterNarrativeIntentSchema.optional(),
   model: modelSelectionSchema.optional(),
   maxModelCalls: z.number().int().positive().optional(),
   allowWorkspaceChapterReads: z.boolean().default(true),
@@ -221,10 +249,23 @@ export const synopsisConversationStartPayloadSchema = projectSettingsReadPayload
 export const synopsisConversationListPayloadSchema = projectSettingsReadPayloadSchema
 export const synopsisConversationSendPayloadSchema = projectSettingsReadPayloadSchema.extend({
   message: z.string().trim().min(1).max(8_000),
+  chapterIntent: chapterNarrativeIntentSchema.optional(),
   model: modelSelectionSchema.optional(),
   maxModelCalls: z.number().int().positive().optional(),
   deadlineMs: z.number().int().positive().optional(),
 })
+export const synopsisConversationRefreshChoicesPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  messageId: idSchema.optional(),
+  chapterIntent: chapterNarrativeIntentSchema.optional(),
+  model: modelSelectionSchema.optional(),
+  maxModelCalls: z.number().int().positive().optional(),
+  deadlineMs: z.number().int().positive().optional(),
+})
+export type SynopsisConversationRefreshChoicesPayload = z.infer<typeof synopsisConversationRefreshChoicesPayloadSchema>
+export const synopsisConversationStreamPeekPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  sessionId: idSchema.optional(),
+})
+export type SynopsisConversationStreamPeekPayload = z.infer<typeof synopsisConversationStreamPeekPayloadSchema>
 export const synopsisResolveTurnInputPayloadSchema = projectSettingsReadPayloadSchema.extend({
   sessionId: idSchema.optional(),
 })
@@ -233,6 +274,7 @@ export const synopsisBeginTurnPayloadSchema = projectSettingsReadPayloadSchema.e
   acknowledgeWarnings: z.boolean().default(false),
   forceOverride: z.boolean().default(false),
   presentation: turnStartPayloadSchema.shape.presentation,
+  chapterIntent: chapterNarrativeIntentSchema.optional(),
   model: modelSelectionSchema.optional(),
   maxModelCalls: z.number().int().positive().optional(),
   allowWorkspaceChapterReads: z.boolean().default(true),
@@ -326,6 +368,19 @@ export type SettingsExtractionListPayload = z.infer<typeof settingsExtractionLis
 export type SettingsExtractionProposalApprovePayload = z.infer<typeof settingsExtractionProposalApprovePayloadSchema>
 export type SettingsExtractionProposalRejectPayload = z.infer<typeof settingsExtractionProposalRejectPayloadSchema>
 
+export const synopsisStagingPromoteListPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  sessionId: idSchema.optional(),
+})
+export const synopsisStagingPromoteApprovePayloadSchema = projectSettingsReadPayloadSchema.extend({
+  proposalIds: z.array(idSchema).min(1).max(50),
+})
+export const synopsisStagingPromoteRejectPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  proposalIds: z.array(idSchema).min(1).max(50),
+})
+export type SynopsisStagingPromoteListPayload = z.infer<typeof synopsisStagingPromoteListPayloadSchema>
+export type SynopsisStagingPromoteApprovePayload = z.infer<typeof synopsisStagingPromoteApprovePayloadSchema>
+export type SynopsisStagingPromoteRejectPayload = z.infer<typeof synopsisStagingPromoteRejectPayloadSchema>
+
 export const modelListPayloadSchema = z.object({
   baseUrl: z.url(),
   apiKey: z.string().trim().min(1).max(4096),
@@ -415,6 +470,8 @@ export type GraphNeighborhoodPayload = z.infer<typeof graphNeighborhoodPayloadSc
 export const backendPayloadSchemas = {
   "project.create": projectCreatePayloadSchema,
   "project.open": projectWorkspacePayloadSchema,
+  "project.list": projectListPayloadSchema,
+  "project.rename": projectRenamePayloadSchema,
   "project.validate": projectWorkspacePayloadSchema,
   "project.settings.read": projectSettingsReadPayloadSchema,
   "project.settings.save": projectSettingsSavePayloadSchema,
@@ -438,8 +495,13 @@ export const backendPayloadSchemas = {
   "synopsis.conversation.start": synopsisConversationStartPayloadSchema,
   "synopsis.conversation.list": synopsisConversationListPayloadSchema,
   "synopsis.conversation.send": synopsisConversationSendPayloadSchema,
+  "synopsis.conversation.refreshChoices": synopsisConversationRefreshChoicesPayloadSchema,
+  "synopsis.conversation.streamPeek": synopsisConversationStreamPeekPayloadSchema,
   "synopsis.conversation.resolveTurnInput": synopsisResolveTurnInputPayloadSchema,
   "synopsis.conversation.beginTurn": synopsisBeginTurnPayloadSchema,
+  "synopsis.staging.promote.list": synopsisStagingPromoteListPayloadSchema,
+  "synopsis.staging.promote.approve": synopsisStagingPromoteApprovePayloadSchema,
+  "synopsis.staging.promote.reject": synopsisStagingPromoteRejectPayloadSchema,
   "chapter.synopsis.get": chapterSynopsisGetPayloadSchema,
   "deduction.goals.list": deductionGoalsListPayloadSchema,
   "deduction.goals.create": deductionGoalsCreatePayloadSchema,

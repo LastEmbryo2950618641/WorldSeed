@@ -53,6 +53,15 @@ export class SqliteProjectRegistryRepository implements ProjectRegistryRepositor
       throw new Error(`Registered project does not exist: ${projectId}`)
     }
   }
+
+  public async listOrderedByLastOpened(limit = 100): Promise<readonly RegisteredProject[]> {
+    const rows = await this.database.selectFrom("registered_projects")
+      .selectAll()
+      .orderBy("last_opened_at", "desc")
+      .limit(limit)
+      .execute()
+    return rows.map(mapRegisteredProject)
+  }
 }
 
 function mapRegisteredProject(row: RegistryDatabase["registered_projects"]): RegisteredProject {
@@ -139,6 +148,16 @@ export class SqliteProjectRepository implements ProjectRepository {
       fixedEntries: decodeJson(row.fixed_entries_json) as ProjectManifest["fixedEntries"],
       internalStoreRef: this.internalStoreRef,
       manifestDigest: row.digest,
+    }
+  }
+
+  public async updateName(projectId: ProjectId, name: string, updatedAtMs: number): Promise<void> {
+    const result = await this.database.updateTable("projects")
+      .set({ name, updated_at: updatedAtMs })
+      .where("id", "=", projectId)
+      .executeTakeFirst()
+    if (result.numUpdatedRows !== 1n) {
+      throw new Error(`Project does not exist: ${projectId}`)
     }
   }
 

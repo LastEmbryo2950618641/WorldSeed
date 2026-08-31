@@ -287,7 +287,10 @@ export type SynopsisConversationMessageRow = {
   session_id: string
   role: "user" | "assistant" | "system"
   content_text: string
+  reasoning_content: string | null
+  searching_json: string | null
   choices_json: string | null
+  hidden: number
   created_at_ms: Timestamp
 }
 
@@ -352,6 +355,19 @@ export type SettingsExtractionProposalRow = {
   phase_run_id: string | null
   reason: string | null
   conflict_notes: string | null
+  created_at_ms: Timestamp
+  resolved_at_ms: Timestamp | null
+}
+
+export type SynopsisStagingPromoteProposalRow = {
+  proposal_id: string
+  project_id: string
+  session_id: string
+  status: "pending" | "approved" | "rejected"
+  settings_writes_json: string
+  goal_proposals_json: string | null
+  reason: string | null
+  source_message_id: string | null
   created_at_ms: Timestamp
   resolved_at_ms: Timestamp | null
 }
@@ -787,7 +803,7 @@ export type EvidenceObjectRow = {
   id: string
   project_id: string
   context_id: string | null
-  source_kind: "workspace" | "graph" | "revision" | "chapter"
+  source_kind: "workspace" | "graph" | "revision" | "chapter" | "web"
   owner_id: string
   version: string
   digest: string
@@ -821,6 +837,7 @@ export type ProjectDatabase = {
   deduction_goal_progress: DeductionGoalProgressRow
   deduction_goal_proposals: DeductionGoalProposalRow
   settings_extraction_proposals: SettingsExtractionProposalRow
+  synopsis_staging_promote_proposals: SynopsisStagingPromoteProposalRow
   model_context_chains: ModelContextChainRow
   model_context_messages: ModelContextMessageRow
   active_scope_refs: ActiveScopeRefRow

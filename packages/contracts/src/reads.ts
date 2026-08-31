@@ -28,9 +28,28 @@ export const readRequestSchema = z.object({
     directions: z.array(z.enum(["out", "in", "both"])),
     maxCandidates: z.number().int().positive(),
     maxDepth: z.number().int().nonnegative(),
-    sourceKinds: z.array(z.enum(["graph", "revision", "source", "rule", "reference"])),
+    sourceKinds: z.array(z.enum(["graph", "revision", "source", "rule", "reference", "web"])),
     sourceIds: z.array(sourceObjectIdSchema).optional(),
     sourceBoundary: z.enum(["start", "end"]).optional(),
+    /**
+     * Workspace load strategy for synopsis/workspace reads.
+     * - read_full (default): load matched Markdown files (optionally a line range)
+     * - list: return directory/file listing with sizes from the catalog
+     * - grep: keyword search with surrounding context lines
+     */
+    readMode: z.enum(["read_full", "list", "grep"]).optional(),
+    grepContextLines: z.number().int().min(0).max(20).optional(),
+    grepMaxMatchesPerFile: z.number().int().positive().max(80).optional(),
+    lineStart: z.number().int().positive().optional(),
+    lineEnd: z.number().int().positive().optional(),
+  }).superRefine((query, context) => {
+    if (query.lineStart !== undefined && query.lineEnd !== undefined && query.lineEnd < query.lineStart) {
+      context.addIssue({
+        code: "custom",
+        message: "lineEnd must be >= lineStart",
+        path: ["lineEnd"],
+      })
+    }
   }),
   verificationProbe: verificationProbeDescriptorSchema.optional(),
 })

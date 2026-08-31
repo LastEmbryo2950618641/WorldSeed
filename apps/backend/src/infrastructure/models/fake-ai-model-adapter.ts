@@ -35,24 +35,31 @@ export class FakeAiModelAdapter implements AIModelPort {
     if (options?.signal?.aborted) return Promise.reject(executionCancellationReason(options.signal))
     const startedAt = Date.now()
     const input = request.input as TurnPhaseInput
-    const artifact = this.createArtifact(request.phase, input)
-    const requestedReads = (request.phase === "semantic_review" || request.phase === "graph_governance_review")
-      && (input.verificationProbeExecutions?.length ?? 0) === 0
-      ? this.createVerificationProbeReads(input)
+    const synopsisReads = request.phase === "synopsis_discuss"
+      ? this.createSynopsisBootstrapReads(input)
       : []
+    const requestedReads = synopsisReads.length > 0
+      ? synopsisReads
+      : (request.phase === "semantic_review" || request.phase === "graph_governance_review")
+        && (input.verificationProbeExecutions?.length ?? 0) === 0
+        ? this.createVerificationProbeReads(input)
+        : []
+    const artifact = requestedReads.length > 0 ? undefined : this.createArtifact(request.phase, input)
     const result: PhaseResultEnvelope = {
       schemaVersion: 1,
       envelopeId: request.envelopeId,
       contextId: request.contextId,
       phase: request.phase,
       outcome: requestedReads.length > 0 ? "request_read" : request.phase === "commit_review" ? "approve" : "continue",
-      artifact,
+      ...(artifact === undefined ? {} : { artifact }),
       requestedReads,
       citedReadIds: [...request.committedReadIds],
       producedArtifactIds: [],
       decisionRecordIds: [],
       unresolvedDependencies: [],
-      reason: `Fake AI completed ${request.phase} using only the supplied turn state`,
+      reason: requestedReads.length > 0
+        ? `Fake AI requested reads for ${request.phase}`
+        : `Fake AI completed ${request.phase} using only the supplied turn state`,
       selfReview: "The result contains no hidden reasoning and cites no unreturned reads",
     }
     const inputTokens = estimateTokens(request)
@@ -452,6 +459,28 @@ export class FakeAiModelAdapter implements AIModelPort {
     }))
   }
 
+  private createSynopsisBootstrapReads(input: TurnPhaseInput): PhaseResultEnvelope["requestedReads"] {
+    const hasSettingsCatalog = (input.workspaceCatalog?.entries ?? [])
+      .some((entry) => entry.entryKind === "file" && entry.role === "settings")
+    if (!hasSettingsCatalog) return []
+    const alreadyReadSettings = input.readEvidence.some((item) => item.ownerKind === "workspace:settings")
+    if (alreadyReadSettings) return []
+    return [{
+      requestId: this.createId(),
+      reason: "Read the settings index before drafting the chapter synopsis",
+      expectedEvidence: "设定集索引与目录说明",
+      query: {
+        exactKeys: ["设定集/readme.md"],
+        semanticTexts: ["设定集索引"],
+        anchorIds: [],
+        directions: ["both"],
+        maxCandidates: 4,
+        maxDepth: 1,
+        sourceKinds: ["reference"],
+      },
+    }]
+  }
+
   private createGraphGovernanceArtifact(input: TurnPhaseInput): GraphGovernanceArtifact {
     if (input.sourceId === undefined) throw new Error("Graph governance requires a persisted source")
     const isRevision = input.workflow === "revision"
@@ -600,18 +629,58 @@ export class FakeAiModelAdapter implements AIModelPort {
     assistantMessage: string
     chapterTitle?: string
     synopsisBody?: string
-    choices?: Array<{ label: string; action: "start_turn" | "continue_discuss" }>
+    choices?: Array<{ label: string; action: "start_turn" | "continue_discuss" | "promote_staging" | "confirm_arc_plan" }>
     goalProposals?: Array<{ payload: { kind: string; [key: string]: unknown }; reason?: string }>
+    stagingDelta?: {
+      notes?: Array<{
+        entryId?: string
+        title: string
+        body: string
+        promoteTargetPath?: string
+        status?: "open" | "pending_promote" | "settled"
+      }>
+      promoteHints?: Array<{
+        entryId?: string
+        title: string
+        body: string
+        promoteTargetPath?: string
+        status?: "open" | "pending_promote" | "settled"
+      }>
+    }
+    stagingPromote?: {
+      settingsWrites: Array<{
+        entryId: string
+        relativePath: string
+        markdown: string
+        readmeEntry?: string
+        mode: "create" | "update"
+      }>
+      goalProposals?: Array<{ payload: { kind: string; [key: string]: unknown }; reason?: string }>
+      reason?: string
+    }
+    arcPlan?: {
+      markdown: string
+      estimatedChapterCount?: number
+      estimatedWordRange?: string
+    }
     finalSelfReview: string
   } {
     const discuss = input.synopsisDiscuss
     const userMessage = input.userInput.trim()
+    const wantsRefreshChoices = /换一批决策选项|静默刷新/u.test(userMessage)
+    const wantsPromote = !wantsRefreshChoices && /确认落盘|落盘到设定集/u.test(userMessage)
+    const wantsArcPlan = !wantsRefreshChoices && /先落大纲|弧线规划|分几章|多章/u.test(userMessage)
+    const isHandoff = discuss?.discussTrigger === "turn_handoff"
     const chapterSequence = discuss?.chapterSequence ?? 1
     const chapterLabel = formatChapterSequenceLabel(chapterSequence)
     const heading = discuss?.heading ?? chapterLabel
     const chapterTitle = heading.replace(/^第(?:\d+|[零一二三四五六七八九十百]+)章(?:\s+)?/u, "").trim() || "世界种子"
     const existing = discuss?.synopsisMarkdown.trim() ?? ""
     const synopsisHeading = `${chapterLabel} ${chapterTitle}`
+    const settingsIndexEvidence = input.readEvidence.find((item) => (
+      item.ownerKind === "workspace:settings"
+      && item.ownerId.toLocaleLowerCase().includes("readme")
+    ))
     const synopsisBody = existing.length > 0
       ? `${existing.trim()}\n\n- ${userMessage.slice(0, 120)}${userMessage.length > 120 ? "…" : ""}`
       : `# ${synopsisHeading} 剧情梗概\n\n${userMessage}\n\n（Agent 已根据讨论整理梗概要点。）`
@@ -633,17 +702,104 @@ export class FakeAiModelAdapter implements AIModelPort {
           },
           reason: "根据讨论建议本章 planned 进展",
         }))
+    const stagingEntryId = "staging-note-1"
     return {
-      assistantMessage: discuss?.userEditedSinceAgent === true
-        ? "我看到你手工调整过梗概，本轮我只在对话里回应，没有覆盖文件。若需要我重写梗概，请明确说明。"
-        : `我已更新「${synopsisHeading}」的剧情梗概。你可以继续修改，或在满意后点击「开始推演」。`,
-      ...(discuss?.userEditedSinceAgent === true ? {} : { chapterTitle, synopsisBody }),
-      choices: [
-        { label: "按当前梗概开始正式推演", action: "start_turn" },
-        { label: "再修改梗概", action: "continue_discuss" },
-      ],
-      goalProposals,
-      finalSelfReview: "Discussed synopsis without auto-starting a turn; emitted goal proposals for user approval.",
+      assistantMessage: isHandoff
+        ? "已收到推演交接。我已对照正文摘要更新弧大纲与下一章建议，不会自动开始正式推演。"
+        : wantsPromote
+        ? "我已整理待落盘设定草案。请点击「确认落盘到设定集与目标」完成写入；推演目标仍会以提案形式等待你二次采纳。"
+        : wantsArcPlan
+          ? "这段更适合先落弧大纲。我已写入弧线规划，并给出本章目的；完整梗概仍按当前下一章处理。"
+        : discuss?.userEditedSinceAgent === true
+          ? "我看到你手工调整过梗概，本轮我只在对话里回应，没有覆盖文件。若需要我重写梗概，请明确说明。"
+          : settingsIndexEvidence === undefined
+            ? `我已更新「${synopsisHeading}」的剧情梗概。你可以继续修改，或在满意后点击「开始推演」。`
+            : `我已对照设定集索引整理「${synopsisHeading}」的剧情梗概。你可以继续修改，或在满意后点击「开始推演」。`,
+      ...(discuss?.userEditedSinceAgent === true || wantsPromote || isHandoff ? {} : { chapterTitle, synopsisBody }),
+      choices: wantsPromote
+        ? [
+            { label: "确认落盘到设定集与目标", action: "promote_staging" as const },
+            { label: "再修改梗概", action: "continue_discuss" as const },
+          ]
+        : wantsArcPlan
+          ? [
+              { label: "已确认弧大纲", action: "confirm_arc_plan" as const },
+              { label: "继续改本章梗概", action: "continue_discuss" as const },
+            ]
+        : isHandoff
+          ? [{ label: "继续讨论下一章", action: "continue_discuss" as const }]
+          : wantsRefreshChoices
+            ? [
+              { label: "权谋暗斗：卷入站台派系冲突", action: "continue_discuss" as const },
+              { label: "命运偶遇：陌生人递来一把钥匙", action: "continue_discuss" as const },
+              { label: "先落一个三章大纲再定基调", action: "confirm_arc_plan" as const },
+            ]
+          : [
+            { label: "按当前梗概开始正式推演", action: "start_turn" as const },
+            { label: "再修改梗概", action: "continue_discuss" as const },
+            { label: "确认落盘到设定集与目标", action: "promote_staging" as const },
+          ],
+      ...(wantsPromote || isHandoff ? {} : { goalProposals }),
+      ...(wantsArcPlan || isHandoff
+        ? {
+            arcPlan: {
+              markdown: [
+                "# 弧线规划",
+                "",
+                "## 目标",
+                userMessage.slice(0, 200),
+                "",
+                "## 建议章数",
+                "约 2–3 章",
+                "",
+                "## 章目的",
+                `- 第${String(chapterSequence)}章：开篇蓄势`,
+                `- 第${String(chapterSequence + 1)}章：行动推进`,
+                `- 第${String(chapterSequence + 2)}章：阶段性落点`,
+              ].join("\n"),
+              estimatedChapterCount: 3,
+              estimatedWordRange: "6000-9000",
+            },
+          }
+        : {}),
+      stagingDelta: {
+        notes: [{
+          title: isHandoff ? "推演交接笔记" : "讨论要点",
+          body: userMessage.slice(0, 200),
+          entryId: stagingEntryId,
+        }],
+        ...(wantsPromote
+          ? {
+              promoteHints: [{
+                entryId: stagingEntryId,
+                title: "讨论要点",
+                body: userMessage.slice(0, 200),
+                promoteTargetPath: "设定集/讨论沉淀.md",
+                status: "pending_promote" as const,
+              }],
+            }
+          : {}),
+      },
+      ...(wantsPromote
+        ? {
+            stagingPromote: {
+              settingsWrites: [{
+                entryId: stagingEntryId,
+                relativePath: "设定集/讨论沉淀.md",
+                markdown: `# 讨论沉淀\n\n${userMessage.slice(0, 400)}\n`,
+                readmeEntry: "讨论沉淀",
+                mode: "create" as const,
+              }],
+              reason: "将讨论确认点写入设定集",
+              goalProposals,
+            },
+          }
+        : {}),
+      finalSelfReview: wantsPromote
+        ? "Prepared staging promote proposal for user confirmation; did not write settings yet."
+        : isHandoff
+          ? "Completed turn handoff analysis without beginTurn."
+        : "Discussed synopsis without auto-starting a turn; emitted goal proposals for user approval.",
     }
   }
 }

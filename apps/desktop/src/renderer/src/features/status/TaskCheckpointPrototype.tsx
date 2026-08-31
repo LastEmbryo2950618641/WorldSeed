@@ -1,18 +1,16 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react"
+import { createPortal } from "react-dom"
 import type { ResettableRuntimeMetricId, RuntimeMetric, SettingsExtractionProposal, SettingsExtractionSnapshot } from "@worldseed/contracts"
 import {
   AlertTriangle,
+  ArrowLeftToLine,
   Check,
   ChevronDown,
-  Clock3,
-  Eye,
-  FileCheck2,
   Gauge,
   Pause,
   Play,
   RefreshCcw,
   RotateCcw,
-  ShieldCheck,
   X,
 } from "lucide-react"
 
@@ -22,17 +20,14 @@ import { UiTooltip, uiTooltipRich } from "../../components/UiTooltip.js"
 
 type ResetMetrics = (metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>
 
-export function RuntimeMonitor({ task, onOpenCheckpoint, onResetMetrics }: {
+export function RuntimeMonitor({ task, onResetMetrics }: {
   task: TaskSnapshot | undefined
-  onOpenCheckpoint: () => void
   onResetMetrics?: ResetMetrics | undefined
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(true)
   const [pendingMetricIds, setPendingMetricIds] = useState<ReadonlySet<string>>(new Set())
   const [resetError, setResetError] = useState<string>()
   const metrics = task?.runtimeMetrics?.metrics ?? []
-  const latestPhase = task?.lastPhase ?? task?.phaseRuns?.at(-1)?.phase
-  const checkpointLabel = latestPhase === undefined ? "本轮尚未开始" : `${latestPhase} / ${task?.status ?? "running"}`
   const warningCount = metrics.filter((metric) => metric.state === "warning" || metric.state === "exhausted").length
   const resettableMetrics = metrics.filter((metric): metric is RuntimeMetric & { metricId: ResettableRuntimeMetricId } => metric.resettable)
   const canReset = task?.status === "paused" || task?.status === "awaiting_user_decision"
@@ -53,24 +48,17 @@ export function RuntimeMonitor({ task, onOpenCheckpoint, onResetMetrics }: {
   return <section className={`runtime-monitor ${expanded ? "expanded" : ""}`}>
     <button className="runtime-monitor-heading" type="button" aria-expanded={expanded} onClick={() => { setExpanded((value) => !value); }}>
       <Gauge size={14} />
-      <span><strong>运行监控</strong><small>后端实时额度窗口</small></span>
+      <span><strong>运行监控</strong></span>
       <em>{metrics.length === 0 ? "等待本轮数据" : warningCount === 0 ? "指标正常" : `${String(warningCount)} 项需关注`}</em>
       <ChevronDown size={14} />
     </button>
     {expanded ? <>
-      <button className="checkpoint-head" type="button" onClick={onOpenCheckpoint} data-testid="checkpoint-open">
-        <ShieldCheck size={15} />
-        <span><small>最近稳定检查点</small><strong>{checkpointLabel}</strong></span>
-        <em>{task === undefined ? "暂无任务" : "实时状态"}</em>
-        <Eye size={14} />
-      </button>
       <div className="runtime-metrics">
-        {metrics.length === 0 ? <p className="phase-empty">等待后端返回运行指标。</p> : null}
         <div className="runtime-ring-grid">
           <RuntimeRing metric={metrics.find((metric) => metric.metricId === "wall_time")} label="执行时间" />
-          <RuntimeRing metric={metrics.find((metric) => metric.metricId === "context_tokens")} label="活动上下文长度" />
-          <RuntimeRing metric={metrics.find((metric) => metric.metricId === "kv_cache_hit_rate")} label="KV 缓存平均命中率" />
-          <RuntimeRing metric={metrics.find((metric) => metric.metricId === "compression_generation")} label="上下文压缩总次数" />
+          <RuntimeRing metric={metrics.find((metric) => metric.metricId === "context_tokens")} label="上下文长度" />
+          <RuntimeRing metric={metrics.find((metric) => metric.metricId === "kv_cache_hit_rate")} label="KV 命中率" />
+          <RuntimeRing metric={metrics.find((metric) => metric.metricId === "compression_generation")} label="压缩次数" />
         </div>
       </div>
       <div className="runtime-monitor-footer">
@@ -110,17 +98,17 @@ function RuntimeRing({ metric, label }: { metric: RuntimeMetric | undefined; lab
   </UiTooltip>
 }
 
-export function TaskCheckpointDialog({ task, project, onClose, onResume, onPause, onResetMetrics, onRefreshTask, onRefreshWorkspace }: {
+export function TaskCheckpointDialog({ task, project, onClose, onResume, onRollbackRound, onRefreshTask, onRefreshWorkspace }: {
   task: TaskSnapshot
   project?: OpenProject | undefined
   onClose: () => void
   onResume: (mode: "continue" | "retry_phase") => Promise<void>
-  onPause: () => Promise<void>
+  onRollbackRound: () => Promise<void>
   onResetMetrics?: ResetMetrics | undefined
   onRefreshTask?: () => Promise<void>
   onRefreshWorkspace?: () => Promise<void>
 }): React.JSX.Element {
-  const [pendingAction, setPendingAction] = useState<"pause" | "retry" | "continue" | "reset">()
+  const [pendingAction, setPendingAction] = useState<"rollback" | "retry" | "continue">()
   const [actionError, setActionError] = useState<string>()
   const isSettingsReview = task.interruption?.kind === "settings_extraction_review" || task.status === "waiting_for_review"
   const blockedMetricIds = isSettingsReview ? [] as const : (task.interruption?.blockedMetrics ?? [])
@@ -131,11 +119,16 @@ export function TaskCheckpointDialog({ task, project, onClose, onResume, onPause
   const latestPhase = finalizationActive
     ? `正式章节收尾 · ${finalizationLabel(task.finalization.status)}`
     : task.interruption?.phase ?? task.lastPhase ?? task.phaseRuns?.at(-1)?.phase ?? "尚未进入模型阶段"
-  const interruptionMessage = task.interruption?.message ?? task.error?.message ?? (isSettingsReview
-    ? "正文已生成，请确认设定抽取提案后再继续图治理。"
-    : "推演执行被暂停，已保存最近稳定检查点。")
-  const completedPhases = new Set(task.phaseRuns?.filter((run) => run.status === "completed").map((run) => run.phase) ?? []).size
-  const modelCalls = task.runtimeMetrics?.metrics.find((metric) => metric.metricId === "model_calls")
+  const interruptionMessage = task.interruption?.message ?? task.error?.message
+  const pauseReason = resolveCheckpointPauseReason({
+    isSettingsReview,
+    blockedMetricCount: blockedMetricIds.length,
+    interruptionKind: task.interruption?.kind,
+    interruptionMessage,
+  })
+  const resetHint = unresolvedMetrics.length === 0
+    ? undefined
+    : `请先在运行监控中重置 ${String(unresolvedMetrics.length)} 项限制后再继续。`
   const taskId = task.handle?.taskId
   const [settingsSnapshot, setSettingsSnapshot] = useState<SettingsExtractionSnapshot>()
   const [settingsBusy, setSettingsBusy] = useState(false)
@@ -178,7 +171,6 @@ export function TaskCheckpointDialog({ task, project, onClose, onResume, onPause
       })
       setSettingsSnapshot(snapshot)
       await onRefreshTask?.()
-      // Approve writes files under 设定集/; reject does not. Refresh tree so new paths appear immediately.
       if (action === "approve") await onRefreshWorkspace?.()
     } catch (cause) {
       setSettingsError(cause instanceof Error ? cause.message : String(cause))
@@ -199,11 +191,11 @@ export function TaskCheckpointDialog({ task, project, onClose, onResume, onPause
     }
   }
 
-  const keepPaused = async (): Promise<void> => {
-    setPendingAction("pause")
+  const runRollback = async (): Promise<void> => {
+    setPendingAction("rollback")
     setActionError(undefined)
     try {
-      await onPause()
+      await onRollbackRound()
       onClose()
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : String(cause))
@@ -211,35 +203,23 @@ export function TaskCheckpointDialog({ task, project, onClose, onResume, onPause
     }
   }
 
-  const reset = async (metricIds: readonly ResettableRuntimeMetricId[]): Promise<void> => {
-    if (onResetMetrics === undefined || metricIds.length === 0) return
-    setPendingAction("reset")
-    setActionError(undefined)
-    try {
-      await onResetMetrics(metricIds)
-      setPendingAction(undefined)
-    } catch (cause) {
-      setActionError(cause instanceof Error ? cause.message : String(cause))
-      setPendingAction(undefined)
-    }
-  }
-
-  return <div className="dialog-backdrop checkpoint-backdrop" role="presentation" onMouseDown={(event) => {
-    if (event.target === event.currentTarget) onClose()
-  }}>
-    <section className="checkpoint-dialog" role="dialog" aria-modal="true" aria-labelledby="checkpoint-dialog-title" data-testid="checkpoint-dialog">
-      <header className="checkpoint-dialog-header">
+  return createPortal(<div className="dialog-backdrop checkpoint-backdrop checkpoint-backdrop--locked" role="presentation">
+    <section className="checkpoint-dialog checkpoint-dialog--compact" role="dialog" aria-modal="true" aria-labelledby="checkpoint-dialog-title" data-testid="checkpoint-dialog">
+      <header className="checkpoint-dialog-header checkpoint-dialog-header--locked">
         <span className="checkpoint-status-icon"><Pause size={17} /></span>
-        <div><strong id="checkpoint-dialog-title">{isSettingsReview ? "设定抽取待确认" : "推演已暂停"}</strong><small>{latestPhase} · 最近稳定检查点</small></div>
+        <div><strong id="checkpoint-dialog-title">{isSettingsReview ? "设定抽取待确认" : "推演已暂停"}</strong><small>{latestPhase}</small></div>
         <span className="checkpoint-state">{isSettingsReview ? "等待确认" : "等待决定"}</span>
-        <UiTooltip label="保持暂停并关闭"><button type="button" aria-label="保持暂停并关闭" onClick={onClose}><X size={16} /></button></UiTooltip>
       </header>
 
       <div className="checkpoint-dialog-body">
         <div className="checkpoint-callout">
           <AlertTriangle size={18} />
-          <div><strong>{isSettingsReview ? "正文已生成，设定提案待确认" : blockedMetricIds.length === 0 ? "本轮执行遇到可恢复错误" : "本轮执行指标已达到上限"}</strong><p>{interruptionMessage} {finalizationActive ? "正文与世界提交进度已经保存，恢复不会重新调用 AI。" : isSettingsReview ? "采纳或拒绝全部提案后，可继续进入图治理与自洽演化。" : "此前阶段、读取结果和待提交作用域均已保存。"}</p></div>
+          <div>
+            <strong>暂停原因</strong>
+            <p className="checkpoint-reason">{pauseReason}</p>
+          </div>
         </div>
+        {resetHint === undefined ? null : <p className="checkpoint-action-hint">{resetHint}</p>}
 
         {isSettingsReview ? <SettingsExtractionReviewPanel
           proposals={pendingSettingsProposals}
@@ -249,62 +229,16 @@ export function TaskCheckpointDialog({ task, project, onClose, onResume, onPause
           onReject={(proposalIds) => resolveSettingsProposals(proposalIds, "reject")}
         /> : null}
 
-        <div className="checkpoint-facts">
-          <span><small>恢复位置</small><strong>{latestPhase}</strong></span>
-          <span><small>已完成阶段</small><strong>{completedPhases} / 17</strong></span>
-          <span><small>模型调用</small><strong>{modelCalls === undefined ? "-" : formatMetric(modelCalls)}</strong></span>
-          <span><small>世界作用域</small><strong>{finalizationActive && task.finalization.status !== "prepared" ? "committed" : "pending"}</strong></span>
-        </div>
-
-        {isSettingsReview ? null : <section className="checkpoint-limit-section">
-          <header>
-            <div><strong>阻塞指标</strong><small>重置创建持久额度窗口，累计成本不会清零</small></div>
-            <em>{allBlockedMetricsReset ? "已解除" : `${String(unresolvedMetrics.length)} 项阻塞`}</em>
-            {unresolvedMetrics.length > 1 ? <button type="button" disabled={pendingAction !== undefined} onClick={() => { void reset(unresolvedMetrics.flatMap((metric) => metric?.resettable === true ? [metric.metricId as ResettableRuntimeMetricId] : [])); }}><RefreshCcw size={12} />全部重置</button> : null}
-          </header>
-          {blockedMetricIds.length === 0 ? <div className="checkpoint-limit-row resolved"><Check size={15} /><span><strong>无需重置额度</strong><small>{finalizationActive ? "可直接继续未完成的收尾步骤" : "可直接继续或重试当前阶段"}</small></span><div className="checkpoint-limit-meter"><i style={{ width: "0%" }} /></div><b>可恢复</b><em>只读</em></div> : blockedMetricIds.map((metricId, index) => {
-            const metric = blockedMetrics[index]
-            const resolved = metric !== undefined && !metric.blocking
-            return <div className={`checkpoint-limit-row ${resolved ? "resolved" : "blocked"}`} key={metricId}>
-              <Clock3 size={15} />
-              <span><strong>{metric?.label ?? metricId}</strong><small>{resolved ? `新窗口第 ${String(metric.resetGeneration)} 代可用` : "当前额度窗口已耗尽"}</small></span>
-              <div className="checkpoint-limit-meter"><i style={{ width: resolved ? "0%" : "100%" }} /></div>
-              <b>{metric === undefined ? "后端指标缺失" : formatMetric(metric)}</b>
-              {metric?.resettable === true ? <button type="button" disabled={resolved || pendingAction !== undefined} onClick={() => { void reset([metric.metricId as ResettableRuntimeMetricId]); }}><RotateCcw size={12} />{resolved ? "已重置" : "重置"}</button> : <em>只读</em>}
-            </div>
-          })}
-        </section>}
-
-        <div className="checkpoint-details-grid">
-          <details open>
-            <summary><FileCheck2 size={14} />已保留内容</summary>
-            <ul>
-              <li><Check size={12} />用户输入、规则快照与选择性读取证据</li>
-              <li><Check size={12} />已完成阶段的 AI 输出和自审结果</li>
-              <li><Check size={12} />{finalizationActive ? "正式正文引用、世界提交状态与章节发布进度" : "当前 pending 图与章节草稿引用"}</li>
-            </ul>
-          </details>
-          <details>
-            <summary><RefreshCcw size={14} />恢复影响</summary>
-            <p>{finalizationActive ? "继续或重试只会执行尚未完成的提交、发布或登记步骤，不会重新调用模型、生成正文或治理世界图。" : "继续执行保留当前阶段已完成结果；重试当前阶段回到阶段入口。此前完成阶段不会重跑，pending 内容不会提前成为世界事实。"}</p>
-          </details>
-          <details>
-            <summary><AlertTriangle size={14} />错误详情</summary>
-            <p>{interruptionMessage}</p>
-          </details>
-        </div>
-
         {actionError === undefined ? null : <div className="checkpoint-decision-result" role="alert"><AlertTriangle size={14} />{actionError}</div>}
       </div>
 
       <footer className="checkpoint-dialog-footer">
-        <button className="checkpoint-pause-command" type="button" disabled={pendingAction !== undefined} onClick={() => { void keepPaused(); }}><Pause size={13} />保持暂停</button>
-        <span>{settingsReadyToContinue && allBlockedMetricsReset ? (isSettingsReview ? "全部设定提案已处理，可继续图治理" : "可以选择恢复方式") : isSettingsReview ? `仍有 ${String(pendingSettingsProposals.length)} 条设定提案待确认` : `请先重置 ${String(unresolvedMetrics.length)} 项限制`}</span>
-        <button type="button" disabled={!settingsReadyToContinue || !allBlockedMetricsReset || pendingAction !== undefined} onClick={() => { void runResume("retry_phase"); }}><RotateCcw size={13} />{finalizationActive ? "重试收尾步骤" : isSettingsReview ? "重试设定抽取" : "重试当前阶段"}</button>
-        <button className="checkpoint-continue-command" type="button" disabled={!settingsReadyToContinue || !allBlockedMetricsReset || pendingAction !== undefined} data-testid="checkpoint-continue" onClick={() => { void runResume("continue"); }}><Play size={13} />{isSettingsReview ? "继续图治理" : "继续执行"}</button>
+        <button className="checkpoint-rollback-command" type="button" disabled={pendingAction !== undefined} data-testid="checkpoint-rollback" onClick={() => { void runRollback(); }}><ArrowLeftToLine size={13} />回退本轮</button>
+        <button type="button" disabled={!settingsReadyToContinue || !allBlockedMetricsReset || pendingAction !== undefined} onClick={() => { void runResume("retry_phase"); }}><RotateCcw size={13} />{finalizationActive ? "重试收尾步骤" : isSettingsReview ? "重试设定抽取" : "重试"}</button>
+        <button className="checkpoint-continue-command" type="button" disabled={!settingsReadyToContinue || !allBlockedMetricsReset || pendingAction !== undefined} data-testid="checkpoint-continue" onClick={() => { void runResume("continue"); }}><Play size={13} />{isSettingsReview ? "继续图治理" : "继续"}</button>
       </footer>
     </section>
-  </div>
+  </div>, document.body)
 }
 
 function SettingsExtractionReviewPanel({ proposals, busy, error, onApprove, onReject }: {
@@ -372,10 +306,40 @@ function finalizationLabel(status: NonNullable<TaskSnapshot["finalization"]>["st
   }
 }
 
-function formatMetric(metric: RuntimeMetric): string {
-  const current = metric.current === null ? "不可用" : formatMetricNumber(metric.current, metric.unit)
-  const limit = metric.limit === null ? "只读" : formatMetricNumber(metric.limit, metric.unit)
-  return `${current} / ${limit}`
+export function resolveCheckpointPauseReason(input: Readonly<{
+  isSettingsReview: boolean
+  blockedMetricCount: number
+  interruptionKind?: string | undefined
+  interruptionMessage?: string | undefined
+}>): string {
+  const rawMessage = input.interruptionMessage?.trim()
+  if (rawMessage !== undefined && rawMessage.length > 0) {
+    return localizeCheckpointPauseReason(rawMessage)
+  }
+  if (input.isSettingsReview) return "正文已生成，设定抽取提案待确认"
+  if (input.blockedMetricCount > 0) return "本轮执行指标已达到上限"
+  if (input.interruptionKind === "execution_error") return "本轮执行遇到可恢复错误"
+  return "推演执行被暂停"
+}
+
+function localizeCheckpointPauseReason(message: string): string {
+  const normalized = message.toLowerCase()
+  if (normalized.includes("driver has already been destroyed") || normalized === "no result") {
+    return "本地数据库连接已关闭，请再点一次回退本轮（系统会自动重连）"
+  }
+  if (normalized.includes("turn deadline exceeded")) {
+    return "本轮执行时间已到上限"
+  }
+  if (normalized.includes("model credential was not resolved") || normalized.includes("api key is not configured")) {
+    return "当前模型 API Key 未配置或未能解析"
+  }
+  if (normalized.includes("explicit budget reset required")) {
+    return "需要先重置已耗尽的运行限制，才能继续"
+  }
+  if (normalized.includes("chapter publish failed")) {
+    return "章节发布失败"
+  }
+  return message
 }
 
 function formatMetricNumber(value: number, unit: RuntimeMetric["unit"]): string {

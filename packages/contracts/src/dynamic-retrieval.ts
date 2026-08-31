@@ -9,6 +9,7 @@ export const workspaceCatalogRoleValues = [
   "references",
   "chapters",
   "presentation",
+  "staging",
 ] as const
 
 export const workspaceCatalogEntrySchema = z.object({
@@ -30,7 +31,7 @@ export const workspaceCatalogSnapshotSchema = z.object({
 })
 export type WorkspaceCatalogSnapshot = z.infer<typeof workspaceCatalogSnapshotSchema>
 
-export const evidenceSourceKindValues = ["workspace", "graph", "revision", "chapter"] as const
+export const evidenceSourceKindValues = ["workspace", "graph", "revision", "chapter", "web"] as const
 
 export const evidenceSchema = z.object({
   evidenceId: evidenceObjectIdSchema,

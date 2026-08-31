@@ -5,8 +5,8 @@ export function installApplicationMenu(window: BrowserWindow): void {
     {
       label: "文件",
       submenu: [
-        { label: "新建项目", accelerator: "CmdOrCtrl+Shift+N", click: () => { window.webContents.send("worldseed:command", "project.new"); } },
-        { label: "打开项目", accelerator: "CmdOrCtrl+O", click: () => { window.webContents.send("worldseed:command", "project.open"); } },
+        { label: "新建书籍", accelerator: "CmdOrCtrl+Shift+N", click: () => { window.webContents.send("worldseed:command", "project.new"); } },
+        { label: "打开书籍", accelerator: "CmdOrCtrl+O", click: () => { window.webContents.send("worldseed:command", "project.open"); } },
         { type: "separator" },
         { role: "quit", label: "退出" },
       ],

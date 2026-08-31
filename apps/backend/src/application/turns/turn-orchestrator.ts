@@ -13,6 +13,7 @@ import {
   type ProjectSettings,
   type TurnContext,
   type TurnDeductionGoalBundle,
+  type ChapterNarrativeIntent,
   type WorkspaceCatalogEntry,
   type WorkspaceCatalogSnapshot,
 } from "@worldseed/contracts"
@@ -83,6 +84,7 @@ import type { InternalProjectStore, InternalStorePort, WorkspacePort } from "../
 import type { ProjectIdAllocatorPort } from "../ids/index.js"
 import type {
   EvidenceStore,
+  WebResearchPort,
   WorkspaceCatalogPort,
   WorkspaceCatalogSnapshotRepository,
 } from "../retrieval/index.js"
@@ -106,12 +108,15 @@ import { canonicalizeRetrievalProjections } from "./retrieval-projection-canonic
 import { decideAdaptiveGraphGovernance } from "./adaptive-graph-governance-coordinator.js"
 import { ChapterContextResolver } from "../chapters/chapter-context-resolver.js"
 import type { ChapterSynopsisService } from "../chapters/chapter-synopsis-service.js"
+import type { SynopsisConversationService } from "../chapters/synopsis-conversation-service.js"
 import type { SettingsExtractionService } from "../settings/settings-extraction-service.js"
 import { SettingsExtractionReviewPendingError } from "../settings/settings-extraction-review-pending-error.js"
 import {
   resolveWorldDivergenceMode,
   worldDivergencePhaseAppendix,
 } from "../settings/world-divergence-policy.js"
+import { chapterNarrativeIntentPhaseAppendix } from "../settings/chapter-narrative-intent-policy.js"
+import { truncateChapterBodyDigest } from "../chapters/turn-handoff.js"
 import { settingsExtractionArtifactSchema } from "@worldseed/prompt-contracts"
 
 const turnModelPhases: readonly AIPhase[] = [
@@ -244,6 +249,7 @@ export type TurnOrchestratorInput = Readonly<{
     minimumWordCount: number
     maximumWordCount: number
   }>
+  chapterIntent?: ChapterNarrativeIntent
   deductionGoalBundle?: TurnDeductionGoalBundle
   taskId?: string
   turnId?: string
@@ -344,7 +350,10 @@ export type TurnOrchestratorDependencies = Readonly<{
   commit: ScopeCommitRepository
   internalStore: InternalStorePort
   workspace: WorkspacePort
+  /** Optional public-internet research for `sourceKinds: ["web"]`. */
+  webResearch?: WebResearchPort
   chapterSynopsis?: ChapterSynopsisService
+  synopsisConversation?: SynopsisConversationService
   settingsExtraction?: SettingsExtractionService
   createId: () => string
   idAllocator?: ProjectIdAllocatorPort
@@ -1831,6 +1840,37 @@ export class TurnOrchestrator {
             })
           }
         }
+        if (this.dependencies.synopsisConversation !== undefined) {
+          try {
+            const body = await this.dependencies.workspace.readMarkdown(
+              input.workspaceRootRef,
+              current.chapterPath,
+            ).catch(() => "")
+            await this.dependencies.synopsisConversation.recordTurnHandoff({
+              projectId: current.projectId,
+              workspaceRootRef: input.workspaceRootRef,
+              brief: {
+                taskId: current.taskId,
+                chapterSequence: current.chapterSequence,
+                chapterPath: current.chapterPath,
+                chapterHeading: current.chapterHeading,
+                bodyDigest: truncateChapterBodyDigest(body),
+                outlineNotes: [
+                  "本章已发布；请对照开推前梗概核对兑现与偏差。",
+                ],
+                createdAtMs: this.dependencies.now(),
+              },
+              model: this.dependencies.model,
+              runAutoAnalysis: true,
+              ...(input.chapterIntent === undefined ? {} : { chapterIntent: input.chapterIntent }),
+            })
+          } catch (error) {
+            this.log("warn", "turn.handoff.failed", {
+              taskId: current.taskId,
+              detail: error instanceof Error ? error.message : String(error),
+            })
+          }
+        }
         this.log("debug", "turn.finalization.step.started", {
           taskId: current.taskId,
           finalizationId: current.finalizationId,
@@ -2002,17 +2042,23 @@ export class TurnOrchestrator {
   private async executePhase(input: ExecutePhaseInput): Promise<ExecutePhaseResult> {
     throwIfExecutionCancelled(input.signal)
     const basePrompt = await this.dependencies.prompts.loadPhase(input.phase)
-    const divergenceAppendix = worldDivergencePhaseAppendix(
-      resolveWorldDivergenceMode(input.input.projectSettings),
-      input.phase,
-    )
-    const prompt = divergenceAppendix === undefined
+    const appendices = [
+      worldDivergencePhaseAppendix(
+        resolveWorldDivergenceMode(input.input.projectSettings),
+        input.phase,
+      ),
+      chapterNarrativeIntentPhaseAppendix(input.input.chapterIntent, input.phase),
+    ].filter((text): text is string => text !== undefined)
+    const prompt = appendices.length === 0
       ? basePrompt
-      : {
-          ...basePrompt,
-          text: `${basePrompt.text}\n\n${divergenceAppendix}`,
-          digest: digest(`${basePrompt.text}\n\n${divergenceAppendix}`),
-        }
+      : (() => {
+          const text = `${basePrompt.text}\n\n${appendices.join("\n\n")}`
+          return {
+            ...basePrompt,
+            text,
+            digest: digest(text),
+          }
+        })()
     let currentContext = input.context
     let currentPhaseRunId = input.phaseRunId
     let attempt = input.attempt
@@ -2061,6 +2107,7 @@ export class TurnOrchestrator {
         chapterSequence: input.input.chapterSequence,
         allowWorkspaceChapterReads: input.input.allowWorkspaceChapterReads ?? true,
         ...(input.input.presentation === undefined ? {} : { presentation: input.input.presentation }),
+        ...(input.input.chapterIntent === undefined ? {} : { chapterIntent: input.input.chapterIntent }),
         ...(input.input.deductionGoalBundle === undefined
           ? {}
           : {
@@ -3112,6 +3159,68 @@ export class TurnOrchestrator {
         evidence.push(workspaceTurnEvidence(storedEvidence.evidenceId, entry, content))
         requestReadRefs.add(storedEvidence.evidenceId)
       }
+      if (
+        request.query.sourceKinds.includes("web")
+        && (settings?.webResearchEnabled ?? defaultProjectSettings.retrieval.webResearchEnabled)
+        && this.dependencies.webResearch !== undefined
+      ) {
+        const maxWebResults = Math.min(
+          maxCandidates,
+          settings?.maxWebResults ?? defaultProjectSettings.retrieval.maxWebResults,
+        )
+        const webItems = await this.collectWebResearchEvidence({
+          request,
+          maxWebResults,
+        })
+        for (const item of webItems) {
+          const evidenceKey = `${item.ownerId}:${item.digest}`
+          if (seenEvidenceKeys.has(evidenceKey)) {
+            const existing = [...existingEvidence, ...evidence].find((entry) => `${entry.ownerId}:${entry.digest}` === evidenceKey)
+            if (existing !== undefined) requestReadRefs.add(existing.readId)
+            continue
+          }
+          const tokenEstimate = estimateRetrievalEvidenceTokens(item)
+          if (evidenceTokens + tokenEstimate > evidenceTokenLimit) {
+            evidenceBudgetTruncated = true
+            continue
+          }
+          seenEvidenceKeys.add(evidenceKey)
+          evidenceTokens += tokenEstimate
+          const evidenceId = await this.nextPersistentId(projectId, "evidence")
+          const storedEvidence = await this.dependencies.evidence.writeImmutable({
+            evidenceId,
+            projectId,
+            contextId: context.contextId,
+            sourceKind: "web",
+            ownerId: item.ownerId,
+            version: item.digest.slice(0, 16),
+            digest: item.digest,
+            locator: item.locator,
+            content: item.semanticText,
+            readReason: request.reason,
+            createdAtMs: this.dependencies.now(),
+          })
+          returned.push({
+            requestId: request.requestId,
+            readId: storedEvidence.evidenceId,
+            reason: request.reason,
+            segment: {
+              segmentId: this.dependencies.createId(),
+              kind: "committed_read",
+              ownerIds: [storedEvidence.evidenceId],
+              visibility: "committed",
+              canonicalDigest: storedEvidence.digest,
+              tokenEstimate,
+              sequence: context.segments.length + returned.length,
+            },
+          })
+          evidence.push({
+            ...item,
+            readId: storedEvidence.evidenceId,
+          })
+          requestReadRefs.add(storedEvidence.evidenceId)
+        }
+      }
       const searchesGraph = request.query.sourceKinds.some((kind) => (
         kind === "graph" || kind === "revision" || kind === "source"
       ))
@@ -3556,6 +3665,77 @@ export class TurnOrchestrator {
       })
     }
     return { context: nextContext, evidence, readExecutions, currentGraphRevisions: [...currentGraphRevisions.values()] }
+  }
+
+  private async collectWebResearchEvidence(input: Readonly<{
+    request: PhaseResultEnvelope["requestedReads"][number]
+    maxWebResults: number
+  }>): Promise<Array<TurnReadEvidence & { locator: string }>> {
+    const port = this.dependencies.webResearch
+    if (port === undefined || input.maxWebResults <= 0) return []
+    const urlKeys = input.request.query.exactKeys.filter(looksLikeHttpUrl)
+    const searchQueries = [
+      ...input.request.query.semanticTexts,
+      ...input.request.query.exactKeys.filter((key) => !looksLikeHttpUrl(key)),
+    ].map((query) => query.trim()).filter((query) => query.length > 0)
+    const uniqueQueries = [...new Set(searchQueries)]
+    const collected: Array<TurnReadEvidence & { locator: string }> = []
+    const seenOwners = new Set<string>()
+
+    for (const url of [...new Set(urlKeys)]) {
+      if (collected.length >= input.maxWebResults) break
+      const page = await port.fetchPage({ url })
+      if (page === undefined) continue
+      const ownerId = page.url
+      if (seenOwners.has(ownerId)) continue
+      seenOwners.add(ownerId)
+      const semanticText = formatWebPageEvidence(page)
+      const contentDigest = digest(semanticText)
+      collected.push({
+        readId: "budget-preview",
+        visibility: "committed",
+        ownerKind: "web:page",
+        ownerId,
+        exactKeys: [page.url, page.title],
+        semanticText,
+        sourceRefs: [{ sourceKind: "web", url: page.url, title: page.title }],
+        digest: contentDigest,
+        locator: `web://${page.url}`,
+      })
+    }
+
+    for (const query of uniqueQueries) {
+      if (collected.length >= input.maxWebResults) break
+      const remaining = input.maxWebResults - collected.length
+      const hits = await port.search({ query, maxResults: remaining })
+      for (const hit of hits) {
+        if (collected.length >= input.maxWebResults) break
+        if (seenOwners.has(hit.url)) continue
+        seenOwners.add(hit.url)
+        const semanticText = formatWebSearchHitEvidence(query, hit)
+        const contentDigest = digest(semanticText)
+        collected.push({
+          readId: "budget-preview",
+          visibility: "committed",
+          ownerKind: "web:search",
+          ownerId: hit.url,
+          exactKeys: [hit.url, hit.title, query],
+          semanticText,
+          sourceRefs: [{ sourceKind: "web", url: hit.url, title: hit.title, query }],
+          digest: contentDigest,
+          locator: `web-search://${encodeURIComponent(query)}#${encodeURIComponent(hit.url)}`,
+        })
+      }
+    }
+
+    this.log("debug", "retrieval.web.completed", {
+      requestId: input.request.requestId,
+      queryCount: uniqueQueries.length,
+      urlCount: urlKeys.length,
+      returnedCount: collected.length,
+      maxWebResults: input.maxWebResults,
+    })
+    return collected
   }
 
   private log(
@@ -4358,6 +4538,44 @@ function workspaceTurnEvidence(
     sourceRefs: [{ sourceKind: "workspace", relativePath: entry.relativePath, version: entry.version }],
     digest: entry.digest,
   }
+}
+
+function looksLikeHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value.trim())
+    return url.protocol === "http:" || url.protocol === "https:"
+  } catch {
+    return false
+  }
+}
+
+function formatWebSearchHitEvidence(
+  query: string,
+  hit: Readonly<{ title: string; url: string; snippet: string }>,
+): string {
+  return [
+    `# 联网检索结果`,
+    ``,
+    `- 查询：${query}`,
+    `- 标题：${hit.title}`,
+    `- URL：${hit.url}`,
+    hit.snippet.length === 0 ? undefined : `- 摘要：${hit.snippet}`,
+    ``,
+    `说明：这是公开互联网资料，仅作背景参考，不能覆盖已提交世界图中的当前状态，也不能直接当作作品内已发生事实。`,
+  ].filter((line): line is string => line !== undefined).join("\n")
+}
+
+function formatWebPageEvidence(page: Readonly<{ title: string; url: string; text: string }>): string {
+  return [
+    `# 联网页面摘录`,
+    ``,
+    `- 标题：${page.title}`,
+    `- URL：${page.url}`,
+    ``,
+    page.text,
+    ``,
+    `说明：这是公开互联网资料，仅作背景参考，不能覆盖已提交世界图中的当前状态，也不能直接当作作品内已发生事实。`,
+  ].join("\n")
 }
 
 function resolveGraphReadDirection(

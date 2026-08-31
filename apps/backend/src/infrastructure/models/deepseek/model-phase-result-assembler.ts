@@ -109,6 +109,13 @@ export function assembleModelPhaseResult(
         sourceKinds: normalizeRequestedSourceKinds(exactKeys, query?.sourceKinds),
         ...(query?.sourceIds === undefined ? {} : { sourceIds: query.sourceIds }),
         ...(query?.sourceBoundary === undefined ? {} : { sourceBoundary: query.sourceBoundary }),
+        ...(query?.readMode === undefined ? {} : { readMode: query.readMode }),
+        ...(query?.grepContextLines === undefined ? {} : { grepContextLines: query.grepContextLines }),
+        ...(query?.grepMaxMatchesPerFile === undefined
+          ? {}
+          : { grepMaxMatchesPerFile: query.grepMaxMatchesPerFile }),
+        ...(query?.lineStart === undefined ? {} : { lineStart: query.lineStart }),
+        ...(query?.lineEnd === undefined ? {} : { lineEnd: query.lineEnd }),
       },
       ...(read.verificationProbe === undefined ? {} : { verificationProbe: read.verificationProbe }),
     }
@@ -169,6 +176,15 @@ function normalizeRequestedSourceKinds(
 function normalizeOptionalModelFields(phase: AIPhase, artifact: unknown): unknown {
   if (typeof artifact !== "object" || artifact === null || Array.isArray(artifact)) return artifact
   const record = artifact as Record<string, unknown>
+  if (phase === "synopsis_discuss") {
+    const finalSelfReview = typeof record.finalSelfReview === "string" ? record.finalSelfReview.trim() : ""
+    return {
+      ...record,
+      finalSelfReview: finalSelfReview.length > 0
+        ? finalSelfReview
+        : "Completed synopsis discussion with the visible evidence.",
+    }
+  }
   if (phase === "emergence_planning" && record.noCreationReason === "") {
     const { noCreationReason: ignoredNoCreationReason, ...rest } = record
     void ignoredNoCreationReason

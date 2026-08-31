@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels"
-import { ChevronDown, Cloud, Cpu, FolderOpen, Menu, PanelLeftClose, PanelRightClose, Save, Settings2, Sprout } from "lucide-react"
+import { ChevronDown, Cloud, Cpu, FolderOpen, PanelLeftClose, PanelRightClose, Save, Settings2 } from "lucide-react"
 import type {
   ChapterRevision,
   ChapterRevisionConversationListResult,
@@ -16,7 +16,11 @@ import type {
   ResettableRuntimeMetricId,
   ResolvedChapter,
   SynopsisConversationListResult,
+  SynopsisConversationMessage,
   SynopsisConversationSendResult,
+  SynopsisConversationStreamSnapshot,
+  SynopsisStagingPromoteProposal,
+  ChapterNarrativeIntent,
 } from "@worldseed/contracts"
 
 import {
@@ -31,7 +35,11 @@ import {
   type TurnResult,
   type WorkspaceReport,
 } from "../api/client.js"
+import { AppChrome } from "../components/AppChrome.js"
 import { ProjectLauncher } from "../features/projects/ProjectLauncher.js"
+import { ProjectRail } from "../features/projects/ProjectRail.js"
+import { WorkNameControl } from "../features/projects/WorkNameControl.js"
+import { rememberWorkName } from "../features/projects/work-name-history.js"
 import { WorkspaceTree } from "../features/workspace/WorkspaceTree.js"
 import { EditorArea } from "../features/editor/EditorArea.js"
 import { ChapterWorkspaceRail } from "../features/editor/ChapterWorkspaceRail.js"
@@ -55,6 +63,7 @@ export function App(): React.JSX.Element {
   const [project, setProject] = useState<OpenProject | undefined>(browserDemoProject)
   const [report, setReport] = useState<WorkspaceReport>({ inventory: [], issues: [] })
   const [selectedPath, setSelectedPath] = useState<string>()
+  const [openedDocumentPath, setOpenedDocumentPath] = useState<string>()
   const [content, setContent] = useState("")
   const [chapterBody, setChapterBody] = useState("")
   const [savedContent, setSavedContent] = useState("")
@@ -65,6 +74,8 @@ export function App(): React.JSX.Element {
   const [chapterConversationBusy, setChapterConversationBusy] = useState(false)
   const [synopsisConversation, setSynopsisConversation] = useState<SynopsisConversationListResult>({ messages: [] })
   const [synopsisConversationBusy, setSynopsisConversationBusy] = useState(false)
+  const [pendingStagingPromotes, setPendingStagingPromotes] = useState<readonly SynopsisStagingPromoteProposal[]>([])
+  const [synopsisStream, setSynopsisStream] = useState<SynopsisConversationStreamSnapshot>()
   const [chapterSynopsis, setChapterSynopsis] = useState<ChapterSynopsis>()
   const [synopsisPanelOpen, setSynopsisPanelOpen] = useState(false)
   const [prompt, setPrompt] = useState("")
@@ -72,6 +83,8 @@ export function App(): React.JSX.Element {
   const [proseRule, setProseRule] = useState("")
   const [minimumWordCount, setMinimumWordCount] = useState("2000")
   const [maximumWordCount, setMaximumWordCount] = useState("3000")
+  const [boundaryPace, setBoundaryPace] = useState<ChapterNarrativeIntent["boundaryPace"]>("advance_allowed")
+  const [causalityFocus, setCausalityFocus] = useState<ChapterNarrativeIntent["causalityFocus"]>("auto")
   const [task, setTask] = useState<TaskSnapshot>()
   const [graphSlice, setGraphSlice] = useState<GraphSlice>()
   const [error, setError] = useState<string>()
@@ -209,9 +222,9 @@ export function App(): React.JSX.Element {
       const latest = tasks[0]
       setTask(latest)
       if (latest?.status === "awaiting_user_decision") {
-        setPostCommitNotice("已恢复最近一次暂停的推演任务；请在右侧运行监控中决定继续、重试或保持暂停。")
+        setPostCommitNotice("已恢复最近一次暂停的推演任务；请在弹出的检查点面板中决定重试、继续或回退本轮。")
       } else if (latest?.status === "waiting_for_review") {
-        setPostCommitNotice("正文已生成，请在检查点中确认设定抽取提案后再继续图治理。")
+        setPostCommitNotice("正文已生成，请在弹出的检查点面板中确认设定抽取提案后再继续图治理。")
       }
     }).catch((cause: unknown) => {
       if (active) setError(cause instanceof Error ? cause.message : String(cause))
@@ -239,10 +252,22 @@ export function App(): React.JSX.Element {
   }, [selectedPath, chapterRevision])
 
   useEffect(() => {
-    return window.worldseed?.onCommand((command) => {
-      if (command === "project.new" || command === "project.open") setProject(undefined)
+    const handleCommand = (command: "project.new" | "project.open" | "turn.start"): void => {
+      if (command === "project.new" || command === "project.open") resetWorkbenchForProject(undefined)
       if (command === "turn.start") void startTurn()
-    })
+    }
+    const unsubscribe = window.worldseed?.onCommand(handleCommand)
+    const onLocal = (event: Event): void => {
+      const detail = (event as CustomEvent<string>).detail
+      if (detail === "project.new" || detail === "project.open" || detail === "turn.start") {
+        handleCommand(detail)
+      }
+    }
+    window.addEventListener("worldseed:local-command", onLocal)
+    return () => {
+      unsubscribe?.()
+      window.removeEventListener("worldseed:local-command", onLocal)
+    }
   })
 
   const openFile = async (path: string | undefined): Promise<void> => {
@@ -259,6 +284,7 @@ export function App(): React.JSX.Element {
           relativePath: path,
         })
         setSelectedPath(path)
+        setOpenedDocumentPath(path)
         setSelectedChapter(undefined)
         setChapterRevision(undefined)
         setChapterRevisionContent(undefined)
@@ -275,6 +301,7 @@ export function App(): React.JSX.Element {
           publishPath: path,
         })
         setSelectedPath(path)
+        setOpenedDocumentPath(path)
         setSelectedChapter(resolved.committed)
         setChapterRevision(resolved.activeRevision)
         setChapterRevisionContent(resolved.activeRevision?.proposedBody)
@@ -296,6 +323,7 @@ export function App(): React.JSX.Element {
         relativePath: path,
       })
       setSelectedPath(path)
+      setOpenedDocumentPath(path)
       setSelectedChapter(undefined)
       setChapterRevision(undefined)
       setChapterRevisionContent(undefined)
@@ -455,6 +483,19 @@ export function App(): React.JSX.Element {
 
   const sendChapterConversation = async (message: string): Promise<void> => {
     if (project === undefined || selectedChapter === undefined) throw new Error("当前没有可对话章节")
+    const optimisticId = crypto.randomUUID()
+    const optimisticMessage = {
+      messageId: optimisticId,
+      revisionTaskId: chapterConversation.revisionTaskId ?? crypto.randomUUID(),
+      projectId: project.projectId,
+      role: "user" as const,
+      content: message,
+      createdAtMs: Date.now(),
+    }
+    setChapterConversation((current) => ({
+      ...current,
+      messages: [...current.messages, optimisticMessage],
+    }))
     setChapterConversationBusy(true)
     setError(undefined)
     try {
@@ -492,6 +533,10 @@ export function App(): React.JSX.Element {
         setChapterRevisionContent(detail.proposedBody)
       }
     } catch (cause) {
+      setChapterConversation((current) => ({
+        ...current,
+        messages: current.messages.filter((entry) => entry.messageId !== optimisticId),
+      }))
       setError(cause instanceof Error ? cause.message : String(cause))
       throw cause
     } finally {
@@ -605,34 +650,192 @@ export function App(): React.JSX.Element {
       setError("模型配置尚未加载完成，请稍候再发送")
       return
     }
+    const optimisticId = crypto.randomUUID()
+    const optimisticMessage: SynopsisConversationMessage = {
+      messageId: optimisticId,
+      sessionId: synopsisConversation.session?.sessionId ?? crypto.randomUUID(),
+      projectId: project.projectId,
+      role: "user",
+      content: message,
+      createdAtMs: Date.now(),
+    }
+    setSynopsisConversation((current) => ({
+      ...current,
+      messages: [...current.messages, optimisticMessage],
+    }))
     setSynopsisConversationBusy(true)
+    setSynopsisStream({
+      status: "running",
+      thinking: "",
+      content: "",
+      searching: [],
+      updatedAtMs: Date.now(),
+    })
     setError(undefined)
+    let pollStopped = false
+    let observedRunningStream = false
+    const pollStream = async (): Promise<void> => {
+      while (!pollStopped) {
+        try {
+          const peek = await invokeBackend<SynopsisConversationStreamSnapshot>("synopsis.conversation.streamPeek", {
+            projectId: project.projectId,
+            workspaceRootRef: project.workspaceRootRef,
+            ...(synopsisConversation.session?.sessionId === undefined
+              ? {}
+              : { sessionId: synopsisConversation.session.sessionId }),
+          })
+          // Ignore idle until send() begins the hub; ignore stale completed/failed
+          // leftovers from the previous turn until this send has been observed as running.
+          if (peek.status === "idle") {
+            await new Promise((resolve) => setTimeout(resolve, 200))
+            continue
+          }
+          if (peek.status === "completed" || peek.status === "failed") {
+            if (!observedRunningStream) {
+              await new Promise((resolve) => setTimeout(resolve, 200))
+              continue
+            }
+            setSynopsisStream(peek)
+            break
+          }
+          observedRunningStream = true
+          setSynopsisStream(peek)
+        } catch {
+          // Peek is best-effort while the model streams.
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      }
+    }
+    const pollTask = pollStream()
     try {
       if (synopsisConversation.session === undefined) {
-        await invokeBackend("synopsis.conversation.start", {
+        const started = await invokeBackend<{ session: { sessionId: string } }>("synopsis.conversation.start", {
           projectId: project.projectId,
           workspaceRootRef: project.workspaceRootRef,
         })
+        setSynopsisConversation((current) => ({
+          ...current,
+          session: started.session as SynopsisConversationListResult["session"],
+          messages: [...current.messages],
+        }))
       }
       const sent = await invokeBackend<SynopsisConversationSendResult>("synopsis.conversation.send", {
         projectId: project.projectId,
         workspaceRootRef: project.workspaceRootRef,
         message,
+        chapterIntent: { boundaryPace, causalityFocus },
         model: {
           baseUrl: activeModelProfile.baseUrl,
           model: activeModelProfile.model,
           credentialRef: activeModelProfile.credentialRef,
           apiProtocol: activeModelProfile.apiProtocol,
           contextWindowTokens: activeModelProfile.contextWindowTokens,
-          thinkingModeEnabled: activeModelProfile.thinkingModeEnabled,
+          thinkingModeEnabled: true,
           reasoningEffort: activeModelProfile.reasoningEffort,
           jsonModeEnabled: activeModelProfile.jsonModeEnabled,
           disableResponseStorage: activeModelProfile.disableResponseStorage,
           serviceTier: activeModelProfile.serviceTier,
         },
       })
+      pollStopped = true
       setSynopsisConversation(sent)
+      setPendingStagingPromotes(sent.pendingStagingPromotes ?? [])
+      setSynopsisStream(undefined)
       await refreshWorkspace()
+    } catch (cause) {
+      pollStopped = true
+      setSynopsisConversation((current) => ({
+        ...current,
+        messages: current.messages.filter((entry) => entry.messageId !== optimisticId),
+      }))
+      setSynopsisStream(undefined)
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      pollStopped = true
+      await pollTask.catch(() => undefined)
+      setSynopsisConversationBusy(false)
+    }
+  }
+
+  const refreshSynopsisChoices = async (messageId: string): Promise<void> => {
+    if (project === undefined || activeModelProfile === undefined) {
+      setError("模型配置尚未加载完成，请稍候再刷新选项")
+      return
+    }
+    setError(undefined)
+    try {
+      const refreshed = await invokeBackend<SynopsisConversationSendResult>("synopsis.conversation.refreshChoices", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        messageId,
+        chapterIntent: { boundaryPace, causalityFocus },
+        model: {
+          baseUrl: activeModelProfile.baseUrl,
+          model: activeModelProfile.model,
+          credentialRef: activeModelProfile.credentialRef,
+          apiProtocol: activeModelProfile.apiProtocol,
+          contextWindowTokens: activeModelProfile.contextWindowTokens,
+          thinkingModeEnabled: true,
+          reasoningEffort: activeModelProfile.reasoningEffort,
+          jsonModeEnabled: activeModelProfile.jsonModeEnabled,
+          disableResponseStorage: activeModelProfile.disableResponseStorage,
+          serviceTier: activeModelProfile.serviceTier,
+        },
+      })
+      setSynopsisConversation(refreshed)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  const promoteStaging = async (): Promise<void> => {
+    if (project === undefined) return
+    setError(undefined)
+    try {
+      let proposals = pendingStagingPromotes
+      if (proposals.length === 0) {
+        const listed = await invokeBackend<{ proposals: SynopsisStagingPromoteProposal[] }>(
+          "synopsis.staging.promote.list",
+          {
+            projectId: project.projectId,
+            workspaceRootRef: project.workspaceRootRef,
+            ...(synopsisConversation.session?.sessionId === undefined
+              ? {}
+              : { sessionId: synopsisConversation.session.sessionId }),
+          },
+        )
+        proposals = listed.proposals
+      }
+      if (proposals.length === 0) {
+        await sendSynopsisMessage("确认落盘到设定集与目标")
+        return
+      }
+      setSynopsisConversationBusy(true)
+      await invokeBackend("synopsis.staging.promote.approve", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        proposalIds: proposals.map((proposal) => proposal.proposalId),
+      })
+      setPendingStagingPromotes([])
+      await refreshWorkspace()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setSynopsisConversationBusy(false)
+    }
+  }
+
+  const rejectStagingPromote = async (proposalIds: readonly string[]): Promise<void> => {
+    if (project === undefined || proposalIds.length === 0) return
+    setSynopsisConversationBusy(true)
+    setError(undefined)
+    try {
+      await invokeBackend("synopsis.staging.promote.reject", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        proposalIds,
+      })
+      setPendingStagingPromotes((current) => current.filter((proposal) => !proposalIds.includes(proposal.proposalId)))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -668,6 +871,7 @@ export function App(): React.JSX.Element {
         minimumWordCount: parsedMinimumWordCount,
         maximumWordCount: parsedMaximumWordCount,
       }
+      const chapterIntent = { boundaryPace, causalityFocus }
       let started: { taskId: string }
       if (selectedPath === undefined) {
         started = await invokeBackend<{ taskId: string }>("synopsis.conversation.beginTurn", {
@@ -678,6 +882,7 @@ export function App(): React.JSX.Element {
             ? {}
             : { sessionId: synopsisConversation.session.sessionId }),
           presentation,
+          chapterIntent,
           model,
         })
       } else {
@@ -694,6 +899,7 @@ export function App(): React.JSX.Element {
           userInput,
           chapterSequence,
           presentation,
+          chapterIntent,
           model,
         })
       }
@@ -751,13 +957,6 @@ export function App(): React.JSX.Element {
     setTask((current) => current === undefined ? current : { ...current, runtimeMetrics })
   }
 
-  const pauseTask = async (): Promise<void> => {
-    const taskId = task?.handle?.taskId
-    if (taskId === undefined) throw new Error("当前任务没有可暂停标识")
-    const handle = await invokeBackend<{ taskId: string; status: string }>("turn.pause", { taskId })
-    setTask((current) => ({ ...current, handle, status: "paused" }))
-  }
-
   const applyHistoryCheckout = async (method: "history.restore" | "history.continueFrom", entryId: string): Promise<void> => {
     if (project === undefined) return
     const result = await invokeBackend<HistoryCheckoutResult>(method, {
@@ -767,6 +966,7 @@ export function App(): React.JSX.Element {
       entryId,
     })
     setSelectedPath(undefined)
+    setOpenedDocumentPath(undefined)
     setSelectedChapter(undefined)
     setChapterRevision(undefined)
     setContent("")
@@ -801,12 +1001,32 @@ export function App(): React.JSX.Element {
 
   const returnPreviousRound = async (): Promise<void> => {
     if (project === undefined) return
-    const result = await invokeBackend<HistoryCheckoutResult>("history.returnPreviousRound", {
+    const payload = {
       projectId: project.projectId,
       workspaceRootRef: project.workspaceRootRef,
       operationId: crypto.randomUUID(),
-    })
+    }
+    let result: HistoryCheckoutResult
+    try {
+      result = await invokeBackend<HistoryCheckoutResult>("history.returnPreviousRound", payload)
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      if (!isRecoverableDatabaseDisconnect(message)) throw cause
+      await invokeBackend<OpenProject>("project.open", { workspaceRootRef: project.workspaceRootRef })
+      result = await invokeBackend<HistoryCheckoutResult>("history.returnPreviousRound", {
+        ...payload,
+        operationId: crypto.randomUUID(),
+      })
+    }
+    if (task?.handle?.taskId !== undefined) {
+      try {
+        await invokeBackend("turn.cancel", { taskId: task.handle.taskId })
+      } catch {
+        // History already moved; ignore cancel failures on a dead task handle.
+      }
+    }
     setSelectedPath(undefined)
+    setOpenedDocumentPath(undefined)
     setContent("")
     setSavedContent("")
     setTask(undefined)
@@ -855,7 +1075,54 @@ export function App(): React.JSX.Element {
 
   const descriptionRules = useMemo(() => report.inventory.filter((entry) => entry.kind === "file" && entry.path.startsWith("表现输出/描写规则/")).map((entry) => entry.path), [report])
   const proseRules = useMemo(() => report.inventory.filter((entry) => entry.kind === "file" && entry.path.startsWith("表现输出/笔风规则/")).map((entry) => entry.path), [report])
-  if (project === undefined) return <ProjectLauncher onOpen={setProject} />
+
+  const resetWorkbenchForProject = useCallback((next: OpenProject | undefined): void => {
+    setProject(next)
+    setReport({ inventory: [], issues: [] })
+    setSelectedPath(undefined)
+    setOpenedDocumentPath(undefined)
+    setContent("")
+    setChapterBody("")
+    setSavedContent("")
+    setSelectedChapter(undefined)
+    setChapterRevision(undefined)
+    setChapterRevisionContent(undefined)
+    setChapterConversation({ messages: [] })
+    setChapterConversationBusy(false)
+    setSynopsisConversation({ messages: [] })
+    setSynopsisConversationBusy(false)
+    setSynopsisStream(undefined)
+    setChapterSynopsis(undefined)
+    setSynopsisPanelOpen(false)
+    setPrompt("")
+    setTask(undefined)
+    setGraphSlice(undefined)
+    setError(undefined)
+    setPostCommitNotice(undefined)
+    setProgressReviewOpen(false)
+    setPendingReviewCount(0)
+    setPendingGraphLoad(undefined)
+    setProjectSettingsOpen(false)
+    setProjectSettings(undefined)
+    setHistory(undefined)
+    setDiffFocusMessageId(undefined)
+  }, [])
+
+  const openWorkspaceHome = (): void => {
+    setSelectedPath(undefined)
+    setSynopsisPanelOpen(false)
+  }
+
+  const reopenOpenedDocument = (): void => {
+    if (openedDocumentPath === undefined) return
+    setSelectedPath(openedDocumentPath)
+  }
+
+  if (project === undefined) {
+    return <AppChrome>
+      <ProjectLauncher onOpen={resetWorkbenchForProject} />
+    </AppChrome>
+  }
 
   const readOnly = selectedPath?.startsWith("世界推演规则/基础规则/") === true
     || (selectedPath?.startsWith("章节正文/") === true && !isSynopsisMarkdownPath(selectedPath))
@@ -867,26 +1134,34 @@ export function App(): React.JSX.Element {
     && !inGraphSyncRecovery
   const showRightPanel = selectedPath === undefined || showChapterConversation
 
-  const openWorkspaceHome = (): void => {
-    if (dirty && !window.confirm("当前 Markdown 尚未保存，确定返回创作台吗？")) return
-    setSelectedPath(undefined)
-    setContent("")
-    setSavedContent("")
-    setChapterConversation({ messages: [] })
-    setSynopsisPanelOpen(false)
-  }
-  return <main className="app-shell">
-    <header className="topbar">
-      <div className="topbar-brand"><Sprout size={18} /><strong>Worldseed</strong></div>
-      <nav><button><Menu size={15} /> 文件</button><button>编辑</button><button>查看</button><button>推演</button></nav>
-      <UiTooltip label="配置与切换模型">
-        <button className="model-config-trigger" data-testid="model-config-trigger" aria-label="配置与切换模型" onClick={() => { setModelDialogOpen(true); }}><Cpu size={14} /><span>{activeModelProfile?.name ?? "未配置模型"}</span><ChevronDown size={13} /></button>
-      </UiTooltip>
-      <UiTooltip label="项目设置">
-        <button className="project-settings-trigger" data-testid="project-settings-trigger" aria-label="项目设置" disabled={projectSettings === undefined} onClick={() => { setProjectSettingsOpen(true); }}><Settings2 size={15} /></button>
-      </UiTooltip>
-      <div className="project-indicator"><span>{project.displayName}</span><i className={task?.status === "running" ? "running" : ""} />{task?.status === "running" ? "推演中" : "就绪"}</div>
-    </header>
+  return <AppChrome
+    rail={
+      <ProjectRail
+        activeProjectId={project.projectId}
+        onOpen={resetWorkbenchForProject}
+      />
+    }
+    titleLeading={
+      <>
+        <WorkNameControl
+          project={project}
+          running={task?.status === "running"}
+          statusLabel={task?.status === "running" ? "推演中" : "就绪"}
+          onRenamed={(displayName) => {
+            setProject((current) => current === undefined ? current : { ...current, displayName })
+            rememberWorkName(project.projectId, displayName)
+          }}
+        />
+        <UiTooltip label="配置与切换模型">
+          <button className="model-config-trigger" data-testid="model-config-trigger" aria-label="配置与切换模型" onClick={() => { setModelDialogOpen(true); }}><Cpu size={14} /><span>{activeModelProfile?.name ?? "未配置模型"}</span><ChevronDown size={13} /></button>
+        </UiTooltip>
+        <UiTooltip label="项目设置">
+          <button className="project-settings-trigger" data-testid="project-settings-trigger" aria-label="项目设置" disabled={projectSettings === undefined} onClick={() => { setProjectSettingsOpen(true); }}><Settings2 size={15} /></button>
+        </UiTooltip>
+      </>
+    }
+  >
+  <main className="app-shell">
     {error === undefined ? null : <div className="error-banner">{error}</div>}
     {postCommitNotice === undefined ? null : <div className="post-commit-notice" role="status">
       <span>{postCommitNotice}</span>
@@ -925,7 +1200,7 @@ export function App(): React.JSX.Element {
       : null}
     <PanelGroup className="workbench-panels" direction="horizontal">
       <Panel defaultSize={19} minSize={14} maxSize={28} collapsible>
-        <WorkspaceTree entries={report.inventory} selectedPath={selectedPath} onSelect={(path) => void openFile(path)} onRefresh={() => void refreshWorkspace()} />
+        <WorkspaceTree entries={report.inventory} selectedPath={selectedPath ?? openedDocumentPath} onSelect={(path) => void openFile(path)} onRefresh={() => void refreshWorkspace()} />
       </Panel>
       <PanelResizeHandle className="resize-handle"><PanelLeftClose size={12} /></PanelResizeHandle>
       <Panel minSize={42}>
@@ -933,6 +1208,7 @@ export function App(): React.JSX.Element {
           projectId={project.projectId}
           workspaceRootRef={project.workspaceRootRef}
           selectedPath={selectedPath}
+          openedDocumentPath={openedDocumentPath}
           content={content}
           dirty={dirty}
           readOnly={readOnly}
@@ -945,13 +1221,18 @@ export function App(): React.JSX.Element {
           wordCountValid={wordCountValid}
           descriptionRules={descriptionRules}
           proseRules={proseRules}
+          boundaryPace={boundaryPace}
+          causalityFocus={causalityFocus}
           onContentChange={setContent}
           onHome={openWorkspaceHome}
+          onOpenDocument={reopenOpenedDocument}
           onPromptChange={setPrompt}
           onDescriptionRuleChange={setDescriptionRule}
           onProseRuleChange={setProseRule}
           onMinimumWordCountChange={setMinimumWordCount}
           onMaximumWordCountChange={setMaximumWordCount}
+          onBoundaryPaceChange={setBoundaryPace}
+          onCausalityFocusChange={setCausalityFocus}
           onSave={() => void saveFile()}
           onRun={() => void startTurn()}
           chapter={selectedChapter}
@@ -967,7 +1248,12 @@ export function App(): React.JSX.Element {
           synopsisSession={synopsisConversation.session}
           synopsisMessages={synopsisConversation.messages}
           synopsisBusy={synopsisConversationBusy}
+          synopsisStream={synopsisStream}
+          pendingStagingPromotes={pendingStagingPromotes}
           onSynopsisSend={sendSynopsisMessage}
+          onSynopsisRefreshChoices={refreshSynopsisChoices}
+          onPromoteStaging={promoteStaging}
+          onRejectStagingPromote={rejectStagingPromote}
           onOpenSynopsisFile={(path) => { void openFile(path); }}
           diffFocusMessageId={diffFocusMessageId}
           onDiffFocusHandled={() => { setDiffFocusMessageId(undefined); }}
@@ -1000,7 +1286,6 @@ export function App(): React.JSX.Element {
                   onOpenProjectSettings={() => { setProjectSettingsOpen(true); }}
                   onResumeTask={resumeTask}
                   onResetTaskMetrics={resetTaskMetrics}
-                  onPauseTask={pauseTask}
                   onSaveHistory={saveHistory}
                   onRestoreHistory={(entryId) => applyHistoryCheckout("history.restore", entryId)}
                   onContinueFromHistory={(entryId) => applyHistoryCheckout("history.continueFrom", entryId)}
@@ -1034,6 +1319,7 @@ export function App(): React.JSX.Element {
       onOpenModelSettings={() => { setProjectSettingsOpen(false); setModelDialogOpen(true); }}
     /> : null}
   </main>
+  </AppChrome>
 }
 
 function parseWordCount(value: string): number | undefined {
@@ -1064,6 +1350,14 @@ export function shouldMonitorChapterRevision(status: ChapterRevision["graphSyncS
 
 function isWorkspaceFilePath(value: string | undefined): value is string {
   return value !== undefined && value.trim().length > 0 && value.toLowerCase().endsWith(".md")
+}
+
+function isRecoverableDatabaseDisconnect(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return normalized.includes("driver has already been destroyed")
+    || normalized.includes("no result")
+    || normalized.includes("database connection is not open")
+    || normalized.includes("sqlite") && normalized.includes("closed")
 }
 
 export function mergeGraphSlices(current: GraphSlice | undefined, next: GraphSlice): GraphSlice {

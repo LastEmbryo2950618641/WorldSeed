@@ -53,10 +53,10 @@ async function closeDialogs(page) {
 
 async function ensureProject(page) {
   await closeDialogs(page)
-  if (await page.getByText("建立一个新世界", { exact: true }).isVisible().catch(() => false)) {
-    await page.getByPlaceholder("例如：雾港纪事").fill("DOM 章节工作区验收")
-    await page.getByPlaceholder("选择一个空目录或已有项目目录").fill(workspace)
-    await page.getByRole("button", { name: "创建并进入", exact: true }).click()
+  if (await page.getByTestId("launcher-create-project").isVisible().catch(() => false)) {
+    await page.evaluate((dir) => { window.sessionStorage.setItem("worldseed:e2e-workspace", dir) }, workspace)
+    await page.getByTestId("launcher-create-project").click()
+    await page.evaluate(() => { window.sessionStorage.removeItem("worldseed:e2e-workspace") })
     record("create_project")
     await page.getByText("创作台首页", { exact: true }).waitFor({ timeout: 30_000 })
     return workspace

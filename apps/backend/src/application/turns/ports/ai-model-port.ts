@@ -1,5 +1,6 @@
 import type {
   AIPhase,
+  ChapterNarrativeIntent,
   PhaseRequestEnvelope,
   PhaseResultEnvelope,
   ProjectSettings,
@@ -38,11 +39,20 @@ export type PhaseModelExecution = Readonly<{
   }>
 }>
 
+export type ModelStreamPartial = Readonly<{
+  reasoningDelta?: string
+  contentDelta?: string
+}>
+
 export type ModelExecutionOptions = Readonly<{
   signal?: AbortSignal
   contextChainId?: string
   contextMessages?: readonly VisibleModelContextMessage[]
   phasePrompt?: PromptResource
+  /** When set, adapters should stream provider deltas when the protocol supports it. */
+  onPartial?: (partial: ModelStreamPartial) => void
+  /** Force DeepSeek thinking on for this call regardless of profile default. */
+  forceThinking?: boolean
 }>
 
 export type AIModelInfo = Readonly<{
@@ -76,7 +86,7 @@ export interface PromptResourcePort {
 }
 
 export type TurnPhaseInput = Readonly<{
-  workflow: "turn" | "query" | "evolution" | "revision"
+  workflow: "turn" | "query" | "evolution" | "revision" | "synopsis"
   userInput: string
   chapterSequence: number
   allowWorkspaceChapterReads: boolean
@@ -86,6 +96,7 @@ export type TurnPhaseInput = Readonly<{
     minimumWordCount: number
     maximumWordCount: number
   }>
+  chapterIntent?: ChapterNarrativeIntent
   deductionGoalBundle?: TurnDeductionGoalBundle
   deductionGoalConstraintMarkdown?: string
   sourceId?: string
@@ -157,6 +168,17 @@ export type TurnPhaseInput = Readonly<{
       summary: string
       status: "planned" | "achieved" | "partial" | "missed" | "superseded"
     }>[]
+    turnMonitor?: Readonly<{
+      taskId: string
+      status: string
+      phases: readonly Readonly<{
+        phase: string
+        status: string
+        summary: string
+        finishedAtMs?: number
+      }>[]
+    }>
+    discussTrigger?: "user" | "turn_handoff"
   }>
 }>
 

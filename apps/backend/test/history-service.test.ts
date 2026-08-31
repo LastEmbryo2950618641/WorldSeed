@@ -801,6 +801,11 @@ async function createFixture() {
     referencesReadme: "# 参考文件索引\n",
     descriptionRules: "# 描写规则\n",
     proseStyleRules: "# 笔风规则\n",
+    stagingReadme: "# 暂存区\n",
+    stagingNotes: "# 本章讨论笔记\n",
+    stagingCharacters: "# 人物草稿\n",
+    stagingWorld: "# 世界与规则草稿\n",
+    stagingPromoteIndex: "# 待落盘清单\n",
   })
   const database = await openProjectDatabase(join(internalRoot, "project.sqlite"))
   const projectId = randomUUID()

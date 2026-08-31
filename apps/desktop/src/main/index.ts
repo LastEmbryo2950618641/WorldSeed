@@ -11,6 +11,8 @@ import { registerIpcRouter, unregisterIpcRouter } from "./ipc-router.js"
 import { installApplicationMenu } from "./menu.js"
 import { secureWindow } from "./security.js"
 import { FileCredentialVault } from "./credential-vault.js"
+import { registerWindowControls, unregisterWindowControls } from "./window-controls.js"
+import { registerNativeMenuActions, unregisterNativeMenuActions } from "./native-menu-actions.js"
 
 const backend = new BackendProcess()
 
@@ -18,7 +20,7 @@ if (!app.isPackaged && process.env.WORLDSEED_CDP_PORT !== undefined) {
   app.commandLine.appendSwitch("remote-debugging-port", process.env.WORLDSEED_CDP_PORT)
 }
 
-async function createWindow(credentials: FileCredentialVault): Promise<BrowserWindow> {
+async function createWindow(credentials: FileCredentialVault, applicationDataRoot: string): Promise<BrowserWindow> {
   const display = screen.getPrimaryDisplay()
   const workArea = display.workArea
   const scaleFactor = display.scaleFactor
@@ -32,7 +34,9 @@ async function createWindow(credentials: FileCredentialVault): Promise<BrowserWi
     minWidth: Math.min(1180, width),
     minHeight: Math.min(720, height),
     show: false,
-    backgroundColor: "#f3f4f6",
+    frame: false,
+    backgroundColor: "#1e1f22",
+    icon: join(import.meta.dirname, "../../resources/icon.png"),
     webPreferences: {
       preload: join(import.meta.dirname, "../preload/index.cjs"),
       contextIsolation: true,
@@ -42,7 +46,9 @@ async function createWindow(credentials: FileCredentialVault): Promise<BrowserWi
   })
   secureWindow(window)
   installApplicationMenu(window)
-  registerIpcRouter(backend, window, credentials)
+  registerWindowControls(window)
+  registerNativeMenuActions(window)
+  registerIpcRouter(backend, window, credentials, applicationDataRoot)
   window.once("ready-to-show", () => { window.show(); })
   if (process.env.ELECTRON_RENDERER_URL !== undefined) {
     await window.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -81,9 +87,9 @@ void app.whenReady().then(async () => {
     packaged: app.isPackaged,
   })
   backend.start({ applicationDataRoot, promptPackageRoot, diagnostics })
-  await createWindow(credentials)
+  await createWindow(credentials, applicationDataRoot)
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) void createWindow(credentials)
+    if (BrowserWindow.getAllWindows().length === 0) void createWindow(credentials, applicationDataRoot)
   })
 })
 
@@ -92,6 +98,8 @@ app.on("window-all-closed", () => {
 })
 
 app.on("before-quit", () => {
+  unregisterNativeMenuActions()
+  unregisterWindowControls()
   unregisterIpcRouter()
   backend.close()
 })

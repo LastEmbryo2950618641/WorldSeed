@@ -523,15 +523,55 @@ export const synopsisDiscussGoalProposalSchema = z.object({
   reason: z.string().max(1_000).optional(),
 })
 
+export const synopsisStagingEntryPatchSchema = z.object({
+  entryId: z.string().min(1).optional(),
+  title: z.string().min(1).max(200),
+  body: z.string().min(1).max(20_000),
+  promoteTargetPath: z.string().min(1).max(500).optional(),
+  status: z.enum(["open", "pending_promote", "settled"]).optional(),
+})
+
+export const synopsisStagingDeltaSchema = z.object({
+  notes: z.array(synopsisStagingEntryPatchSchema).max(20).optional(),
+  characters: z.array(synopsisStagingEntryPatchSchema).max(20).optional(),
+  worldRules: z.array(synopsisStagingEntryPatchSchema).max(20).optional(),
+  promoteHints: z.array(synopsisStagingEntryPatchSchema).max(20).optional(),
+})
+
+export const synopsisStagingPromoteWriteSchema = z.object({
+  entryId: z.string().min(1),
+  relativePath: z.string().regex(/^设定集\/[^/][^\n]*\.md$/u),
+  markdown: z.string().min(1),
+  readmeEntry: z.string().max(500).optional(),
+  mode: z.enum(["create", "update"]),
+})
+
+export const synopsisStagingPromoteArtifactSchema = z.object({
+  settingsWrites: z.array(synopsisStagingPromoteWriteSchema).min(1).max(30),
+  goalProposals: z.array(synopsisDiscussGoalProposalSchema).optional(),
+  reason: z.string().max(1_000).optional(),
+})
+
 export const synopsisDiscussArtifactSchema = z.object({
   assistantMessage: z.string().min(1),
   chapterTitle: z.string().min(1).optional(),
   synopsisBody: z.string().min(1).optional(),
   choices: z.array(z.object({
     label: z.string().min(1),
-    action: z.enum(["start_turn", "continue_discuss"]),
+    action: z.enum(["start_turn", "continue_discuss", "promote_staging", "confirm_arc_plan"]),
   })).optional(),
   goalProposals: z.array(synopsisDiscussGoalProposalSchema).optional(),
+  stagingDelta: synopsisStagingDeltaSchema.optional(),
+  stagingPromote: synopsisStagingPromoteArtifactSchema.optional(),
+  arcPlan: z.object({
+    markdown: z.string().min(1).max(20_000),
+    estimatedChapterCount: z.number().int().positive().max(50).optional(),
+    estimatedWordRange: z.string().min(1).max(100).optional(),
+    chapterBeats: z.array(z.object({
+      sequenceOffset: z.number().int().nonnegative().max(50),
+      purpose: z.string().min(1).max(500),
+    })).max(30).optional(),
+  }).optional(),
   finalSelfReview: z.string().min(1),
 })
 

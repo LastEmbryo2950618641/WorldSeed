@@ -1,62 +1,190 @@
-import { useState } from "react"
-import { BookOpen, FolderOpen, Plus, Sprout } from "lucide-react"
+import { useCallback, useEffect, useState } from "react"
+import { createPortal } from "react-dom"
+import { Plus } from "lucide-react"
 
-import { invokeBackend, selectDirectory, type OpenProject } from "../../api/client.js"
-import { UiTooltip } from "../../components/UiTooltip.js"
+import { invokeBackend, type OpenProject } from "../../api/client.js"
+import projectDefaultIcon from "../../assets/project-default-icon.png"
+import { folderLabelFromPath, isUnderWorkDirectories } from "./book-path.js"
+import { type ProjectRailItem } from "./ProjectRail.js"
+import { useWorkDirectory } from "./use-work-directory.js"
+import { WorkNamePromptDialog } from "./WorkNamePromptDialog.js"
+import { WorkDirectoryPromptDialog } from "./WorkDirectoryPromptDialog.js"
+import { rememberWorkName } from "./work-name-history.js"
 
 type Props = Readonly<{ onOpen(project: OpenProject): void }>
 
+function formatOpenedAgo(lastOpenedAtMs: number, nowMs: number): string {
+  const deltaMs = Math.max(0, nowMs - lastOpenedAtMs)
+  const minutes = Math.floor(deltaMs / 60_000)
+  if (minutes < 1) return "刚刚打开"
+  if (minutes < 60) return `${String(minutes)} 分钟前`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${String(hours)} 小时前`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${String(days)} 天前`
+  return new Date(lastOpenedAtMs).toLocaleDateString()
+}
+
 export function ProjectLauncher({ onOpen }: Props): React.JSX.Element {
-  const [mode, setMode] = useState<"new" | "open">("new")
-  const [name, setName] = useState("")
-  const [workspaceRootRef, setWorkspaceRootRef] = useState("")
+  const workDirectoryState = useWorkDirectory()
+  const [projects, setProjects] = useState<readonly ProjectRailItem[]>([])
+  const [loadingProjects, setLoadingProjects] = useState(false)
   const [error, setError] = useState<string>()
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState<"new" | string>()
+  const [pendingCreatePath, setPendingCreatePath] = useState<string>()
+  const [nowMs, setNowMs] = useState(() => Date.now())
 
-  const chooseDirectory = async (): Promise<void> => {
-    const selected = await selectDirectory()
-    if (selected !== undefined) setWorkspaceRootRef(selected)
-  }
+  const refreshProjects = useCallback(async (): Promise<void> => {
+    setLoadingProjects(true)
+    try {
+      const result = await invokeBackend<{ projects: readonly ProjectRailItem[] }>("project.list", {})
+      const filtered = result.projects
+        .filter((project) => isUnderWorkDirectories(project.workspaceRootRef, workDirectoryState.workDirectories))
+        .sort((left, right) => right.lastOpenedAtMs - left.lastOpenedAtMs)
+      setProjects(filtered)
+      setNowMs(Date.now())
+      setError(undefined)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setLoadingProjects(false)
+    }
+  }, [workDirectoryState.workDirectories])
 
-  const submit = async (): Promise<void> => {
-    setBusy(true)
+  useEffect(() => {
+    if (workDirectoryState.workDirectory === undefined) return
+    void refreshProjects()
+  }, [refreshProjects, workDirectoryState.workDirectory])
+
+  const finishCreate = async (workspaceRootRef: string, displayName: string): Promise<void> => {
+    setBusy("new")
     setError(undefined)
     try {
-      const project = mode === "new"
-        ? await invokeBackend<OpenProject>("project.create", {
-            projectId: crypto.randomUUID(),
-            displayName: name,
-            workspaceRootRef,
-          })
-        : await invokeBackend<OpenProject>("project.open", { workspaceRootRef })
+      const project = await invokeBackend<OpenProject>("project.create", {
+        projectId: crypto.randomUUID(),
+        displayName,
+        workspaceRootRef,
+      })
+      rememberWorkName(project.projectId, project.displayName)
+      await refreshProjects()
       onOpen(project)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setBusy(false)
+      setBusy(undefined)
+      setPendingCreatePath(undefined)
     }
   }
 
-  return <main className="launcher">
-    <section className="launcher-brand">
-      <div className="brand-mark"><Sprout size={28} /></div>
-      <h1>Worldseed</h1>
-      <p>让每一轮正文都从已读取的世界继续生长。</p>
-      <div className="launcher-principles">
-        <span><BookOpen size={16} /> Markdown 工作目录</span>
-        <span><FolderOpen size={16} /> 持久化动态图</span>
+  const createBook = async (): Promise<void> => {
+    if (workDirectoryState.workDirectory === undefined) {
+      setError("请先配置软件工作目录")
+      return
+    }
+    setBusy("new")
+    setError(undefined)
+    try {
+      const workspaceRootRef = await workDirectoryState.allocateBookWorkspacePath()
+      setPendingCreatePath(workspaceRootRef)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  const openBookCard = async (item: ProjectRailItem): Promise<void> => {
+    setBusy(item.projectId)
+    setError(undefined)
+    try {
+      const project = await invokeBackend<OpenProject>("project.open", {
+        workspaceRootRef: item.workspaceRootRef,
+      })
+      rememberWorkName(project.projectId, project.displayName)
+      onOpen(project)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  if (workDirectoryState.loading || (workDirectoryState.workDirectory === undefined && workDirectoryState.defaultWorkDirectory.length === 0)) {
+    return <main className="launcher"><p className="launcher-loading">正在加载工作目录…</p></main>
+  }
+
+  if (workDirectoryState.workDirectory === undefined) {
+    return <>
+      <WorkDirectoryPromptDialog
+        defaultDirectory={workDirectoryState.defaultWorkDirectory}
+        busy={workDirectoryState.saving}
+        onConfirmDefault={() => {
+          void workDirectoryState.confirmWorkDirectory(workDirectoryState.defaultWorkDirectory).catch((cause) => {
+            setError(cause instanceof Error ? cause.message : String(cause))
+          })
+        }}
+        onChooseDirectory={() => { void workDirectoryState.chooseWorkDirectory() }}
+      />
+      {error === undefined && workDirectoryState.error === undefined
+        ? null
+        : <p className="form-error launcher-error" role="alert">{error ?? workDirectoryState.error}</p>}
+    </>
+  }
+
+  const interactionLocked = busy !== undefined || pendingCreatePath !== undefined
+
+  return (
+    <main className="launcher launcher--library">
+      <header className="launcher-library-header">
+        <h1>我的书籍</h1>
+        <p>选择一本书继续创作，或添加新书</p>
+      </header>
+
+      {loadingProjects
+        ? <p className="launcher-loading">正在加载书籍…</p>
+        : null}
+      <div className="launcher-book-grid" data-testid="launcher-book-grid">
+        {projects.map((item) => (
+          <button
+            key={item.projectId}
+            type="button"
+            className="launcher-book-card"
+            data-testid="launcher-book-card"
+            disabled={interactionLocked}
+            onClick={() => { void openBookCard(item) }}
+          >
+            <span className="launcher-book-cover" aria-hidden>
+              <img src={item.iconUrl ?? projectDefaultIcon} alt="" draggable={false} />
+            </span>
+            <strong className="launcher-book-title">{item.displayName}</strong>
+            <span className="launcher-book-meta">{formatOpenedAgo(item.lastOpenedAtMs, nowMs)}</span>
+          </button>
+        ))}
+        <button
+          type="button"
+          className="launcher-book-card launcher-book-card--add"
+          data-testid="launcher-create-project"
+          disabled={interactionLocked}
+          onClick={() => { void createBook() }}
+        >
+          <span className="launcher-book-cover launcher-book-cover--add" aria-hidden>
+            <span className="launcher-book-add-icon">
+              <Plus size={22} strokeWidth={2.25} />
+            </span>
+          </span>
+          <strong className="launcher-book-title">{busy === "new" ? "正在创建…" : "添加书籍"}</strong>
+        </button>
       </div>
-    </section>
-    <section className="launcher-form">
-      <div className="launcher-switch">
-        <button className={mode === "new" ? "active" : ""} onClick={() => { setMode("new"); }}><Plus size={16} /> 新建项目</button>
-        <button className={mode === "open" ? "active" : ""} onClick={() => { setMode("open"); }}><FolderOpen size={16} /> 打开项目</button>
-      </div>
-      <h2>{mode === "new" ? "建立一个新世界" : "打开已有世界"}</h2>
-      {mode === "new" ? <label>项目名称<input value={name} onChange={(event) => { setName(event.target.value); }} placeholder="例如：雾港纪事" /></label> : null}
-      <label>工作目录<div className="path-input"><input value={workspaceRootRef} onChange={(event) => { setWorkspaceRootRef(event.target.value); }} placeholder="选择一个空目录或已有项目目录" /><UiTooltip label="选择目录"><button aria-label="选择目录" onClick={() => void chooseDirectory()}><FolderOpen size={17} /></button></UiTooltip></div></label>
-      {error === undefined ? null : <p className="form-error">{error}</p>}
-      <button className="primary-command" disabled={busy || workspaceRootRef.length === 0 || (mode === "new" && name.length === 0)} onClick={() => void submit()}>{busy ? "正在打开..." : mode === "new" ? "创建并进入" : "打开项目"}</button>
-    </section>
-  </main>
+
+      {error === undefined ? null : <p className="form-error launcher-error" role="alert">{error}</p>}
+      {pendingCreatePath === undefined ? null : createPortal(
+        <WorkNamePromptDialog
+          folderLabel={folderLabelFromPath(pendingCreatePath)}
+          onCancel={() => { setPendingCreatePath(undefined) }}
+          onConfirm={(displayName) => { void finishCreate(pendingCreatePath, displayName) }}
+        />,
+        document.body,
+      )}
+    </main>
+  )
 }

@@ -57,6 +57,11 @@ describe("workspace catalog", () => {
       referencesReadme: "# 参考文件索引\n",
       descriptionRules: "# 描写规则\n",
       proseStyleRules: "# 笔风规则\n",
+      stagingReadme: "# 暂存区\n",
+      stagingNotes: "# 本章讨论笔记\n",
+      stagingCharacters: "# 人物草稿\n",
+      stagingWorld: "# 世界与规则草稿\n",
+      stagingPromoteIndex: "# 待落盘清单\n",
     })
     await workspace.saveUserMarkdown(workspaceRoot, "设定集/角色/主角.md", "# 主角\n")
     await workspace.saveUserMarkdown(workspaceRoot, "参考文件/术语/世界观.md", "# 世界观\n")
@@ -112,6 +117,11 @@ describe("sqlite workspace catalog snapshot repository", () => {
       referencesReadme: "# 参考文件索引\n",
       descriptionRules: "# 描写规则\n",
       proseStyleRules: "# 笔风规则\n",
+      stagingReadme: "# 暂存区\n",
+      stagingNotes: "# 本章讨论笔记\n",
+      stagingCharacters: "# 人物草稿\n",
+      stagingWorld: "# 世界与规则草稿\n",
+      stagingPromoteIndex: "# 待落盘清单\n",
     })
     const internalStore = new NodeInternalStoreAdapter(appDataRoot)
     const store = await internalStore.prepareProject(ids.project, workspaceRoot)
@@ -189,6 +199,11 @@ describe("sqlite evidence store", () => {
       referencesReadme: "# 参考文件索引\n",
       descriptionRules: "# 描写规则\n",
       proseStyleRules: "# 笔风规则\n",
+      stagingReadme: "# 暂存区\n",
+      stagingNotes: "# 本章讨论笔记\n",
+      stagingCharacters: "# 人物草稿\n",
+      stagingWorld: "# 世界与规则草稿\n",
+      stagingPromoteIndex: "# 待落盘清单\n",
     })
     const internalStore = new NodeInternalStoreAdapter(appDataRoot)
     const store = await internalStore.prepareProject(ids.project, workspaceRoot)

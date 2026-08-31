@@ -16,6 +16,11 @@ export type WorkspaceDefaultDocuments = Readonly<{
   referencesReadme: string
   descriptionRules: string
   proseStyleRules: string
+  stagingReadme: string
+  stagingNotes: string
+  stagingCharacters: string
+  stagingWorld: string
+  stagingPromoteIndex: string
 }>
 
 export type WorkspaceValidationReport = Readonly<{

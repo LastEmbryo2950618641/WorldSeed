@@ -101,7 +101,7 @@ export function validateWorkspaceInventory(entries: readonly WorkspaceInventoryE
         issues.push({
           code: "unexpected_root_entry",
           path,
-          message: "Only the five fixed top-level directories are allowed",
+          message: "Only the six fixed top-level directories are allowed",
         })
       }
 

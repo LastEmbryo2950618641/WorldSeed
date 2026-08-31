@@ -61,7 +61,7 @@ async function ensureFreshProject(page) {
   await closeDialogs(page)
   try {
     await Promise.race([
-      page.getByText("建立一个新世界", { exact: true }).waitFor({ state: "visible", timeout: 45_000 }),
+      page.getByTestId("launcher-create-project").waitFor({ state: "visible", timeout: 45_000 }),
       page.getByTestId("synopsis-conversation").waitFor({ state: "visible", timeout: 45_000 }),
     ])
   } catch {
@@ -69,10 +69,10 @@ async function ensureFreshProject(page) {
   }
   await delay(500)
 
-  if (await page.getByText("建立一个新世界", { exact: true }).isVisible().catch(() => false)) {
-    await page.getByPlaceholder("例如：雾港纪事").fill("DOM 推演目标验收")
-    await page.getByPlaceholder("选择一个空目录或已有项目目录").fill(workspace)
-    await page.getByRole("button", { name: "创建并进入", exact: true }).click()
+  if (await page.getByTestId("launcher-create-project").isVisible().catch(() => false)) {
+    await page.evaluate((dir) => { window.sessionStorage.setItem("worldseed:e2e-workspace", dir) }, workspace)
+    await page.getByTestId("launcher-create-project").click()
+    await page.evaluate(() => { window.sessionStorage.removeItem("worldseed:e2e-workspace") })
     record("G1_create_project")
     await page.getByTestId("synopsis-conversation").waitFor({ state: "visible", timeout: 45_000 })
     return

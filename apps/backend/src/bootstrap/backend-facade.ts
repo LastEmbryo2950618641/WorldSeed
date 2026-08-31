@@ -23,6 +23,8 @@ import {
   GRAPH_NEIGHBORHOOD_MAX_ANCHORS,
   phaseRequestEnvelopeSchema,
   projectCreatePayloadSchema,
+  projectListPayloadSchema,
+  projectRenamePayloadSchema,
   graphNeighborhoodPayloadSchema,
   historyBranchesPayloadSchema,
   historyEntryOperationPayloadSchema,
@@ -47,6 +49,8 @@ import {
   synopsisConversationStartPayloadSchema,
   synopsisConversationListPayloadSchema,
   synopsisConversationSendPayloadSchema,
+  synopsisConversationRefreshChoicesPayloadSchema,
+  synopsisConversationStreamPeekPayloadSchema,
   synopsisResolveTurnInputPayloadSchema,
   synopsisBeginTurnPayloadSchema,
   chapterSynopsisGetPayloadSchema,
@@ -60,6 +64,9 @@ import {
   settingsExtractionListPayloadSchema,
   settingsExtractionProposalApprovePayloadSchema,
   settingsExtractionProposalRejectPayloadSchema,
+  synopsisStagingPromoteListPayloadSchema,
+  synopsisStagingPromoteApprovePayloadSchema,
+  synopsisStagingPromoteRejectPayloadSchema,
   modelListPayloadSchema,
   modelProfilesReadPayloadSchema,
   modelProfilesSavePayloadSchema,
@@ -193,6 +200,37 @@ export class BackendFacade {
           projectId: project.manifest.id,
           displayName: project.manifest.displayName,
           workspaceRootRef: project.manifest.workspaceRootRef,
+        }
+      }
+      case "project.list": {
+        projectListPayloadSchema.parse(request.payload ?? {})
+        const registered = await this.container.listProjects()
+        return {
+          projects: await Promise.all(registered.map(async (project) => {
+            let displayName = displayNameFromWorkspaceRoot(project.workspaceRootRef)
+            try {
+              const peeked = await this.container.peekProjectDisplayName(project)
+              if (peeked !== undefined && peeked.trim().length > 0) displayName = peeked.trim()
+            } catch {
+              // Fall back to folder name when a registered workspace cannot be read.
+            }
+            return {
+              projectId: project.projectId,
+              displayName,
+              workspaceRootRef: project.workspaceRootRef,
+              lastOpenedAtMs: project.lastOpenedAtMs,
+            }
+          })),
+        }
+      }
+      case "project.rename": {
+        const payload = projectRenamePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        const displayName = await runtime.renameDisplayName(payload.displayName)
+        return {
+          projectId: payload.projectId,
+          displayName,
+          workspaceRootRef: payload.workspaceRootRef,
         }
       }
       case "project.validate": {
@@ -472,9 +510,31 @@ export class BackendFacade {
           workspaceRootRef: payload.workspaceRootRef,
           message: payload.message,
           model: this.resolveModel(payload.model),
+          ...(payload.chapterIntent === undefined ? {} : { chapterIntent: payload.chapterIntent }),
           ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
           ...(payload.deadlineMs === undefined ? {} : { deadlineMs: payload.deadlineMs }),
         })
+      }
+      case "synopsis.conversation.refreshChoices": {
+        const payload = synopsisConversationRefreshChoicesPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSynopsisConversationService().refreshChoices({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          model: this.resolveModel(payload.model),
+          ...(payload.messageId === undefined ? {} : { messageId: payload.messageId }),
+          ...(payload.chapterIntent === undefined ? {} : { chapterIntent: payload.chapterIntent }),
+          ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
+          ...(payload.deadlineMs === undefined ? {} : { deadlineMs: payload.deadlineMs }),
+        })
+      }
+      case "synopsis.conversation.streamPeek": {
+        const payload = synopsisConversationStreamPeekPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSynopsisConversationService().peekStream(
+          payload.projectId,
+          payload.sessionId,
+        )
       }
       case "synopsis.conversation.resolveTurnInput": {
         const payload = synopsisResolveTurnInputPayloadSchema.parse(request.payload)
@@ -495,6 +555,7 @@ export class BackendFacade {
           allowWorkspaceChapterReads: payload.allowWorkspaceChapterReads,
           ...(payload.sessionId === undefined ? {} : { sessionId: payload.sessionId }),
           ...(payload.presentation === undefined ? {} : { presentation: payload.presentation }),
+          ...(payload.chapterIntent === undefined ? {} : { chapterIntent: payload.chapterIntent }),
           ...(payload.model === undefined ? {} : { model: payload.model }),
           ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
         })
@@ -584,6 +645,31 @@ export class BackendFacade {
         const payload = settingsExtractionProposalRejectPayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
         return runtime.createSettingsExtractionService().rejectProposals({
+          projectId: payload.projectId,
+          proposalIds: payload.proposalIds,
+        })
+      }
+      case "synopsis.staging.promote.list": {
+        const payload = synopsisStagingPromoteListPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createStagingPromoteService().list({
+          projectId: payload.projectId,
+          ...(payload.sessionId === undefined ? {} : { sessionId: payload.sessionId }),
+        })
+      }
+      case "synopsis.staging.promote.approve": {
+        const payload = synopsisStagingPromoteApprovePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createStagingPromoteService().approve({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          proposalIds: payload.proposalIds,
+        })
+      }
+      case "synopsis.staging.promote.reject": {
+        const payload = synopsisStagingPromoteRejectPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createStagingPromoteService().reject({
           projectId: payload.projectId,
           proposalIds: payload.proposalIds,
         })
@@ -749,6 +835,7 @@ export class BackendFacade {
       minimumWordCount: number
       maximumWordCount: number
     } | undefined
+    chapterIntent?: TurnOrchestratorInput["chapterIntent"]
     model?: ModelSelection | undefined
     maxModelCalls?: number | undefined
     allowWorkspaceChapterReads: boolean
@@ -762,6 +849,7 @@ export class BackendFacade {
       chapterSequence: payload.chapterSequence,
       allowWorkspaceChapterReads: payload.allowWorkspaceChapterReads,
       ...(payload.presentation === undefined ? {} : { presentation: payload.presentation }),
+      ...(payload.chapterIntent === undefined ? {} : { chapterIntent: payload.chapterIntent }),
       ...(payload.model === undefined ? {} : { model: payload.model }),
       ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
       ...(payload.deductionGoalBundle === undefined
@@ -777,6 +865,7 @@ export class BackendFacade {
     acknowledgeWarnings: boolean
     forceOverride: boolean
     presentation?: TurnOrchestratorInput["presentation"]
+    chapterIntent?: TurnOrchestratorInput["chapterIntent"]
     model?: ModelSelection
     maxModelCalls?: number
     allowWorkspaceChapterReads: boolean
@@ -798,6 +887,7 @@ export class BackendFacade {
       allowWorkspaceChapterReads: payload.allowWorkspaceChapterReads,
       lockDeductionGoals: true,
       ...(payload.presentation === undefined ? {} : { presentation: payload.presentation }),
+      ...(payload.chapterIntent === undefined ? {} : { chapterIntent: payload.chapterIntent }),
       ...(payload.model === undefined ? {} : { model: payload.model }),
       ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
     })
@@ -811,6 +901,7 @@ export class BackendFacade {
     chapterSequence: number
     allowWorkspaceChapterReads: boolean
     presentation?: TurnOrchestratorInput["presentation"]
+    chapterIntent?: TurnOrchestratorInput["chapterIntent"]
     model?: ModelSelection
     maxModelCalls?: number
     deadlineMs?: number
@@ -891,6 +982,7 @@ export class BackendFacade {
       chapterSequence,
       allowWorkspaceChapterReads: input.allowWorkspaceChapterReads,
       ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
+      ...(input.chapterIntent === undefined ? {} : { chapterIntent: input.chapterIntent }),
       ...(deductionGoalBundle === undefined ? {} : { deductionGoalBundle }),
       taskId,
       maxModelCalls: input.maxModelCalls ?? projectSettings.execution.maxModelCalls,
@@ -1317,6 +1409,7 @@ export class BackendFacade {
       chapterSequence: phaseInput.chapterSequence,
       allowWorkspaceChapterReads: phaseInput.allowWorkspaceChapterReads,
       ...(phaseInput.presentation === undefined ? {} : { presentation: phaseInput.presentation }),
+      ...(phaseInput.chapterIntent === undefined ? {} : { chapterIntent: phaseInput.chapterIntent }),
       taskId: stored.taskId,
       turnId: latestRequest.turnId,
       scopeId: stored.scopeId,
@@ -1538,6 +1631,7 @@ function readRecoverablePhaseInput(value: unknown): {
   chapterSequence: number
   allowWorkspaceChapterReads: boolean
   presentation?: TurnOrchestratorInput["presentation"]
+  chapterIntent?: TurnOrchestratorInput["chapterIntent"]
 } {
   if (typeof value !== "object" || value === null) throw new Error("The task checkpoint has invalid phase input")
   const record = value as Record<string, unknown>
@@ -1549,6 +1643,9 @@ function readRecoverablePhaseInput(value: unknown): {
     chapterSequence: record.chapterSequence,
     allowWorkspaceChapterReads: record.allowWorkspaceChapterReads !== false,
     ...(record.presentation === undefined ? {} : { presentation: record.presentation as TurnOrchestratorInput["presentation"] }),
+    ...(record.chapterIntent === undefined
+      ? {}
+      : { chapterIntent: record.chapterIntent as TurnOrchestratorInput["chapterIntent"] }),
   }
 }
 
@@ -1598,4 +1695,10 @@ function readExecutionOrigin(value: object): Readonly<{ executionOrigin?: TurnOr
 function readPositiveNumber(value: unknown, name: string): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error(`The task checkpoint has invalid ${name}`)
   return value
+}
+
+function displayNameFromWorkspaceRoot(workspaceRootRef: string): string {
+  const trimmed = workspaceRootRef.replace(/[\\/]+$/u, "")
+  const segments = trimmed.split(/[\\/]/u).filter((part) => part.length > 0)
+  return segments.at(-1) ?? "未命名世界"
 }

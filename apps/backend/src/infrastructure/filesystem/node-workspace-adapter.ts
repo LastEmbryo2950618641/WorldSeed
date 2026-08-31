@@ -78,6 +78,26 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       encoding: "utf8",
       flag: "wx",
     })
+    await writeFile(resolveInside(root, "暂存区/readme.md"), defaults.stagingReadme, {
+      encoding: "utf8",
+      flag: "wx",
+    })
+    await writeFile(resolveInside(root, "暂存区/本章讨论笔记.md"), defaults.stagingNotes, {
+      encoding: "utf8",
+      flag: "wx",
+    })
+    await writeFile(resolveInside(root, "暂存区/人物草稿.md"), defaults.stagingCharacters, {
+      encoding: "utf8",
+      flag: "wx",
+    })
+    await writeFile(resolveInside(root, "暂存区/世界与规则草稿.md"), defaults.stagingWorld, {
+      encoding: "utf8",
+      flag: "wx",
+    })
+    await writeFile(resolveInside(root, "暂存区/待落盘清单.md"), defaults.stagingPromoteIndex, {
+      encoding: "utf8",
+      flag: "wx",
+    })
     return this.validate(root)
   }
 
@@ -99,6 +119,12 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       resolveInside(root, "世界推演规则/基础规则/settings-revision-guide.md"),
       defaults.settingsRevisionGuide,
     )
+    await mkdir(resolveInside(root, "暂存区"), { recursive: true })
+    await writeFileIfMissing(resolveInside(root, "暂存区/readme.md"), defaults.stagingReadme)
+    await writeFileIfMissing(resolveInside(root, "暂存区/本章讨论笔记.md"), defaults.stagingNotes)
+    await writeFileIfMissing(resolveInside(root, "暂存区/人物草稿.md"), defaults.stagingCharacters)
+    await writeFileIfMissing(resolveInside(root, "暂存区/世界与规则草稿.md"), defaults.stagingWorld)
+    await writeFileIfMissing(resolveInside(root, "暂存区/待落盘清单.md"), defaults.stagingPromoteIndex)
   }
 
   public async validate(workspaceRootRef: string): Promise<WorkspaceValidationReport> {

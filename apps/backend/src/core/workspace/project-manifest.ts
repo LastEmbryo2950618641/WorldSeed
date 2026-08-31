@@ -12,6 +12,7 @@ export type WorkspaceEntryRole =
   | "presentation"
   | "description_rules"
   | "prose_style_rules"
+  | "staging"
 
 export type FixedWorkspaceEntry = Readonly<{
   key: string
@@ -187,6 +188,66 @@ export const fixedWorkspaceEntries: readonly FixedWorkspaceEntry[] = Object.free
     allowUserFolders: true,
     allowUserMarkdown: true,
   },
+  {
+    key: "staging",
+    role: "staging",
+    relativePath: "暂存区",
+    entryKind: "directory",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: true,
+  },
+  {
+    key: "staging-readme",
+    role: "staging",
+    relativePath: "暂存区/readme.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: true,
+  },
+  {
+    key: "staging-notes",
+    role: "staging",
+    relativePath: "暂存区/本章讨论笔记.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: true,
+  },
+  {
+    key: "staging-characters",
+    role: "staging",
+    relativePath: "暂存区/人物草稿.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: true,
+  },
+  {
+    key: "staging-world",
+    role: "staging",
+    relativePath: "暂存区/世界与规则草稿.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: true,
+  },
+  {
+    key: "staging-promote-index",
+    role: "staging",
+    relativePath: "暂存区/待落盘清单.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: true,
+  },
 ])
 
 export const fixedTopLevelDirectories = Object.freeze([
@@ -195,4 +256,5 @@ export const fixedTopLevelDirectories = Object.freeze([
   "参考文件",
   "章节正文",
   "表现输出",
+  "暂存区",
 ] as const)

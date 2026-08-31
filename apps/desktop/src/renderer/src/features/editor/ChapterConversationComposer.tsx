@@ -29,35 +29,43 @@ export function ChapterConversationComposer(props: Props): React.JSX.Element {
         : <span>描述你想如何改这一章，Agent 会给出修订建议</span>}
     </div>
     <div className="chapter-conversation-thread" aria-live="polite">
-      {props.messages.length === 0
+      {props.messages.length === 0 && !props.busy
         ? <p className="chapter-conversation-empty">
             <Sparkles size={16} aria-hidden="true" />
             {variant === "rail"
               ? "描述修订意图，例如「把开头写得更悬疑」"
               : "还没有对话。在下方输入修订意图，例如「把开头写得更悬疑一些」。"}
           </p>
-        : props.messages.map((message) => <article className={`chapter-conversation-message ${message.role}`} key={message.messageId}>
-          <header>
-            {message.role === "user"
-              ? <><UserRound size={12} aria-hidden="true" /> 你</>
-              : <><Bot size={12} aria-hidden="true" /> Agent</>}
-          </header>
-          <p>{message.content}</p>
-          {message.role === "assistant" && message.proposal !== undefined && props.revisionTaskId !== undefined
-            ? <div className="chapter-conversation-message-actions">
-                <span className="chapter-conversation-applied">已自动写入草稿</span>
-                {props.onInspectDiff === undefined
-                  ? null
-                  : <button
-                      className="chapter-conversation-inspect-diff"
-                      type="button"
-                      onClick={() => { props.onInspectDiff?.(message.messageId); }}
-                    >
-                      {variant === "rail" ? "查看对比" : "在编辑区查看对比"}
-                    </button>}
-              </div>
-            : null}
-        </article>)}
+        : <>
+            {props.messages.map((message) => <article className={`chapter-conversation-message ${message.role}`} key={message.messageId}>
+              <header>
+                {message.role === "user"
+                  ? <><UserRound size={12} aria-hidden="true" /> 你</>
+                  : <><Bot size={12} aria-hidden="true" /> Agent</>}
+              </header>
+              <p>{message.content}</p>
+              {message.role === "assistant" && message.proposal !== undefined && props.revisionTaskId !== undefined
+                ? <div className="chapter-conversation-message-actions">
+                    <span className="chapter-conversation-applied">已自动写入草稿</span>
+                    {props.onInspectDiff === undefined
+                      ? null
+                      : <button
+                          className="chapter-conversation-inspect-diff"
+                          type="button"
+                          onClick={() => { props.onInspectDiff?.(message.messageId); }}
+                        >
+                          {variant === "rail" ? "查看对比" : "在编辑区查看对比"}
+                        </button>}
+                  </div>
+                : null}
+            </article>)}
+            {props.busy
+              ? <article className="chapter-conversation-message assistant pending" aria-live="polite">
+                  <header><Bot size={12} aria-hidden="true" /> Agent</header>
+                  <p className="creation-desk-pending">正在思考…</p>
+                </article>
+              : null}
+          </>}
     </div>
     <div className="chapter-conversation-input">
       <textarea

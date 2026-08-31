@@ -17,6 +17,7 @@ import {
   ChapterSynopsisService,
   DeductionGoalsService,
   SettingsExtractionService,
+  StagingPromoteService,
   SynopsisConversationService,
   buildSourceUnitExactKeys,
   HistoryManifestBuilder,
@@ -37,11 +38,13 @@ import {
   SqliteChapterSynopsisRepository,
   SqliteDeductionGoalsRepository,
   SqliteSettingsExtractionRepository,
+  SqliteSynopsisStagingPromoteRepository,
   SqliteChapterIndexRepository,
   SqliteEvidenceStore,
   SqliteGraphRepository,
   SqliteHistoryRepository,
   SqliteProjectIdAllocator,
+  SqliteProjectRepository,
   SqliteProjectSettingsStore,
   SqliteRetrievalRepository,
   SqliteScopeCommitRepository,
@@ -52,12 +55,16 @@ import {
 } from "../infrastructure/sqlite/index.js"
 import type { StoredPhaseRun, StoredTask, TaskCheckpointRecord, TurnFinalizationRecord } from "../application/turns/ports/index.js"
 import { NodePromptResourceAdapter } from "../infrastructure/prompts/index.js"
+import { DuckDuckGoWebResearchAdapter } from "../infrastructure/web-research/index.js"
+import { buildTurnMonitorPhases } from "../application/chapters/turn-handoff.js"
 import type { Kysely } from "kysely"
 import type { ProjectDatabase } from "../infrastructure/sqlite/database-types.js"
 import { runtimeLog } from "../infrastructure/diagnostics/index.js"
 import type { HistoryBranchSummary, HistoryCheckoutResult, HistoryEntrySummary, HistoryOverview, HistoryRetentionPreview } from "@worldseed/contracts"
 
 export class ProjectRuntime {
+  private closed = false
+
   private constructor(
     public readonly projectId: ProjectId,
     public readonly workspaceRootRef: string,
@@ -67,6 +74,10 @@ export class ProjectRuntime {
     private readonly internalStorePort: InternalStorePort,
     private readonly promptPackageRoot: string,
   ) {}
+
+  public isClosed(): boolean {
+    return this.closed
+  }
 
   public static async open(
     projectId: ProjectId,
@@ -105,7 +116,9 @@ export class ProjectRuntime {
       commit: new SqliteScopeCommitRepository(this.database),
       internalStore: this.internalStorePort,
       workspace: this.workspace,
+      webResearch: new DuckDuckGoWebResearchAdapter(),
       chapterSynopsis: this.createChapterSynopsisService(),
+      synopsisConversation: this.createSynopsisConversationService(),
       settingsExtraction: this.createSettingsExtractionService(),
       createId,
       idAllocator: new SqliteProjectIdAllocator(this.database, now),
@@ -139,6 +152,14 @@ export class ProjectRuntime {
 
   public readSettings(): Promise<ProjectSettings> {
     return new SqliteProjectSettingsStore(this.database, Date.now).read(this.projectId)
+  }
+
+  public async renameDisplayName(displayName: string, updatedAtMs = Date.now()): Promise<string> {
+    const name = displayName.trim()
+    if (name.length === 0) throw new Error("作品名不能为空")
+    const repository = new SqliteProjectRepository(this.database, this.workspaceRootRef, this.internalStore.internalStoreRef)
+    await repository.updateName(this.projectId, name, updatedAtMs)
+    return name
   }
 
   public async saveSettings(settings: ProjectSettings): Promise<ProjectSettings> {
@@ -403,8 +424,28 @@ export class ProjectRuntime {
       chapters: this.createChapterResolveService(),
       conversation: new SqliteSynopsisConversationRepository(this.database),
       goals: this.createDeductionGoalsService(),
+      stagingPromote: this.createStagingPromoteService(),
       workspace: this.workspace,
+      catalog: new NodeWorkspaceCatalogAdapter(this.workspace),
       prompts: this.createPromptResourcePort(),
+      webResearch: new DuckDuckGoWebResearchAdapter(),
+      readProjectSettings: () => this.readSettings(),
+      readTurnMonitor: async () => {
+        const row = await this.database.selectFrom("tasks")
+          .select(["id", "status", "last_phase"])
+          .where("project_id", "=", this.projectId)
+          .where("kind", "=", "turn")
+          .where("status", "in", ["running", "awaiting_user_decision", "waiting_for_review", "paused", "committing"])
+          .orderBy("updated_at", "desc")
+          .executeTakeFirst()
+        if (row === undefined) return undefined
+        const runs = await this.listPhaseRuns(row.id)
+        return {
+          taskId: row.id,
+          status: row.status,
+          phases: buildTurnMonitorPhases(runs),
+        }
+      },
       createId: randomUUID,
       now: Date.now,
     })
@@ -422,6 +463,16 @@ export class ProjectRuntime {
   public createDeductionGoalsService(): DeductionGoalsService {
     return new DeductionGoalsService({
       goals: new SqliteDeductionGoalsRepository(this.database),
+      createId: randomUUID,
+      now: Date.now,
+    })
+  }
+
+  public createStagingPromoteService(): StagingPromoteService {
+    return new StagingPromoteService({
+      proposals: new SqliteSynopsisStagingPromoteRepository(this.database),
+      goals: this.createDeductionGoalsService(),
+      workspace: this.workspace,
       createId: randomUUID,
       now: Date.now,
     })
@@ -450,6 +501,8 @@ export class ProjectRuntime {
   }
 
   public async close(): Promise<void> {
+    if (this.closed) return
+    this.closed = true
     await this.database.destroy()
   }
 
