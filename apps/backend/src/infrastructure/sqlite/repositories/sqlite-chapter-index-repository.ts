@@ -31,6 +31,14 @@ export class SqliteChapterIndexRepository {
     return row === undefined ? undefined : mapRow(row)
   }
 
+  public async findBySequence(projectId: ProjectId, sequence: number): Promise<ChapterIndexRecord | undefined> {
+    const row = await this.database.selectFrom("chapter_index").selectAll()
+      .where("project_id", "=", projectId)
+      .where("sequence", "=", sequence)
+      .executeTakeFirst()
+    return row === undefined ? undefined : mapRow(row)
+  }
+
   public async nextSequence(projectId: ProjectId): Promise<number> {
     const row = await this.database.selectFrom("chapter_index").select((expression) => expression.fn.max("sequence").as("max_sequence"))
       .where("project_id", "=", projectId)

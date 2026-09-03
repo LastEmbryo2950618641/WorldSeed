@@ -39,10 +39,12 @@ describe("current configuration", () => {
       outputTokenLimitMode: "model",
       maxWallTimeMs: 7_200_000,
       maxModelRequestTimeMs: 3_600_000,
-      maxRetrievalRounds: 10,
+      backendRequestWaitTimeoutMs: 600_000,
+      maxRetrievalRounds: 30,
       worldDivergenceMode: "world_consistent",
     })
     expect(defaultProjectSettings.history.retentionLimit).toBeNull()
+    expect(defaultProjectSettings.creationDesk.autoApproveGoalProposals).toBe(true)
   })
 
   it("matches the documented autonomy scaling at the default value", () => {

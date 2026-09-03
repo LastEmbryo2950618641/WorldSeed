@@ -12,6 +12,7 @@ import { assertWorkspaceMutationAllowed } from "../../core/index.js"
 import type { WorkspacePort } from "../workspace/index.js"
 import type { SqliteSettingsExtractionRepository } from "../../infrastructure/sqlite/repositories/sqlite-settings-extraction-repository.js"
 import { allowsSettingsCreate } from "./world-divergence-policy.js"
+import type { SettingsLineageService } from "./settings-lineage-service.js"
 
 export class SettingsExtractionService {
   public constructor(private readonly dependencies: Readonly<{
@@ -19,6 +20,8 @@ export class SettingsExtractionService {
     workspace: WorkspacePort
     createId: () => string
     now: () => number
+    lineage?: SettingsLineageService
+    resolveCausingChapterSequence?: (taskId: string) => Promise<number | undefined>
   }>) {}
 
   public async listByTask(taskId: string): Promise<SettingsExtractionSnapshot> {
@@ -65,6 +68,7 @@ export class SettingsExtractionService {
     projectId: ProjectId
     workspaceRootRef: string
     proposalIds: readonly string[]
+    reasonOverride?: string
   }>): Promise<SettingsExtractionSnapshot> {
     for (const proposalId of input.proposalIds) {
       const proposal = await this.dependencies.proposals.find(proposalId)
@@ -72,7 +76,7 @@ export class SettingsExtractionService {
         throw new Error(`settings proposal not found: ${proposalId}`)
       }
       if (proposal.status !== "pending") continue
-      await this.applyProposal(input.workspaceRootRef, proposal)
+      await this.applyProposal(input.workspaceRootRef, proposal, input.reasonOverride)
       await this.dependencies.proposals.resolve(proposalId, "approved", this.dependencies.now())
     }
     const taskId = (await this.resolveTaskId(input.proposalIds)) ?? ""
@@ -131,23 +135,43 @@ export class SettingsExtractionService {
   private async applyProposal(
     workspaceRootRef: string,
     proposal: SettingsExtractionProposal,
+    reasonOverride?: string,
   ): Promise<void> {
     const payload = proposal.payload
+    const summary = reasonOverride?.trim() || proposal.reason
+    const causingChapterSequence = this.dependencies.resolveCausingChapterSequence === undefined
+      ? undefined
+      : await this.dependencies.resolveCausingChapterSequence(proposal.taskId)
+    const record = async (relativePath: string, markdown: string): Promise<void> => {
+      await this.dependencies.workspace.saveUserMarkdown(workspaceRootRef, relativePath, markdown)
+      await this.dependencies.lineage?.recordUpsert({
+        relativePath,
+        markdown,
+        sourceKind: "extraction_approve",
+        sourceRef: proposal.proposalId,
+        ...(summary === undefined || summary.length === 0 ? {} : { summary }),
+        ...(causingChapterSequence === undefined ? {} : { causingChapterSequence }),
+      })
+    }
     if (payload.kind === "create") {
-      await this.dependencies.workspace.saveUserMarkdown(workspaceRootRef, payload.relativePath, payload.markdown)
+      await record(payload.relativePath, payload.markdown)
       if (payload.readmeEntry !== undefined && payload.readmeEntry.trim().length > 0) {
-        await this.appendReadmeEntry(workspaceRootRef, payload.readmeEntry.trim())
+        await this.appendReadmeEntry(workspaceRootRef, payload.readmeEntry.trim(), proposal.proposalId)
       }
       return
     }
     if (payload.kind === "update") {
-      await this.dependencies.workspace.saveUserMarkdown(workspaceRootRef, payload.relativePath, payload.markdown)
+      await record(payload.relativePath, payload.markdown)
       return
     }
-    await this.dependencies.workspace.saveUserMarkdown(workspaceRootRef, payload.targetPath, payload.markdown)
+    await record(payload.targetPath, payload.markdown)
   }
 
-  private async appendReadmeEntry(workspaceRootRef: string, entry: string): Promise<void> {
+  private async appendReadmeEntry(
+    workspaceRootRef: string,
+    entry: string,
+    proposalId: string,
+  ): Promise<void> {
     const readmePath = "设定集/readme.md"
     let current = ""
     try {
@@ -157,10 +181,14 @@ export class SettingsExtractionService {
     }
     if (current.includes(entry)) return
     const suffix = current.endsWith("\n") ? "" : "\n"
-    await this.dependencies.workspace.saveUserMarkdown(
-      workspaceRootRef,
-      readmePath,
-      `${current}${suffix}- ${entry}\n`,
-    )
+    const next = `${current}${suffix}- ${entry}\n`
+    await this.dependencies.workspace.saveUserMarkdown(workspaceRootRef, readmePath, next)
+    await this.dependencies.lineage?.recordUpsert({
+      relativePath: readmePath,
+      markdown: next,
+      sourceKind: "extraction_approve",
+      sourceRef: proposalId,
+      summary: "更新设定集索引",
+    })
   }
 }

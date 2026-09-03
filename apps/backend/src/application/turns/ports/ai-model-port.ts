@@ -161,6 +161,10 @@ export type TurnPhaseInput = Readonly<{
       goalId: string
       content: string
       lifecycle: "active" | "completed" | "removed"
+      narrativeKind?: "general" | "foreshadow" | "climax"
+      scale?: "short" | "medium" | "long"
+      plantChapterSequence?: number
+      payoffChapterSequence?: number
     }>[]
     chapterProgress?: readonly Readonly<{
       goalId: string
@@ -206,6 +210,8 @@ export type TurnReadEvidence = Readonly<{
   relatedOwnerRefs?: readonly RelatedOwnerRef[]
   digest: string
   stateRole?: "current" | "historical"
+  temporalRole?: "as_of" | "current"
+  asOfChapterSequence?: number
   committedSequence?: number
   sourcePosition?: Readonly<{
     sourceRef: string

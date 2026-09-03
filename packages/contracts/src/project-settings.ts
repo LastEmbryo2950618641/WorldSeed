@@ -43,6 +43,14 @@ const stagingSettingsSchema = z.object({
   maxChars: positiveInteger.max(500_000).default(80_000),
 })
 
+const creationDeskSettingsSchema = z.object({
+  /**
+   * When true, Agent `goalProposals` are applied to the goal library immediately
+   * (no manual 采纳). When false, proposals stay pending until the author approves.
+   */
+  autoApproveGoalProposals: z.boolean().default(true),
+})
+
 export const projectSettingsSchema = z.object({
   version: z.literal(2),
   execution: z.object({
@@ -52,13 +60,16 @@ export const projectSettingsSchema = z.object({
     outputTokenLimitMode: z.literal("model"),
     maxWallTimeMs: positiveInteger.max(7_200_000),
     maxModelRequestTimeMs: positiveInteger.max(3_600_000).default(3_600_000),
-    maxRetrievalRounds: positiveInteger.max(10),
+    /** Soft wait for a backend/Agent IPC call; timeout prompts continue/stop instead of auto-abort. */
+    backendRequestWaitTimeoutMs: positiveInteger.max(7_200_000).default(600_000),
+    maxRetrievalRounds: positiveInteger.max(50),
     worldDivergenceMode: worldDivergenceModeSchema.default("world_consistent"),
   }),
   retrieval: retrievalSettingsSchema,
   graph: graphSettingsSchema,
   history: historySettingsSchema.default({ retentionLimit: null }),
   staging: stagingSettingsSchema.default({ maxChars: 80_000 }),
+  creationDesk: creationDeskSettingsSchema.default({ autoApproveGoalProposals: true }),
 }).superRefine(validateGraphSettings)
 
 export type ProjectSettings = z.infer<typeof projectSettingsSchema>

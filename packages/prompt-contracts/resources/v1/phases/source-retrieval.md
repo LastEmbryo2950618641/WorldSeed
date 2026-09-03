@@ -21,6 +21,10 @@
 - 联网资料只是外部参考，权威低于已读取世界图与项目设定集；不得把网页内容伪装成作品内已经发生的事实，也不得用它覆盖图中的当前状态。
 - `sourceKinds: ["graph", "revision", "source"]` 才查询世界图、修订和已持久化正文投影；不要把工作区文件请求伪装成图请求。
 - `source` 表示应用内部已提交、不可变的原文单元投影，不表示直接读取用户工作目录中的 `章节正文/*.md`；禁止读取工作区章节文件时，仍可通过 `source` 选择性返回已持久化原文单元。
+- 需要闪回、防剧透或对账「写到第 N 章时」的说法时，可在 `query` 上使用时态字段（与创作台相同语义）：
+  - `purpose: "as_of_chapter"` + `asOfChapterSequence: N` + `sourceKinds: ["reference"]` — 从设定沿革读取**第 N 章视角**的设定片段（**非当前真相**）；
+  - `purpose: "past_chapter_text"` + `asOfChapterSequence: N` + `sourceKinds: ["source"]` — 读取**第 N 章定稿正文**（优先 lineage 钉住的当时版本，而非当前 head）；
+  - 时态读每轮最多 2 次；必须满足 `1 ≤ N < 当前推演章序`；证据会标注 `temporalRole: as_of`，不得与当前设定/正文混为一谈。
 - 查询精确原话、标题或其他逐字内容时必须提供 `exactKeys`；同一请求若查询图或修订证据，也必须包含 `source`。摘要和 `semanticTexts` 只能帮助寻找入口，不能冒充精确原文。
 - 原文证据可能带有 `relatedOwnerRefs` 及受限图投影摘要，表示该不可变原文单元由结算记录直接关联的图主体。恢复这段原文的时间、地点、状态或因果上下文时，先沿这些摘要核对，再处理其他相似候选；不能用仅因语义相似而返回的无关图候选替换它，也不应在摘要足够时重复展开全部关联入口。
 - 原文证据的 `sourcePosition` 提供同一不可变来源的首尾与当前位置。语义匹配只找到入口，不证明它是来源末端；延续来源时若证据不是 `isEnd=true`，复制 `sourcePosition.sourceRef` 到 `sourceIds` 并使用 `sourceBoundary: "end"` 读取末端有界窗口。需要开篇时才使用 `sourceBoundary: "start"`。

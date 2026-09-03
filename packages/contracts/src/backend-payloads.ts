@@ -1,7 +1,11 @@
 import { z } from "zod"
 
 import { resolvedChapterSchema } from "./chapter.js"
-import { turnDeductionGoalBundleSchema } from "./deduction-goals.js"
+import {
+  deductionGoalNarrativeKindSchema,
+  deductionGoalScaleSchema,
+  turnDeductionGoalBundleSchema,
+} from "./deduction-goals.js"
 import { projectSettingsSchema } from "./project-settings.js"
 
 import { idSchema } from "./ids.js"
@@ -176,6 +180,24 @@ export type WorkspaceReadPayload = z.infer<typeof workspaceReadPayloadSchema>
 export const workspaceSavePayloadSchema = workspaceReadPayloadSchema.extend({ content: z.string() })
 export type WorkspaceSavePayload = z.infer<typeof workspaceSavePayloadSchema>
 
+export const workspaceDeletePayloadSchema = workspaceReadPayloadSchema
+export type WorkspaceDeletePayload = z.infer<typeof workspaceDeletePayloadSchema>
+
+export const workspaceCreateDirectoryPayloadSchema = workspaceReadPayloadSchema
+export type WorkspaceCreateDirectoryPayload = z.infer<typeof workspaceCreateDirectoryPayloadSchema>
+
+export const workspaceImportFilesPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  destination: z.string().min(1),
+  sourcePaths: z.array(z.string().min(1)).min(1).max(200),
+})
+export type WorkspaceImportFilesPayload = z.infer<typeof workspaceImportFilesPayloadSchema>
+
+export const workspaceImportFolderPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  destination: z.string().min(1),
+  sourceFolder: z.string().min(1),
+})
+export type WorkspaceImportFolderPayload = z.infer<typeof workspaceImportFolderPayloadSchema>
+
 export const chapterListPayloadSchema = projectSettingsReadPayloadSchema
 export const chapterReadPayloadSchema = projectSettingsReadPayloadSchema.extend({
   chapterId: z.string().min(1),
@@ -249,6 +271,7 @@ export const synopsisConversationStartPayloadSchema = projectSettingsReadPayload
 export const synopsisConversationListPayloadSchema = projectSettingsReadPayloadSchema
 export const synopsisConversationSendPayloadSchema = projectSettingsReadPayloadSchema.extend({
   message: z.string().trim().min(1).max(8_000),
+  presentation: turnStartPayloadSchema.shape.presentation,
   chapterIntent: chapterNarrativeIntentSchema.optional(),
   model: modelSelectionSchema.optional(),
   maxModelCalls: z.number().int().positive().optional(),
@@ -256,16 +279,27 @@ export const synopsisConversationSendPayloadSchema = projectSettingsReadPayloadS
 })
 export const synopsisConversationRefreshChoicesPayloadSchema = projectSettingsReadPayloadSchema.extend({
   messageId: idSchema.optional(),
+  presentation: turnStartPayloadSchema.shape.presentation,
   chapterIntent: chapterNarrativeIntentSchema.optional(),
   model: modelSelectionSchema.optional(),
   maxModelCalls: z.number().int().positive().optional(),
   deadlineMs: z.number().int().positive().optional(),
 })
 export type SynopsisConversationRefreshChoicesPayload = z.infer<typeof synopsisConversationRefreshChoicesPayloadSchema>
+export const synopsisConversationDiscardLastUserTurnPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  sessionId: idSchema.optional(),
+})
+export type SynopsisConversationDiscardLastUserTurnPayload = z.infer<
+  typeof synopsisConversationDiscardLastUserTurnPayloadSchema
+>
 export const synopsisConversationStreamPeekPayloadSchema = projectSettingsReadPayloadSchema.extend({
   sessionId: idSchema.optional(),
 })
 export type SynopsisConversationStreamPeekPayload = z.infer<typeof synopsisConversationStreamPeekPayloadSchema>
+export const synopsisConversationAcknowledgeBudgetPayloadSchema = projectSettingsReadPayloadSchema
+export type SynopsisConversationAcknowledgeBudgetPayload = z.infer<
+  typeof synopsisConversationAcknowledgeBudgetPayloadSchema
+>
 export const synopsisResolveTurnInputPayloadSchema = projectSettingsReadPayloadSchema.extend({
   sessionId: idSchema.optional(),
 })
@@ -301,25 +335,65 @@ export type ChapterSynopsisGetPayload = z.infer<typeof chapterSynopsisGetPayload
 export const deductionGoalsListPayloadSchema = projectSettingsReadPayloadSchema
 export const deductionGoalsCreatePayloadSchema = projectSettingsReadPayloadSchema.extend({
   content: z.string().trim().min(1).max(2_000),
+  narrativeKind: deductionGoalNarrativeKindSchema.optional(),
+  scale: deductionGoalScaleSchema.optional(),
+  plantChapterSequence: z.number().int().positive().optional(),
+  payoffChapterSequence: z.number().int().positive().optional(),
+}).superRefine((payload, context) => {
+  if (
+    payload.plantChapterSequence !== undefined
+    && payload.payoffChapterSequence !== undefined
+    && payload.plantChapterSequence > payload.payoffChapterSequence
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "plantChapterSequence must be ≤ payoffChapterSequence",
+      path: ["plantChapterSequence"],
+    })
+  }
 })
 export const deductionGoalsUpdatePayloadSchema = projectSettingsReadPayloadSchema.extend({
   goalId: idSchema,
   content: z.string().trim().min(1).max(2_000).optional(),
   action: z.enum(["update_content", "complete", "remove"]).optional(),
+  narrativeKind: deductionGoalNarrativeKindSchema.optional(),
+  scale: deductionGoalScaleSchema.optional(),
+  plantChapterSequence: z.number().int().positive().optional(),
+  payoffChapterSequence: z.number().int().positive().optional(),
 }).superRefine((payload, context) => {
-  const action = payload.action ?? (payload.content === undefined ? undefined : "update_content")
+  const hasTaxonomy = payload.narrativeKind !== undefined
+    || payload.scale !== undefined
+    || payload.plantChapterSequence !== undefined
+    || payload.payoffChapterSequence !== undefined
+  const action = payload.action
+    ?? (payload.content !== undefined || hasTaxonomy ? "update_content" : undefined)
   if (action === undefined) {
     context.addIssue({
       code: "custom",
-      message: "content or action is required",
+      message: "content, taxonomy fields, or action is required",
       path: ["action"],
     })
   }
-  if (action === "update_content" && (payload.content === undefined || payload.content.trim().length === 0)) {
+  if (
+    action === "update_content"
+    && (payload.content === undefined || payload.content.trim().length === 0)
+    && !hasTaxonomy
+  ) {
     context.addIssue({
       code: "custom",
-      message: "content is required for update_content",
+      message: "content or taxonomy fields required for update_content",
       path: ["content"],
+    })
+  }
+  if (
+    payload.plantChapterSequence !== undefined
+    && payload.payoffChapterSequence !== undefined
+    && payload.plantChapterSequence > payload.payoffChapterSequence
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "plantChapterSequence must be ≤ payoffChapterSequence",
+      path: ["plantChapterSequence"],
     })
   }
 })
@@ -359,6 +433,7 @@ export const settingsExtractionListPayloadSchema = projectSettingsReadPayloadSch
 export const settingsExtractionProposalApprovePayloadSchema = projectSettingsReadPayloadSchema.extend({
   taskId: idSchema,
   proposalIds: z.array(idSchema).min(1).max(50),
+  reasonOverride: z.string().max(500).optional(),
 })
 export const settingsExtractionProposalRejectPayloadSchema = projectSettingsReadPayloadSchema.extend({
   taskId: idSchema,
@@ -368,11 +443,44 @@ export type SettingsExtractionListPayload = z.infer<typeof settingsExtractionLis
 export type SettingsExtractionProposalApprovePayload = z.infer<typeof settingsExtractionProposalApprovePayloadSchema>
 export type SettingsExtractionProposalRejectPayload = z.infer<typeof settingsExtractionProposalRejectPayloadSchema>
 
+export const settingsLineageListPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  relativePath: z.string().min(1).max(500),
+  limit: z.number().int().positive().max(200).optional(),
+})
+export const settingsLineageGetCommitPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  commitId: idSchema,
+})
+export const settingsLineageHeadMetaPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  relativePath: z.string().min(1).max(500),
+})
+export const settingsLineagePathsPayloadSchema = projectSettingsReadPayloadSchema
+export const settingsLineageReadAsOfPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  relativePath: z.string().min(1).max(500),
+  chapterSequence: z.number().int().positive(),
+})
+export const settingsLineageRestoreAsCurrentPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  commitId: idSchema,
+  confirmPhrase: z.string().min(1).max(40),
+})
+export const settingsLineageAnnotatePayloadSchema = projectSettingsReadPayloadSchema.extend({
+  commitId: idSchema,
+  storyTime: z.string().max(200).nullable().optional(),
+  summary: z.string().max(500).nullable().optional(),
+})
+export type SettingsLineageListPayload = z.infer<typeof settingsLineageListPayloadSchema>
+export type SettingsLineageGetCommitPayload = z.infer<typeof settingsLineageGetCommitPayloadSchema>
+export type SettingsLineageHeadMetaPayload = z.infer<typeof settingsLineageHeadMetaPayloadSchema>
+export type SettingsLineagePathsPayload = z.infer<typeof settingsLineagePathsPayloadSchema>
+export type SettingsLineageReadAsOfPayload = z.infer<typeof settingsLineageReadAsOfPayloadSchema>
+export type SettingsLineageRestoreAsCurrentPayload = z.infer<typeof settingsLineageRestoreAsCurrentPayloadSchema>
+export type SettingsLineageAnnotatePayload = z.infer<typeof settingsLineageAnnotatePayloadSchema>
+
 export const synopsisStagingPromoteListPayloadSchema = projectSettingsReadPayloadSchema.extend({
   sessionId: idSchema.optional(),
 })
 export const synopsisStagingPromoteApprovePayloadSchema = projectSettingsReadPayloadSchema.extend({
   proposalIds: z.array(idSchema).min(1).max(50),
+  reasonOverride: z.string().max(500).optional(),
 })
 export const synopsisStagingPromoteRejectPayloadSchema = projectSettingsReadPayloadSchema.extend({
   proposalIds: z.array(idSchema).min(1).max(50),
@@ -478,6 +586,10 @@ export const backendPayloadSchemas = {
   "workspace.list": projectWorkspacePayloadSchema,
   "workspace.read": workspaceReadPayloadSchema,
   "workspace.save": workspaceSavePayloadSchema,
+  "workspace.delete": workspaceDeletePayloadSchema,
+  "workspace.createDirectory": workspaceCreateDirectoryPayloadSchema,
+  "workspace.importFiles": workspaceImportFilesPayloadSchema,
+  "workspace.importFolder": workspaceImportFolderPayloadSchema,
   "chapter.list": chapterListPayloadSchema,
   "chapter.read": chapterReadPayloadSchema,
   "chapter.resolve": chapterResolvePayloadSchema,
@@ -496,6 +608,8 @@ export const backendPayloadSchemas = {
   "synopsis.conversation.list": synopsisConversationListPayloadSchema,
   "synopsis.conversation.send": synopsisConversationSendPayloadSchema,
   "synopsis.conversation.refreshChoices": synopsisConversationRefreshChoicesPayloadSchema,
+  "synopsis.conversation.discardLastUserTurn": synopsisConversationDiscardLastUserTurnPayloadSchema,
+  "synopsis.conversation.acknowledgeBudget": synopsisConversationAcknowledgeBudgetPayloadSchema,
   "synopsis.conversation.streamPeek": synopsisConversationStreamPeekPayloadSchema,
   "synopsis.conversation.resolveTurnInput": synopsisResolveTurnInputPayloadSchema,
   "synopsis.conversation.beginTurn": synopsisBeginTurnPayloadSchema,
@@ -513,6 +627,13 @@ export const backendPayloadSchemas = {
   "settings.extraction.list": settingsExtractionListPayloadSchema,
   "settings.extraction.proposal.approve": settingsExtractionProposalApprovePayloadSchema,
   "settings.extraction.proposal.reject": settingsExtractionProposalRejectPayloadSchema,
+  "settings.lineage.list": settingsLineageListPayloadSchema,
+  "settings.lineage.getCommit": settingsLineageGetCommitPayloadSchema,
+  "settings.lineage.headMeta": settingsLineageHeadMetaPayloadSchema,
+  "settings.lineage.paths": settingsLineagePathsPayloadSchema,
+  "settings.lineage.readAsOf": settingsLineageReadAsOfPayloadSchema,
+  "settings.lineage.restoreAsCurrent": settingsLineageRestoreAsCurrentPayloadSchema,
+  "settings.lineage.annotate": settingsLineageAnnotatePayloadSchema,
   "model.list": modelListPayloadSchema,
   "model.profiles.read": modelProfilesReadPayloadSchema,
   "model.profiles.save": modelProfilesSavePayloadSchema,

@@ -165,7 +165,8 @@ export const defaultProjectSettings = Object.freeze(projectSettingsSchema.parse(
     outputTokenLimitMode: "model",
     maxWallTimeMs: defaultTurnExecutionProfile.maxTurnWallTimeMs,
     maxModelRequestTimeMs: 3_600_000,
-    maxRetrievalRounds: 10,
+    backendRequestWaitTimeoutMs: 600_000,
+    maxRetrievalRounds: 30,
     worldDivergenceMode: "world_consistent",
   },
   retrieval: {
@@ -192,6 +193,9 @@ export const defaultProjectSettings = Object.freeze(projectSettingsSchema.parse(
   },
   staging: {
     maxChars: 80_000,
+  },
+  creationDesk: {
+    autoApproveGoalProposals: true,
   },
 }))
 

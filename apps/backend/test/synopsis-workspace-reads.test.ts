@@ -46,6 +46,30 @@ const catalog: WorkspaceCatalogSnapshot = {
       digest: "c",
       size: 800,
     },
+    {
+      relativePath: "表现输出/笔风规则/默认笔风规则.md",
+      entryKind: "file",
+      role: "presentation",
+      version: 1,
+      digest: "p1",
+      size: 120,
+    },
+    {
+      relativePath: "表现输出/描写规则/默认描写规则.md",
+      entryKind: "file",
+      role: "presentation",
+      version: 1,
+      digest: "p2",
+      size: 140,
+    },
+    {
+      relativePath: "世界推演规则/用户规则.md",
+      entryKind: "file",
+      role: "world_rules",
+      version: 1,
+      digest: "w1",
+      size: 90,
+    },
   ],
 }
 
@@ -53,6 +77,7 @@ function readRequest(partial: {
   exactKeys?: string[]
   semanticTexts?: string[]
   readMode?: "read_full" | "list" | "grep"
+  sourceKinds?: Array<"reference" | "rule" | "source">
 }): Parameters<typeof selectSynopsisWorkspaceEntries>[1] {
   return {
     requestId: "22222222-2222-4222-8222-222222222222",
@@ -65,7 +90,7 @@ function readRequest(partial: {
       directions: ["both"],
       maxCandidates: 24,
       maxDepth: 2,
-      sourceKinds: ["reference"],
+      sourceKinds: partial.sourceKinds ?? ["reference"],
       ...(partial.readMode === undefined ? {} : { readMode: partial.readMode }),
     },
   }
@@ -138,5 +163,50 @@ describe("synopsis workspace reads helpers", () => {
       semanticTexts: ["灵根"],
       readMode: "grep",
     }))).toContain("grep(reference):")
+  })
+
+  it("selects presentation rules when sourceKinds includes rule", () => {
+    const selected = selectSynopsisWorkspaceEntries(
+      catalog,
+      readRequest({
+        exactKeys: ["表现输出/笔风规则/默认笔风规则.md"],
+        sourceKinds: ["rule"],
+      }),
+      5,
+      false,
+    )
+    expect(selected.map((entry) => entry.relativePath)).toEqual([
+      "表现输出/笔风规则/默认笔风规则.md",
+    ])
+  })
+
+  it("still selects world rules under rule sourceKind", () => {
+    const selected = selectSynopsisWorkspaceEntries(
+      catalog,
+      readRequest({
+        exactKeys: ["世界推演规则/用户规则.md"],
+        sourceKinds: ["rule"],
+      }),
+      5,
+      false,
+    )
+    expect(selected.map((entry) => entry.relativePath)).toEqual([
+      "世界推演规则/用户规则.md",
+    ])
+  })
+
+  it("unlocks presentation when exact path mentions 笔风/描写 even without rule kind", () => {
+    const selected = selectSynopsisWorkspaceEntries(
+      catalog,
+      readRequest({
+        exactKeys: ["表现输出/笔风规则/默认笔风规则.md"],
+        sourceKinds: ["reference"],
+      }),
+      5,
+      false,
+    )
+    expect(selected.map((entry) => entry.relativePath)).toEqual([
+      "表现输出/笔风规则/默认笔风规则.md",
+    ])
   })
 })

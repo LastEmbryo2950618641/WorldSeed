@@ -1,3 +1,5 @@
+export * from "./chapter-temporal-source-resolver.js"
+export * from "./synopsis-temporal-reads.js"
 export * from "./chapter-context-resolver.js"
 export * from "./chapter-resolve-service.js"
 export * from "./chapter-revision-conversation-service.js"

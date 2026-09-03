@@ -16,14 +16,47 @@ export type BackendProcessOptions = Readonly<{
   diagnostics: RuntimeDiagnosticsConfig
 }>
 
+export type BackendWaitTimeoutInfo = Readonly<{
+  requestId: string
+  method: string
+  waitTimeoutMs: number
+  elapsedMs: number
+}>
+
+export type BackendInvokeOptions = Readonly<{
+  /** Soft wait interval before prompting; does not auto-reject. Default 10 minutes. */
+  waitTimeoutMs?: number
+  onWaitTimeout?: (info: BackendWaitTimeoutInfo) => void
+}>
+
+export class BackendRequestAbandonedError extends Error {
+  public readonly requestId: string
+  public readonly method: string
+
+  public constructor(requestId: string, method: string) {
+    super(`Backend request abandoned: ${method}`)
+    this.name = "BackendRequestAbandonedError"
+    this.requestId = requestId
+    this.method = method
+  }
+}
+
+const DEFAULT_WAIT_TIMEOUT_MS = 600_000
+
+type PendingRequest = {
+  resolve: (response: ClientResponse) => void
+  reject: (error: Error) => void
+  timer: NodeJS.Timeout | undefined
+  waitTimeoutMs: number
+  method: string
+  startedAtMs: number
+  onWaitTimeout?: (info: BackendWaitTimeoutInfo) => void
+}
+
 export class BackendProcess {
   private child: UtilityProcess | undefined
   private port: MessagePortMain | undefined
-  private readonly pending = new Map<string, {
-    resolve: (response: ClientResponse) => void
-    reject: (error: Error) => void
-    timeout: NodeJS.Timeout
-  }>()
+  private readonly pending = new Map<string, PendingRequest>()
 
   public start(options: BackendProcessOptions): void {
     if (this.child !== undefined) return
@@ -52,26 +85,58 @@ export class BackendProcess {
     this.port = port1
   }
 
-  public invoke(request: ClientRequest): Promise<ClientResponse> {
+  public invoke(request: ClientRequest, options: BackendInvokeOptions = {}): Promise<ClientResponse> {
     if (this.port === undefined) return Promise.reject(new Error("Backend Utility Process is not running"))
     const startedAtMs = Date.now()
+    const waitTimeoutMs = options.waitTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS
     runtimeLog("debug", "backend-process", "request.sent", {
       requestId: request.requestId,
       method: request.method,
+      waitTimeoutMs,
     })
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pending.delete(request.requestId)
-        runtimeLog("error", "backend-process", "request.timed_out", {
-          requestId: request.requestId,
-          method: request.method,
-          elapsedMs: Date.now() - startedAtMs,
-        })
-        reject(new Error(`Backend request timed out: ${request.method}`))
-      }, 180_000)
-      this.pending.set(request.requestId, { resolve, reject, timeout })
+      const pending: PendingRequest = {
+        resolve,
+        reject,
+        timer: undefined,
+        waitTimeoutMs,
+        method: request.method,
+        startedAtMs,
+        ...(options.onWaitTimeout === undefined ? {} : { onWaitTimeout: options.onWaitTimeout }),
+      }
+      this.pending.set(request.requestId, pending)
+      this.armSoftWaitTimer(request.requestId, pending)
       this.port?.postMessage(request)
     })
+  }
+
+  /** Extend soft wait by another configured interval after the user chooses to continue. */
+  public continueWait(requestId: string): boolean {
+    const pending = this.pending.get(requestId)
+    if (pending === undefined) return false
+    runtimeLog("info", "backend-process", "request.wait_continued", {
+      requestId,
+      method: pending.method,
+      waitTimeoutMs: pending.waitTimeoutMs,
+      elapsedMs: Date.now() - pending.startedAtMs,
+    })
+    this.armSoftWaitTimer(requestId, pending)
+    return true
+  }
+
+  /** Stop waiting for a response; late backend replies are ignored. */
+  public abandon(requestId: string): boolean {
+    const pending = this.pending.get(requestId)
+    if (pending === undefined) return false
+    if (pending.timer !== undefined) clearTimeout(pending.timer)
+    this.pending.delete(requestId)
+    runtimeLog("info", "backend-process", "request.abandoned", {
+      requestId,
+      method: pending.method,
+      elapsedMs: Date.now() - pending.startedAtMs,
+    })
+    pending.reject(new BackendRequestAbandonedError(requestId, pending.method))
+    return true
   }
 
   public close(): void {
@@ -82,10 +147,28 @@ export class BackendProcess {
     this.child = undefined
   }
 
+  private armSoftWaitTimer(requestId: string, pending: PendingRequest): void {
+    if (pending.timer !== undefined) clearTimeout(pending.timer)
+    pending.timer = setTimeout(() => {
+      const current = this.pending.get(requestId)
+      if (current === undefined) return
+      current.timer = undefined
+      const info: BackendWaitTimeoutInfo = {
+        requestId,
+        method: current.method,
+        waitTimeoutMs: current.waitTimeoutMs,
+        elapsedMs: Date.now() - current.startedAtMs,
+      }
+      runtimeLog("warn", "backend-process", "request.wait_timeout", info)
+      // Soft timeout: keep the pending request alive until continueWait or abandon.
+      current.onWaitTimeout?.(info)
+    }, pending.waitTimeoutMs)
+  }
+
   private receive(response: ClientResponse): void {
     const pending = this.pending.get(response.requestId)
     if (pending === undefined) return
-    clearTimeout(pending.timeout)
+    if (pending.timer !== undefined) clearTimeout(pending.timer)
     this.pending.delete(response.requestId)
     runtimeLog(response.ok ? "debug" : "error", "backend-process", "response.received", {
       requestId: response.requestId,
@@ -101,7 +184,7 @@ export class BackendProcess {
       error: errorDetails(error),
     })
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timeout)
+      if (pending.timer !== undefined) clearTimeout(pending.timer)
       pending.reject(error)
     }
     this.pending.clear()

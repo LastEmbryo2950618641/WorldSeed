@@ -332,12 +332,37 @@ function synopsisRolesForRequest(
   allowWorkspaceChapterReads: boolean,
 ): Set<WorkspaceCatalogEntry["role"]> {
   const roles = new Set<WorkspaceCatalogEntry["role"]>()
-  if (request.query.sourceKinds.includes("rule")) roles.add("world_rules")
+  if (request.query.sourceKinds.includes("rule")) {
+    roles.add("world_rules")
+    // Presentation rules live under 表现输出/ and share the "rule" sourceKind in discuss ReAct.
+    roles.add("presentation")
+  }
   if (request.query.sourceKinds.includes("reference")) {
     roles.add("settings")
     roles.add("references")
     roles.add("staging")
   }
   if (allowWorkspaceChapterReads && request.query.sourceKinds.includes("source")) roles.add("chapters")
+  if (requestMentionsPresentationRules(request)) roles.add("presentation")
   return roles
+}
+
+/** True when the read query explicitly targets 描写/笔风规则 paths or labels. */
+export function requestMentionsPresentationRules(
+  request: PhaseResultEnvelope["requestedReads"][number],
+): boolean {
+  return [...request.query.exactKeys, ...request.query.semanticTexts].some((term) => {
+    const normalized = term.trim().replace(/\\/gu, "/")
+    return (
+      normalized.startsWith("表现输出/")
+      || normalized.includes("描写规则")
+      || normalized.includes("笔风规则")
+    )
+  })
+}
+
+/** Validate agent presentation rule write paths (描写/笔风 only). */
+export function isPresentationRuleMarkdownPath(path: string): boolean {
+  const normalized = path.trim().replace(/\\/gu, "/")
+  return /^表现输出\/(?:描写规则|笔风规则)\/[^/][^\n]*\.md$/u.test(normalized)
 }

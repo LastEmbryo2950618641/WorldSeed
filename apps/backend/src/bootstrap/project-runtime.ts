@@ -17,8 +17,10 @@ import {
   ChapterSynopsisService,
   DeductionGoalsService,
   SettingsExtractionService,
+  SettingsLineageService,
   StagingPromoteService,
   SynopsisConversationService,
+  ChapterTemporalSourceResolver,
   buildSourceUnitExactKeys,
   HistoryManifestBuilder,
   HistoryCheckoutService,
@@ -38,6 +40,7 @@ import {
   SqliteChapterSynopsisRepository,
   SqliteDeductionGoalsRepository,
   SqliteSettingsExtractionRepository,
+  SqliteSettingsLineageRepository,
   SqliteSynopsisStagingPromoteRepository,
   SqliteChapterIndexRepository,
   SqliteEvidenceStore,
@@ -55,7 +58,7 @@ import {
 } from "../infrastructure/sqlite/index.js"
 import type { StoredPhaseRun, StoredTask, TaskCheckpointRecord, TurnFinalizationRecord } from "../application/turns/ports/index.js"
 import { NodePromptResourceAdapter } from "../infrastructure/prompts/index.js"
-import { DuckDuckGoWebResearchAdapter } from "../infrastructure/web-research/index.js"
+import { createDefaultWebResearchPort } from "../infrastructure/web-research/index.js"
 import { buildTurnMonitorPhases } from "../application/chapters/turn-handoff.js"
 import type { Kysely } from "kysely"
 import type { ProjectDatabase } from "../infrastructure/sqlite/database-types.js"
@@ -102,6 +105,7 @@ export class ProjectRuntime {
   }
 
   public createTurnOrchestrator(model: AIModelPort, createId: () => string, now: () => number): TurnOrchestrator {
+    const chapterIndex = new SqliteChapterIndexRepository(this.database)
     return new TurnOrchestrator({
       taskScopes: new SqliteTaskScopeRepository(this.database),
       persistence: new SqliteTurnPersistence(this.database, createId),
@@ -116,10 +120,13 @@ export class ProjectRuntime {
       commit: new SqliteScopeCommitRepository(this.database),
       internalStore: this.internalStorePort,
       workspace: this.workspace,
-      webResearch: new DuckDuckGoWebResearchAdapter(),
+      webResearch: createDefaultWebResearchPort(),
       chapterSynopsis: this.createChapterSynopsisService(),
       synopsisConversation: this.createSynopsisConversationService(),
       settingsExtraction: this.createSettingsExtractionService(),
+      settingsLineage: this.createSettingsLineageService(),
+      chapterIndex,
+      chapterTemporal: new ChapterTemporalSourceResolver(this.database, chapterIndex),
       createId,
       idAllocator: new SqliteProjectIdAllocator(this.database, now),
       now,
@@ -214,11 +221,35 @@ export class ProjectRuntime {
     mode: "restore" | "continue_from" | "return_previous_round"
     startedAtMs: number
   }): Promise<HistoryCheckoutResult> {
-    return this.createHistoryCheckoutService().checkout({
+    const captureSynopsis = input.mode === "return_previous_round"
+    const captured = captureSynopsis
+      ? await this.createChapterSynopsisService().captureSynopsisForRematerialize({
+        projectId: this.projectId,
+        workspaceRootRef: this.workspaceRootRef,
+      })
+      : []
+
+    const result = await this.createHistoryCheckoutService().checkout({
       projectId: this.projectId,
       workspaceRootRef: this.workspaceRootRef,
       ...input,
     })
+    const realigned = await this.createSettingsLineageService().realignAfterHistoryRestore(input.entryId)
+    if (realigned > 0) {
+      runtimeLog("info", "project-runtime", "settings_lineage.history_restore.realigned", {
+        projectId: this.projectId,
+        entryId: input.entryId,
+        pathCount: realigned,
+      })
+    }
+    if (captureSynopsis && captured.length > 0) {
+      await this.createChapterSynopsisService().rematerializeAfterHistoryCheckout({
+        projectId: this.projectId,
+        workspaceRootRef: this.workspaceRootRef,
+        captured,
+      })
+    }
+    return result
   }
 
   public async returnPreviousRound(input: {
@@ -227,9 +258,7 @@ export class ProjectRuntime {
   }): Promise<HistoryCheckoutResult> {
     const service = this.createHistoryCheckoutService()
     const entry = await service.findPreviousAutomaticEntry(this.projectId)
-    return service.checkout({
-      projectId: this.projectId,
-      workspaceRootRef: this.workspaceRootRef,
+    return this.checkoutHistory({
       operationId: input.operationId,
       entryId: entry.entryId,
       mode: "return_previous_round",
@@ -304,6 +333,47 @@ export class ProjectRuntime {
 
   public async saveMarkdown(relativePath: string, content: string): Promise<void> {
     await this.workspace.saveUserMarkdown(this.workspaceRootRef, relativePath, content)
+    await this.createSettingsLineageService().recordUpsert({
+      relativePath,
+      markdown: content,
+      sourceKind: "workspace_save",
+      summary: "你保存了文件",
+    })
+  }
+
+  public async deleteMarkdown(relativePath: string): Promise<void> {
+    await this.workspace.removeUserMarkdown(this.workspaceRootRef, relativePath)
+  }
+
+  public async deleteEmptyVolumeDirectory(relativePath: string): Promise<void> {
+    await this.workspace.removeEmptyVolumeDirectory(this.workspaceRootRef, relativePath)
+  }
+
+  public async createDirectory(relativePath: string): Promise<void> {
+    await this.workspace.createUserDirectory(this.workspaceRootRef, relativePath)
+  }
+
+  public async importMarkdownFiles(destination: string, sourcePaths: readonly string[]): Promise<number> {
+    return this.workspace.importMarkdownFiles(this.workspaceRootRef, destination, sourcePaths)
+  }
+
+  public async importMarkdownFolder(destination: string, sourceFolder: string): Promise<number> {
+    return this.workspace.importMarkdownFolder(this.workspaceRootRef, destination, sourceFolder)
+  }
+
+  public createSettingsLineageService(): SettingsLineageService {
+    return new SettingsLineageService({
+      projectId: this.projectId,
+      workspaceRootRef: this.workspaceRootRef,
+      workspace: this.workspace,
+      repository: new SqliteSettingsLineageRepository(this.database),
+      createId: randomUUID,
+      now: Date.now,
+    })
+  }
+
+  public async ensureSettingsLineageSeeded(): Promise<void> {
+    await this.createSettingsLineageService().seedFromWorkspace()
   }
 
   public createChapterResolveService(): ChapterResolveService {
@@ -425,10 +495,15 @@ export class ProjectRuntime {
       conversation: new SqliteSynopsisConversationRepository(this.database),
       goals: this.createDeductionGoalsService(),
       stagingPromote: this.createStagingPromoteService(),
+      settingsLineage: this.createSettingsLineageService(),
+      chapterIndex: new SqliteChapterIndexRepository(this.database),
+      documents: new SqliteDocumentRepository(this.database),
+      internalStore: this.internalStorePort,
+      chapterTemporal: new ChapterTemporalSourceResolver(this.database, new SqliteChapterIndexRepository(this.database)),
       workspace: this.workspace,
       catalog: new NodeWorkspaceCatalogAdapter(this.workspace),
       prompts: this.createPromptResourcePort(),
-      webResearch: new DuckDuckGoWebResearchAdapter(),
+      webResearch: createDefaultWebResearchPort(),
       readProjectSettings: () => this.readSettings(),
       readTurnMonitor: async () => {
         const row = await this.database.selectFrom("tasks")
@@ -469,21 +544,44 @@ export class ProjectRuntime {
   }
 
   public createStagingPromoteService(): StagingPromoteService {
+    const lineage = this.createSettingsLineageService()
+    const sessions = new SqliteSynopsisConversationRepository(this.database)
     return new StagingPromoteService({
       proposals: new SqliteSynopsisStagingPromoteRepository(this.database),
       goals: this.createDeductionGoalsService(),
       workspace: this.workspace,
       createId: randomUUID,
       now: Date.now,
+      lineage,
+      resolveSessionChapterSequence: async (sessionId) => {
+        const session = await sessions.findSession(sessionId)
+        return session?.chapterSequence
+      },
     })
   }
 
   public createSettingsExtractionService(): SettingsExtractionService {
+    const lineage = this.createSettingsLineageService()
     return new SettingsExtractionService({
       proposals: new SqliteSettingsExtractionRepository(this.database),
       workspace: this.workspace,
       createId: randomUUID,
       now: Date.now,
+      lineage,
+      resolveCausingChapterSequence: async (taskId) => {
+        const runs = await this.listPhaseRuns(taskId)
+        for (let index = runs.length - 1; index >= 0; index -= 1) {
+          const request = runs[index]?.request
+          if (request === null || typeof request !== "object") continue
+          const envelope = request as { input?: unknown }
+          if (envelope.input === null || typeof envelope.input !== "object") continue
+          const sequence = (envelope.input as { chapterSequence?: unknown }).chapterSequence
+          if (typeof sequence === "number" && Number.isFinite(sequence) && sequence > 0) {
+            return sequence
+          }
+        }
+        return undefined
+      },
     })
   }
 

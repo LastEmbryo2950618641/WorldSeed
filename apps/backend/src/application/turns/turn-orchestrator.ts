@@ -47,6 +47,7 @@ import {
   appendContextSegments,
   assembleChapterDocument,
   assertCitationsWereRead,
+  assertUniqueVolumeSequence,
   createTurnContext,
   deriveChapterPublishPath,
   digest,
@@ -117,6 +118,14 @@ import {
 } from "../settings/world-divergence-policy.js"
 import { chapterNarrativeIntentPhaseAppendix } from "../settings/chapter-narrative-intent-policy.js"
 import { truncateChapterBodyDigest } from "../chapters/turn-handoff.js"
+import type { SettingsLineageService } from "../settings/settings-lineage-service.js"
+import type { ChapterTemporalSourceResolver } from "../chapters/chapter-temporal-source-resolver.js"
+import type { SqliteChapterIndexRepository } from "../../infrastructure/sqlite/repositories/sqlite-chapter-index-repository.js"
+import {
+  executeSynopsisTemporalReads,
+  isTemporalReadRequest,
+  MAX_TEMPORAL_READS_PER_ROUND,
+} from "../chapters/synopsis-temporal-reads.js"
 import { settingsExtractionArtifactSchema } from "@worldseed/prompt-contracts"
 
 const turnModelPhases: readonly AIPhase[] = [
@@ -355,6 +364,9 @@ export type TurnOrchestratorDependencies = Readonly<{
   chapterSynopsis?: ChapterSynopsisService
   synopsisConversation?: SynopsisConversationService
   settingsExtraction?: SettingsExtractionService
+  settingsLineage?: SettingsLineageService
+  chapterIndex?: SqliteChapterIndexRepository
+  chapterTemporal?: ChapterTemporalSourceResolver
   createId: () => string
   idAllocator?: ProjectIdAllocatorPort
   now: () => number
@@ -1690,7 +1702,11 @@ export class TurnOrchestrator {
       state.createdAtMs,
     )
 
-    const chapterPath = deriveChapterPublishPath(naming.heading)
+    const chapterPath = await this.resolveUniqueChapterPublishPath(
+      input.workspaceRootRef,
+      naming.heading,
+      naming.volumeFolderName,
+    )
     const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
     const finalization: TurnFinalizationRecord = {
       finalizationId: this.dependencies.createId(),
@@ -2525,6 +2541,7 @@ export class TurnOrchestrator {
         currentEvidence,
         includesVerificationProbe ? [] : currentVisibleEvidence,
         input.input.allowWorkspaceChapterReads ?? true,
+        input.input.chapterSequence,
         async (request, readExecution, requestEvidence, contextRead) => {
           if ((input.phase !== "semantic_review" && input.phase !== "graph_governance_review") || request.verificationProbe === undefined) return
           const probeIndex = (currentVerificationProbeExecutions.at(-1)?.probeIndex ?? -1) + 1
@@ -2729,6 +2746,7 @@ export class TurnOrchestrator {
       input.existingEvidence,
       [],
       input.input.allowWorkspaceChapterReads ?? true,
+      input.input.chapterSequence,
     )
     this.log("debug", "graph.capacity.evidence_loaded", {
       taskId: input.context.taskId,
@@ -3050,6 +3068,7 @@ export class TurnOrchestrator {
     existingEvidence: readonly TurnReadEvidence[],
     budgetEvidence: readonly TurnReadEvidence[],
     allowWorkspaceChapterReads: boolean,
+    chapterSequence: number,
     onReadExecution?: (
       request: PhaseResultEnvelope["requestedReads"][number],
       execution: ReadExecutionRecord,
@@ -3090,6 +3109,7 @@ export class TurnOrchestrator {
     let evidenceBudgetTruncated = false
     let includedRelatedOwnerRefs = 0
     let omittedRelatedOwnerRefs = 0
+    let temporalReadsThisRound = 0
     let nextContext = context
     if (selectedRequests.length < requests.length) {
       this.log("debug", "retrieval.requests.truncated", {
@@ -3104,6 +3124,117 @@ export class TurnOrchestrator {
       const retrievalRequestStartedAtMs = this.dependencies.now()
       const requestReadRefs = new Set<string>()
       const requestGraphRefs = new Set<string>()
+      if (
+        isTemporalReadRequest(request)
+        && this.dependencies.settingsLineage !== undefined
+        && this.dependencies.chapterTemporal !== undefined
+        && this.dependencies.chapterIndex !== undefined
+      ) {
+        const temporalRejected = temporalReadsThisRound >= MAX_TEMPORAL_READS_PER_ROUND
+        if (!temporalRejected) {
+          temporalReadsThisRound += 1
+          const temporalItems = await executeSynopsisTemporalReads({
+            projectId,
+            sessionChapterSequence: chapterSequence,
+            catalog: catalogSnapshot,
+            requests: [request],
+            existingEvidence: [...existingEvidence, ...evidence],
+            settingsLineage: this.dependencies.settingsLineage,
+            chapterIndex: this.dependencies.chapterIndex,
+            documents: this.dependencies.documents,
+            internalStore: this.dependencies.internalStore,
+            chapterTemporal: this.dependencies.chapterTemporal,
+            createId: this.dependencies.createId,
+            ...(settings?.maxCandidates === undefined
+              ? {}
+              : { maxCandidates: settings.maxCandidates }),
+          })
+          for (const item of temporalItems) {
+            const evidenceKey = `${item.ownerId}:${item.digest}`
+            if (seenEvidenceKeys.has(evidenceKey)) {
+              const existing = [...existingEvidence, ...evidence].find((entry) => (
+                `${entry.ownerId}:${entry.digest}` === evidenceKey
+              ))
+              if (existing !== undefined) requestReadRefs.add(existing.readId)
+              continue
+            }
+            const tokenEstimate = estimateRetrievalEvidenceTokens(item)
+            if (evidenceTokens + tokenEstimate > evidenceTokenLimit) {
+              evidenceBudgetTruncated = true
+              continue
+            }
+            seenEvidenceKeys.add(evidenceKey)
+            evidenceTokens += tokenEstimate
+            const evidenceId = await this.nextPersistentId(projectId, "evidence")
+            const sourceKind = item.ownerKind.startsWith("settings-lineage") ? "workspace" as const : "chapter" as const
+            const storedEvidence = await this.dependencies.evidence.writeImmutable({
+              evidenceId,
+              projectId,
+              contextId: context.contextId,
+              sourceKind,
+              ownerId: item.ownerId,
+              version: item.digest.slice(0, 16),
+              digest: item.digest,
+              locator: item.ownerKind.startsWith("settings-lineage")
+                ? `settings-lineage://${item.ownerId}`
+                : `source-temporal://${item.ownerId}`,
+              content: item.semanticText,
+              readReason: request.reason,
+              createdAtMs: this.dependencies.now(),
+            })
+            returned.push({
+              requestId: request.requestId,
+              readId: storedEvidence.evidenceId,
+              reason: request.reason,
+              segment: {
+                segmentId: this.dependencies.createId(),
+                kind: "committed_read",
+                ownerIds: [storedEvidence.evidenceId],
+                visibility: "committed",
+                canonicalDigest: storedEvidence.digest,
+                tokenEstimate,
+                sequence: context.segments.length + returned.length,
+              },
+            })
+            evidence.push({ ...item, readId: storedEvidence.evidenceId })
+            requestReadRefs.add(storedEvidence.evidenceId)
+          }
+        }
+        const readExecution = {
+          requestId: request.requestId,
+          operationId: request.requestId,
+          returnedReadRefs: [...requestReadRefs],
+          returnedGraphRefs: [...requestGraphRefs],
+          resultDigest: digest({
+            requestId: request.requestId,
+            query: request.query,
+            returnedReadRefs: [...requestReadRefs],
+            returnedGraphRefs: [...requestGraphRefs],
+          }),
+        }
+        readExecutions.push(readExecution)
+        const contextRead = {
+          requestId: request.requestId,
+          returned: returned
+            .filter((item) => item.requestId === request.requestId)
+            .map(({ requestId: ignoredRequestId, ...item }) => {
+              void ignoredRequestId
+              return item
+            }),
+          rejectedReadIds: temporalRejected ? [request.requestId] : [],
+        }
+        nextContext = recordContextRead(nextContext, contextRead)
+        await onReadExecution?.(request, readExecution, evidence.slice(evidenceStartIndex), contextRead)
+        this.log("debug", "retrieval.temporal.completed", {
+          taskId: context.taskId,
+          requestId: request.requestId,
+          purpose: request.query.purpose ?? "current",
+          asOfChapterSequence: request.query.asOfChapterSequence,
+          evidenceCount: evidence.length - evidenceStartIndex,
+          elapsedMs: this.dependencies.now() - retrievalRequestStartedAtMs,
+        })
+        continue
+      }
       const maxCandidates = Math.min(request.query.maxCandidates, settings?.maxCandidates ?? request.query.maxCandidates)
       const maxDepth = Math.min(request.query.maxDepth, settings?.maxDepth ?? request.query.maxDepth)
       const workspaceEntries = selectWorkspaceEntries(
@@ -3861,7 +3992,11 @@ export class TurnOrchestrator {
     content: string,
     createdAtMs: number,
   ): Promise<void> {
-    const publishPath = deriveChapterPublishPath(naming.heading)
+    const publishPath = await this.resolveUniqueChapterPublishPath(
+      input.workspaceRootRef,
+      naming.heading,
+      naming.volumeFolderName,
+    )
     const contentDigest = digest(content)
     const existing = await this.dependencies.documents.findVersion(input.projectId, sourceId, scopeId)
     if (existing !== undefined) {
@@ -3886,6 +4021,19 @@ export class TurnOrchestrator {
       digest: contentDigest,
       createdAtMs,
     })
+  }
+
+  private async resolveUniqueChapterPublishPath(
+    workspaceRootRef: string,
+    heading: string,
+    volumeFolderName: string,
+  ): Promise<string> {
+    const existingVolumes = await this.dependencies.workspace.listVolumeFolderNames(workspaceRootRef)
+    const uniqueness = assertUniqueVolumeSequence(volumeFolderName, existingVolumes)
+    if (!uniqueness.ok) {
+      throw new Error(uniqueness.reason)
+    }
+    return deriveChapterPublishPath(heading, volumeFolderName)
   }
 
   private async stageGraphAndSettlement(
@@ -5371,6 +5519,17 @@ function splitSourceUnits(content: string): string[] {
   return content.split(/\n\s*\n/u).map((unit) => unit.trim()).filter((unit) => unit.length > 0)
 }
 
+function formatDeductionGoalTaxonomyPrefix(goal: TurnDeductionGoalBundle["activeGoals"][number]): string {
+  const kind = goal.narrativeKind === "foreshadow"
+    ? "伏笔"
+    : goal.narrativeKind === "climax"
+      ? "高潮"
+      : "目标"
+  const scale = goal.scale === "medium" ? "中" : goal.scale === "long" ? "长" : "短"
+  if (goal.narrativeKind === "general" && goal.scale === "short") return ""
+  return `[${kind}·${scale}] `
+}
+
 function formatDeductionGoalConstraintMarkdown(bundle: TurnDeductionGoalBundle): string {
   const progressByGoal = new Map(
     bundle.chapterProgress.map((item) => [item.goalId, item] as const),
@@ -5380,7 +5539,7 @@ function formatDeductionGoalConstraintMarkdown(bundle: TurnDeductionGoalBundle):
     const expectation = progress === undefined || progress.summary.trim().length === 0
       ? "（未填写本章 planned）"
       : `${progress.summary}${progress.lockedAtMs === undefined ? "" : "（locked）"}`
-    return `- [${goal.content}] 本章预期：${expectation}`
+    return `- ${formatDeductionGoalTaxonomyPrefix(goal)}${goal.content} — 本章预期：${expectation}`
   })
   if (lines.length === 0) {
     return `## 推演目标约束（第 ${String(bundle.chapterSequence)} 章）\n\n（本轮无活跃推演目标）`

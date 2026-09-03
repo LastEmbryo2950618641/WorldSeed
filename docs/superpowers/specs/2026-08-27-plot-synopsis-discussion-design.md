@@ -47,11 +47,13 @@
 
 ### 3.5 推演完成：正文落盘与梗概关联
 
+> **2026-09-02 修订：** 工作区 `[剧情梗概].md` **不再删除**。发布后与 `[剧情细纲].md` 一并**留盘并树折叠**到正式正文下。权威说明见 [章细纲生命周期](./2026-09-02-chapter-outline-lifecycle-design.md)。
+
 推演成功、`chapter_publisher` 写入正式章节后：
 
-1. **归档梗概文本**（在删除工作区梗概文件 **之前**）：将当前梗概全文写入 **`ChapterSynopsis` 关联记录**（按 `chapterId` / `chapterSequence` 绑定正式章路径）；
-2. **移除工作区梗概文件**：删除或归档 `章节正文/…[剧情梗概].md`（树上不再作为可编辑主入口，即「覆盖原本的剧情梗概 **占位文件**」）；
-3. **正式章成为主文件**：`章节正文/第N章 标题.md` 为唯一正文入口；梗概内容 **不** 写入该文件，仅通过关联记录与 UI 查看。
+1. **归档梗概文本**：将当前梗概全文写入 **`ChapterSynopsis` 关联记录**（按 `chapterId` / `chapterSequence` 绑定正式章路径）；若存在细纲，按章细纲设计冻结或保留文件；
+2. **保留工作区前档文件**：`…[剧情梗概].md` / `…[剧情细纲].md` **不删除**；树上不再作为默认主入口，折叠关联到正式章；
+3. **正式章成为表面文件**：`章节正文/第N章 标题.md` 为树默认入口；梗概/细纲内容 **不** 合并进该文件，经关联 UI / 右侧栏查看。
 
 ```ts
 type ChapterSynopsisSource = "synopsis_file" | "conversation" | "turn_input"
@@ -68,7 +70,7 @@ type ChapterSynopsis = Readonly<{
 }>
 ```
 
-**归档优先级**（与 `turn.start` 输入一致）：梗概文件全文 > 对话汇总 > `turn.start` 的 `userInput`。
+**归档优先级**（与 `turn.start` 输入一致；有细纲时主输入为细纲，见章细纲设计 §7）：细纲全文（若有）> 梗概文件全文 > 对话汇总 > `turn.start` 的 `userInput`。
 
 ### 3.2 生命周期
 
@@ -80,7 +82,7 @@ stateDiagram-v2
   协作中 --> 可推演: 用户确认或点「开始推演」
   可推演 --> 推演中: turn.start
   推演中 --> 正文已发布: turn 完成 + publisher
-  正文已发布 --> [*]: 梗概文件移除，ChapterSynopsis 保留
+  正文已发布 --> [*]: 梗概/细纲文件保留并折叠，ChapterSynopsis 保留
 ```
 
 1. **开始讨论**：`synopsis.conversation.start`（或首条 `send`）→ 创建占位 `.md`（空或 `# 第N章 … 剧情梗概`）；
@@ -107,7 +109,8 @@ stateDiagram-v2
 
 ```text
 章节正文/*[剧情梗概].md  →  user + synopsis_service（platform）可写
-章节正文/*.md（无后缀）   →  仍仅 chapter_publisher（正式章）
+章节正文/*[剧情细纲].md  →  user + synopsis/outline 服务（platform）可写
+章节正文/*.md（无上述后缀）→  仍仅 chapter_publisher（正式章）
 ```
 
 ---
@@ -141,7 +144,8 @@ stateDiagram-v2
 
 | 条件 | `turn.start` 的引导内容 |
 | --- | --- |
-| 当前章 `{seq}` 存在 `章节正文/…[剧情梗概].md` | **文件当前全文**（含用户手工编辑） |
+| 存在 `…[剧情细纲].md` | **细纲全文为主** + 梗概附录（冲突以细纲为准）；见 [章细纲生命周期 §7](./2026-09-02-chapter-outline-lifecycle-design.md) |
+| 仅有 `…[剧情梗概].md` | **梗概文件当前全文**（含用户手工编辑） |
 | 不存在梗概文件 | **对话线程汇总**（应用将 `synopsis_conversation_messages` 拼为结构化 `userInput` 前缀） |
 
 优先级：**文件 > 对话**。有文件时即使对话更长，也以文件为准。
@@ -160,8 +164,8 @@ function resolveTurnBootstrapInput(session): string {
 ### 5.4 推演后
 
 - 正式章节由 `turn` + `chapter_publisher` 写入 `章节正文/第N章 标题.md`；
-- 梗概全文写入 **`ChapterSynopsis`** 后与正式章关联；工作区 `…[剧情梗概].md` **移除**（见 §3.5）；
-- 用户打开正式章时，可通过右侧 **「剧情梗概」** 按钮查看冻结梗概（见 §6.2）。
+- 梗概全文写入 **`ChapterSynopsis`** 后与正式章关联；工作区 `…[剧情梗概].md` / `…[剧情细纲].md` **保留并树折叠**（见 §3.5 与 [章细纲生命周期](./2026-09-02-chapter-outline-lifecycle-design.md)）；
+- 用户打开正式章时，可通过右侧栏查看关联梗概/细纲（及冻结快照若有）。
 
 ---
 
@@ -224,7 +228,7 @@ function resolveTurnBootstrapInput(session): string {
 | `synopsis.conversation.send` | 用户消息 → 模型 → 可选 `synopsisBody` **覆盖写文件** + choices |
 | `synopsis.conversation.resolveTurnInput` | 返回本次 `turn.start` 将使用的正文（文件或对话汇总） |
 | `chapter.synopsis.get` | 按 `chapterId` 或章节路径返回 `ChapterSynopsis`（正文页梗概按钮） |
-| `chapter.synopsis.linkOnTurnComplete` | turn 完成时归档梗概并移除工作区 `[剧情梗概].md`（内部） |
+| `chapter.synopsis.linkOnTurnComplete` | turn 完成时归档梗概（及细纲若启用），**保留**工作区前档并切换表面为正文（内部） |
 | `synopsis.mutation.preview` / `apply` | 设定/图变更（P4） |
 
 **Phase：** `synopsis_discuss`（独立 execute，同 `revision_assist`）。
@@ -243,7 +247,7 @@ function resolveTurnBootstrapInput(session): string {
 | **P2** | `SynopsisConversationService`：start 建占位、send 覆盖写、digest 归因 |
 | **P3** | 只读图/设定查询 |
 | **P4** | 设定/图变更门禁 |
-| **P5** | `turn.start` 衔接；turn 完成 → `ChapterSynopsis` 归档 + 移除梗概 md |
+| **P5** | `turn.start` 衔接；turn 完成 → `ChapterSynopsis` 归档 + **保留**梗概/细纲 md 并折叠 |
 | **P6** | 章节正文右栏「剧情梗概」只读面板 |
 
 ---
@@ -254,16 +258,16 @@ function resolveTurnBootstrapInput(session): string {
 2. Agent 更新梗概后文件内容被**整篇覆盖**，无版本 UI；
 3. 用户手工改文件后，下一轮 Agent 承认为用户修改；
 4. Agent 不会自行开始推演；定稿场景须出现确认选项；
-5. 用户点「开始推演」：有梗概文件则用文件，无则用对话；
-6. 推演完成后工作区 **无** `[剧情梗概].md`，但 `ChapterSynopsis` 可查；
-7. 打开正式章时，右栏 **剧情梗概** 按钮可展示冻结梗概；无梗概 md 时展示当年推演引导输入。
+5. 用户点「开始推演」：有细纲则以细纲为主+梗概附录；仅有梗概则用梗概；皆无则用对话；
+6. 推演完成后工作区 **仍保留** `[剧情梗概].md`（及若有的 `[剧情细纲].md`），树折叠到正文下；`ChapterSynopsis` 可查；
+7. 打开正式章时，右侧栏可展示关联梗概/细纲（及冻结快照）；无文件时展示当年推演引导输入。
 
 ---
 
 ## 10. 开放问题
 
 - 一章是否允许多个 `[剧情梗概].md`（建议：**每序号仅一个**，start 时校验）；
-- ~~推演完成后是否保留梗概文件~~（已决：**移除文件，保留关联文本**）；
+- ~~推演完成后是否保留梗概文件~~（已决：**保留文件并树折叠**；见 [章细纲生命周期](./2026-09-02-chapter-outline-lifecycle-design.md)）；
 - 用户跳过讨论、无文件无对话时是否禁用「开始推演」（建议：禁用并提示）。
 
 ---
@@ -274,3 +278,4 @@ function resolveTurnBootstrapInput(session): string {
 | --- | --- |
 | 2026-08-27 | 初稿 + 架构评审（讨论期不写链） |
 | 2026-08-27 | §3.5–§6.2 推演后归档 `ChapterSynopsis`、移除梗概 md；正文右栏梗概只读按钮 |
+| 2026-09-02 | 与章细纲生命周期对齐：发布后**保留**梗概/细纲文件并折叠；推演输入支持细纲为主 |

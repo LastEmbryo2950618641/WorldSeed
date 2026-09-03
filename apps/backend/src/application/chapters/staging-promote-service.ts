@@ -8,6 +8,7 @@ import type {
 import { assertWorkspaceMutationAllowed } from "../../core/index.js"
 import type { WorkspacePort } from "../workspace/index.js"
 import type { DeductionGoalsService } from "./deduction-goals-service.js"
+import type { SettingsLineageService } from "../settings/settings-lineage-service.js"
 import type { SqliteSynopsisStagingPromoteRepository } from "../../infrastructure/sqlite/repositories/sqlite-synopsis-staging-promote-repository.js"
 import {
   STAGING_FILE_KEYS,
@@ -24,6 +25,8 @@ export type StagingPromoteServiceDependencies = Readonly<{
   workspace: WorkspacePort
   createId: () => string
   now: () => number
+  lineage?: SettingsLineageService
+  resolveSessionChapterSequence?: (sessionId: string) => Promise<number | undefined>
 }>
 
 export class StagingPromoteService {
@@ -74,6 +77,7 @@ export class StagingPromoteService {
     projectId: ProjectId
     workspaceRootRef: string
     proposalIds: readonly string[]
+    reasonOverride?: string
   }>): Promise<SynopsisStagingPromoteListResult> {
     const nowMs = this.dependencies.now()
     let sessionId: string | undefined
@@ -84,6 +88,9 @@ export class StagingPromoteService {
       }
       if (proposal.status !== "pending") continue
       sessionId = proposal.sessionId
+      const causingChapterSequence = this.dependencies.resolveSessionChapterSequence === undefined
+        ? undefined
+        : await this.dependencies.resolveSessionChapterSequence(proposal.sessionId)
       for (const write of proposal.settingsWrites) {
         assertWorkspaceMutationAllowed(write.relativePath, "file", "user")
         await this.dependencies.workspace.saveUserMarkdown(
@@ -91,8 +98,24 @@ export class StagingPromoteService {
           write.relativePath,
           write.markdown,
         )
+        const promoteSummary = input.reasonOverride?.trim() || proposal.reason
+        await this.dependencies.lineage?.recordUpsert({
+          relativePath: write.relativePath,
+          markdown: write.markdown,
+          sourceKind: "staging_promote",
+          sourceRef: proposal.proposalId,
+          ...(promoteSummary === undefined || promoteSummary.length === 0
+            ? {}
+            : { summary: promoteSummary }),
+          ...(causingChapterSequence === undefined ? {} : { causingChapterSequence }),
+        })
         if (write.mode === "create" && write.readmeEntry !== undefined && write.readmeEntry.trim().length > 0) {
-          await this.appendReadmeEntry(input.workspaceRootRef, write.readmeEntry.trim())
+          await this.appendReadmeEntry(
+            input.workspaceRootRef,
+            write.readmeEntry.trim(),
+            proposal.proposalId,
+            causingChapterSequence,
+          )
         }
       }
       if (proposal.goalProposals !== undefined && proposal.goalProposals.length > 0) {
@@ -184,7 +207,12 @@ export class StagingPromoteService {
     }
   }
 
-  private async appendReadmeEntry(workspaceRootRef: string, entry: string): Promise<void> {
+  private async appendReadmeEntry(
+    workspaceRootRef: string,
+    entry: string,
+    proposalId: string,
+    causingChapterSequence?: number,
+  ): Promise<void> {
     const readmePath = "设定集/readme.md"
     let current = ""
     try {
@@ -194,10 +222,15 @@ export class StagingPromoteService {
     }
     if (current.includes(entry)) return
     const suffix = current.endsWith("\n") ? "" : "\n"
-    await this.dependencies.workspace.saveUserMarkdown(
-      workspaceRootRef,
-      readmePath,
-      `${current}${suffix}- ${entry}\n`,
-    )
+    const next = `${current}${suffix}- ${entry}\n`
+    await this.dependencies.workspace.saveUserMarkdown(workspaceRootRef, readmePath, next)
+    await this.dependencies.lineage?.recordUpsert({
+      relativePath: readmePath,
+      markdown: next,
+      sourceKind: "staging_promote",
+      sourceRef: proposalId,
+      summary: "更新设定集索引",
+      ...(causingChapterSequence === undefined ? {} : { causingChapterSequence }),
+    })
   }
 }

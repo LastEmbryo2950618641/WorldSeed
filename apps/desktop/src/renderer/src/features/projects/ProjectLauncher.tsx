@@ -176,7 +176,18 @@ export function ProjectLauncher({ onOpen }: Props): React.JSX.Element {
         </button>
       </div>
 
-      {error === undefined ? null : <p className="form-error launcher-error" role="alert">{error}</p>}
+      {error === undefined ? null : <div className="form-error launcher-error" role="alert">
+        <span>{error}</span>
+        <button
+          type="button"
+          className="launcher-error-dismiss"
+          aria-label="关闭提示"
+          title="关闭"
+          onClick={() => { setError(undefined) }}
+        >
+          ×
+        </button>
+      </div>}
       {pendingCreatePath === undefined ? null : createPortal(
         <WorkNamePromptDialog
           folderLabel={folderLabelFromPath(pendingCreatePath)}

@@ -1,4 +1,6 @@
 import { CheckCircle2, CircleDashed, Target, XCircle } from "lucide-react"
+import { labelForGoalProgressStatus } from "@worldseed/contracts"
+
 import type { ReviewableGoalProgress } from "./creation-desk-goals.js"
 
 type ReviewStatus = "achieved" | "partial" | "missed"
@@ -15,12 +17,6 @@ type Props = Readonly<{
   onClose?(): void
   compact?: boolean
 }>
-
-const STATUS_LABELS: Record<ReviewStatus, string> = {
-  achieved: "已达成",
-  partial: "部分达成",
-  missed: "未达成",
-}
 
 export function CreationDeskProgressReview(props: Props): React.JSX.Element | null {
   if (props.items.length === 0) return null
@@ -77,7 +73,8 @@ function ReviewCard(props: Readonly<{
         disabled={props.busy}
         onClick={() => { void props.onReview(goal.goalId, progress.chapterSequence, "achieved", progress.summary); }}
       >
-        <CheckCircle2 size={13} aria-hidden="true" />{STATUS_LABELS.achieved}
+        <CheckCircle2 size={13} aria-hidden="true" />
+        {labelForGoalProgressStatus("achieved", goal.narrativeKind)}
       </button>
       <button
         type="button"
@@ -85,7 +82,8 @@ function ReviewCard(props: Readonly<{
         disabled={props.busy}
         onClick={() => { void props.onReview(goal.goalId, progress.chapterSequence, "partial", progress.summary); }}
       >
-        <CircleDashed size={13} aria-hidden="true" />{STATUS_LABELS.partial}
+        <CircleDashed size={13} aria-hidden="true" />
+        {labelForGoalProgressStatus("partial", goal.narrativeKind)}
       </button>
       <button
         type="button"
@@ -94,7 +92,8 @@ function ReviewCard(props: Readonly<{
         disabled={props.busy}
         onClick={() => { void props.onReview(goal.goalId, progress.chapterSequence, "missed", progress.summary); }}
       >
-        <XCircle size={13} aria-hidden="true" />{STATUS_LABELS.missed}
+        <XCircle size={13} aria-hidden="true" />
+        {labelForGoalProgressStatus("missed", goal.narrativeKind)}
       </button>
     </div>
   </article>

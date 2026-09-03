@@ -43,7 +43,11 @@ export type DesktopModelProfiles = Readonly<{
 }>
 
 export type InventoryEntry = Readonly<{ path: string; kind: "directory" | "file" }>
-export type WorkspaceReport = Readonly<{ inventory: readonly InventoryEntry[]; issues: readonly unknown[] }>
+export type WorkspaceIssue = Readonly<{ code: string; path: string; message: string }>
+export type WorkspaceReport = Readonly<{
+  inventory: readonly InventoryEntry[]
+  issues: readonly WorkspaceIssue[]
+}>
 
 export type TurnResult = Readonly<{
   chapterPath: string
@@ -111,7 +115,15 @@ export type GraphSlice = Readonly<{
   }>
 }>
 
-export async function invokeBackend<T>(method: BackendMethod, payload: unknown): Promise<T> {
+export async function invokeBackend<T>(
+  method: BackendMethod,
+  payload: unknown,
+  options?: Readonly<{
+    waitTimeoutMs?: number
+    onWaitTimeout?: (info: BackendWaitTimeoutInfo) => Promise<"continue" | "abandon">
+    onRequestStarted?: (info: Readonly<{ requestId: string; method: BackendMethod }>) => void
+  }>,
+): Promise<T> {
   const bridge = getWorldseedBridge()
   if (bridge === undefined) return demoInvoke(method, payload) as T
   const request: ClientRequest = {
@@ -120,9 +132,72 @@ export async function invokeBackend<T>(method: BackendMethod, payload: unknown):
     method,
     payload,
   }
-  const response = await bridge.invoke(request)
-  if (!response.ok) throw new Error(response.error.message)
-  return response.data as T
+  options?.onRequestStarted?.({ requestId: request.requestId, method })
+  const waitTimeoutMs = options?.waitTimeoutMs
+    ?? defaultProjectSettings.execution.backendRequestWaitTimeoutMs
+  let settled = false
+  const unsubscribe = typeof bridge.onBackendWaitTimeout === "function"
+    ? bridge.onBackendWaitTimeout((info) => {
+        if (settled || info.requestId !== request.requestId) return
+        void (async () => {
+          const choice = options?.onWaitTimeout === undefined
+            ? "continue" as const
+            : await options.onWaitTimeout(info)
+          if (settled) return
+          if (choice === "continue") {
+            await bridge.continueBackendWait?.(info.requestId)
+            return
+          }
+          await bridge.abandonBackendRequest?.(info.requestId)
+        })().catch(() => undefined)
+      })
+    : undefined
+  try {
+    const response = await bridge.invoke(request, { waitTimeoutMs })
+    settled = true
+    if (!response.ok) throw new Error(response.error.message)
+    return response.data as T
+  } catch (error) {
+    settled = true
+    if (isBackendRequestAbandonedError(error)) {
+      throw new BackendRequestAbandonedError(request.requestId, method)
+    }
+    throw error
+  } finally {
+    unsubscribe?.()
+  }
+}
+
+export type BackendWaitTimeoutInfo = Readonly<{
+  requestId: string
+  method: string
+  waitTimeoutMs: number
+  elapsedMs: number
+}>
+
+export class BackendRequestAbandonedError extends Error {
+  public readonly requestId: string
+  public readonly method: string
+
+  public constructor(requestId: string, method: string) {
+    super(`Backend request abandoned: ${method}`)
+    this.name = "BackendRequestAbandonedError"
+    this.requestId = requestId
+    this.method = method
+  }
+}
+
+function isBackendRequestAbandonedError(error: unknown): boolean {
+  if (error instanceof BackendRequestAbandonedError) return true
+  if (error instanceof Error && error.name === "BackendRequestAbandonedError") return true
+  if (error instanceof Error && error.message.startsWith("Backend request abandoned:")) return true
+  return false
+}
+
+export async function abandonBackendRequest(requestId: string): Promise<boolean> {
+  const bridge = getWorldseedBridge()
+  if (bridge?.abandonBackendRequest === undefined) return false
+  return bridge.abandonBackendRequest(requestId)
 }
 
 export async function selectDirectory(input?: Readonly<{
@@ -134,6 +209,15 @@ export async function selectDirectory(input?: Readonly<{
     if (forced !== null && forced.length > 0) return forced
   }
   return getWorldseedBridge()?.selectDirectory(input) ?? "C:\\Worldseed\\雾港纪事"
+}
+
+export async function selectMarkdownFiles(input?: Readonly<{
+  title?: string
+  defaultPath?: string
+}>): Promise<readonly string[]> {
+  const bridge = getWorldseedBridge()
+  if (bridge === undefined || typeof bridge.selectMarkdownFiles !== "function") return []
+  return bridge.selectMarkdownFiles(input)
 }
 
 export function resolveDefaultWorkDirectoryPath(): string {
@@ -490,6 +574,13 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
     }
     case "workspace.save":
       return { saved: true }
+    case "workspace.delete":
+      return { deleted: true }
+    case "workspace.createDirectory":
+      return { created: true }
+    case "workspace.importFiles":
+    case "workspace.importFolder":
+      return { imported: 1 }
     case "chapter.list":
       return [structuredClone(demoChapter)]
     case "chapter.read":
@@ -643,6 +734,32 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
         },
       }
     }
+    case "settings.lineage.paths":
+      return {
+        paths: demoInventory
+          .filter((entry) => entry.kind === "file" && entry.path.startsWith("设定集/") && entry.path.endsWith(".md"))
+          .map((entry) => entry.path),
+      }
+    case "settings.lineage.list":
+      return { entries: [] }
+    case "settings.lineage.headMeta": {
+      const relativePath = typeof payload === "object" && payload !== null && "relativePath" in payload
+        ? String((payload as { relativePath: string }).relativePath)
+        : "设定集/readme.md"
+      return { relativePath }
+    }
+    case "settings.lineage.getCommit":
+      throw new Error("Browser demo has no settings lineage commits")
+    case "settings.lineage.readAsOf":
+      throw new Error("Browser demo has no settings lineage as-of data")
+    case "settings.lineage.restoreAsCurrent":
+      throw new Error("Browser demo cannot restore settings lineage")
+    case "settings.lineage.annotate":
+      throw new Error("Browser demo cannot annotate settings lineage")
+    case "synopsis.conversation.discardLastUserTurn":
+      return { messages: [] }
+    case "synopsis.conversation.acknowledgeBudget":
+      return {}
     default:
       throw new Error(`Browser demo does not implement ${method}`)
   }

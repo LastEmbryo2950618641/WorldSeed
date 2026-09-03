@@ -55,16 +55,25 @@ export function registerIpcRouter(
   vault: FileCredentialVault,
   applicationDataRoot: string,
 ): void {
-  ipcMain.handle("worldseed:request", async (_event, request: unknown) => {
+  ipcMain.handle("worldseed:request", async (event, request: unknown, options: unknown) => {
     const parsed = clientRequestSchema.parse(request)
+    const waitTimeoutMs = parseWaitTimeoutMs(options)
     const startedAtMs = Date.now()
     const logLevel = parsed.method === "turn.status" ? "debug" : "info"
     runtimeLog(logLevel, "ipc-router", "request.received", {
       requestId: parsed.requestId,
       method: parsed.method,
+      waitTimeoutMs,
     })
     try {
-      const response = await backend.invoke(await resolveRequest(parsed, vault))
+      const response = await backend.invoke(await resolveRequest(parsed, vault), {
+        waitTimeoutMs,
+        onWaitTimeout: (info) => {
+          if (!event.sender.isDestroyed()) {
+            event.sender.send("worldseed:backend-wait-timeout", info)
+          }
+        },
+      })
       runtimeLog(response.ok ? logLevel : "error", "ipc-router", "request.completed", {
         requestId: parsed.requestId,
         method: parsed.method,
@@ -82,6 +91,14 @@ export function registerIpcRouter(
       })
       throw error
     }
+  })
+  ipcMain.handle("worldseed:backend-continue-wait", (_event, requestId: unknown) => {
+    if (typeof requestId !== "string" || requestId.trim().length === 0) return false
+    return backend.continueWait(requestId)
+  })
+  ipcMain.handle("worldseed:backend-abandon", (_event, requestId: unknown) => {
+    if (typeof requestId !== "string" || requestId.trim().length === 0) return false
+    return backend.abandon(requestId)
   })
   ipcMain.handle("worldseed:model-profiles:read", () => readModelProfiles(backend, vault))
   ipcMain.handle("worldseed:model-profiles:save", (_event, input: unknown) => saveModelProfiles(backend, vault, input))
@@ -123,10 +140,22 @@ export function registerIpcRouter(
     })
     return result.canceled ? undefined : result.filePaths[0]
   })
+  ipcMain.handle("worldseed:select-markdown-files", async (_event, input: unknown) => {
+    const options = parseSelectDirectoryPayload(input)
+    const result = await dialog.showOpenDialog(window, {
+      properties: ["openFile", "multiSelections"],
+      title: options.title ?? "选择 Markdown 文件",
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+      ...(options.defaultPath === undefined ? {} : { defaultPath: options.defaultPath }),
+    })
+    return result.canceled ? [] : result.filePaths
+  })
 }
 
 export function unregisterIpcRouter(): void {
   ipcMain.removeHandler("worldseed:request")
+  ipcMain.removeHandler("worldseed:backend-continue-wait")
+  ipcMain.removeHandler("worldseed:backend-abandon")
   ipcMain.removeHandler("worldseed:model-profiles:read")
   ipcMain.removeHandler("worldseed:model-profiles:save")
   ipcMain.removeHandler("worldseed:model-list")
@@ -137,6 +166,14 @@ export function unregisterIpcRouter(): void {
   ipcMain.removeHandler("worldseed:app-settings:work-directory:remove")
   ipcMain.removeHandler("worldseed:book-path:allocate")
   ipcMain.removeHandler("worldseed:select-directory")
+  ipcMain.removeHandler("worldseed:select-markdown-files")
+}
+
+function parseWaitTimeoutMs(options: unknown): number {
+  if (options === null || typeof options !== "object") return 600_000
+  const raw = (options as { waitTimeoutMs?: unknown }).waitTimeoutMs
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return 600_000
+  return Math.min(7_200_000, Math.max(60_000, Math.floor(raw)))
 }
 
 function parseDirectoryPathPayload(input: unknown, key: "directoryPath" | "workDirectory"): string {

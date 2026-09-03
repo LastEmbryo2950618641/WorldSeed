@@ -1,4 +1,5 @@
 export * from "./settings-extraction-service.js"
+export * from "./settings-lineage-service.js"
 export * from "./settings-extraction-review-pending-error.js"
 export * from "./world-divergence-policy.js"
 export * from "./chapter-narrative-intent-policy.js"

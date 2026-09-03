@@ -4,11 +4,16 @@ import type { DeductionGoal, DeductionGoalProgress, DeductionGoalsSnapshot } fro
 import {
   countFilledChapterProgress,
   countPendingReviews,
+  formatGoalTaxonomyChip,
   listActiveGoals,
+  listChapterRelevantGoals,
   listGoalProgressHistory,
   listReviewableProgress,
+  narrativeKindLabel,
   paginateGoals,
+  progressStatusLabel,
   resolveGoalRowStatus,
+  scaleLabel,
   toolbarBadgeCount,
 } from "../src/renderer/src/features/editor/creation-desk-goals.js"
 
@@ -17,6 +22,8 @@ function goal(overrides: Partial<DeductionGoal> & Pick<DeductionGoal, "goalId" |
     projectId: "11111111-1111-4111-8111-111111111111",
     content: "测试目标",
     source: "user",
+    narrativeKind: "general",
+    scale: "short",
     createdAtMs: 1,
     updatedAtMs: 1,
     ...overrides,
@@ -184,6 +191,16 @@ describe("creation desk goals helpers", () => {
   it("resolves compact row status for overview and chapter scopes", () => {
     const activeGoal = goal({ goalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", lifecycle: "active" })
     const completedGoal = goal({ goalId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", lifecycle: "completed" })
+    const foreshadow = goal({
+      goalId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      lifecycle: "active",
+      narrativeKind: "foreshadow",
+    })
+    const climax = goal({
+      goalId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      lifecycle: "active",
+      narrativeKind: "climax",
+    })
     const chapterProgress = progress({
       progressId: "11111111-1111-4111-8111-111111111101",
       goalId: activeGoal.goalId,
@@ -207,13 +224,44 @@ describe("creation desk goals helpers", () => {
       chapterProgress,
       scope: "chapter",
       reviewable: true,
-    }).kind).toBe("review")
+    })).toEqual({ kind: "review", label: "待复盘" })
+    expect(resolveGoalRowStatus({
+      goal: foreshadow,
+      chapterProgress,
+      scope: "chapter",
+      reviewable: true,
+    })).toEqual({ kind: "review", label: "待核对收束" })
+    expect(resolveGoalRowStatus({
+      goal: climax,
+      chapterProgress,
+      scope: "chapter",
+      reviewable: true,
+    })).toEqual({ kind: "review", label: "待复盘推进" })
     expect(resolveGoalRowStatus({
       goal: activeGoal,
       chapterProgress: { ...chapterProgress, status: "achieved", lockedAtMs: 10 },
       scope: "chapter",
       reviewable: false,
-    }).kind).toBe("achieved")
+    })).toEqual({ kind: "achieved", label: "已达成" })
+    expect(resolveGoalRowStatus({
+      goal: foreshadow,
+      chapterProgress: { ...chapterProgress, goalId: foreshadow.goalId, status: "achieved", lockedAtMs: 10 },
+      scope: "chapter",
+      reviewable: false,
+    })).toEqual({ kind: "achieved", label: "已收束" })
+    expect(resolveGoalRowStatus({
+      goal: climax,
+      chapterProgress: { ...chapterProgress, goalId: climax.goalId, status: "partial", lockedAtMs: 10 },
+      scope: "chapter",
+      reviewable: false,
+    })).toEqual({ kind: "partial", label: "在升温" })
+  })
+
+  it("maps progress status labels by narrative kind", () => {
+    expect(progressStatusLabel("achieved", "general")).toBe("已达成")
+    expect(progressStatusLabel("achieved", "foreshadow")).toBe("已收束")
+    expect(progressStatusLabel("partial", "climax")).toBe("在升温")
+    expect(progressStatusLabel("missed", "foreshadow")).toBe("未收/错过窗口")
   })
 
   it("paginates goals", () => {
@@ -221,5 +269,50 @@ describe("creation desk goals helpers", () => {
     const pageOne = paginateGoals(items, 1, 8)
     expect(pageOne.items).toHaveLength(8)
     expect(pageOne.totalPages).toBe(2)
+  })
+
+  it("counts chapter progress only for relevant goals", () => {
+    const goals = [
+      goal({ goalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", lifecycle: "active", plantChapterSequence: 5, payoffChapterSequence: 8 }),
+      goal({ goalId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", lifecycle: "active" }),
+    ]
+    const progressItems = [
+      progress({ progressId: "11111111-1111-4111-8111-111111111101", goalId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", chapterSequence: 2, summary: "ok" }),
+    ]
+    expect(countFilledChapterProgress(goals, progressItems, 2)).toEqual({
+      filled: 1,
+      total: 1,
+      unfilled: 0,
+    })
+  })
+
+  it("lists chapter-relevant goals and formats taxonomy labels", () => {
+    const goals = [
+      goal({
+        goalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        lifecycle: "active",
+        narrativeKind: "foreshadow",
+        scale: "long",
+        plantChapterSequence: 10,
+        payoffChapterSequence: 40,
+      }),
+      goal({
+        goalId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        lifecycle: "active",
+        narrativeKind: "climax",
+        scale: "medium",
+      }),
+    ]
+    expect(listChapterRelevantGoals(goals, 5).map((item) => item.goalId))
+      .toEqual(["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"])
+    expect(listChapterRelevantGoals(goals, 20).map((item) => item.goalId))
+      .toEqual([
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      ])
+    expect(narrativeKindLabel("foreshadow")).toBe("伏笔")
+    expect(scaleLabel("long")).toBe("长")
+    expect(formatGoalTaxonomyChip("general", "short")).toBeUndefined()
+    expect(formatGoalTaxonomyChip("foreshadow", "long")).toBe("伏笔·长")
   })
 })

@@ -4,6 +4,11 @@ import type {
   DeductionGoalProposal,
   DeductionGoalsSnapshot,
 } from "@worldseed/contracts"
+import {
+  isGoalRelevantToChapter,
+  labelForGoalProgressStatus,
+  labelForGoalRowChip,
+} from "@worldseed/contracts"
 
 export const CREATION_DESK_GOALS_PAGE_SIZE = 8
 
@@ -11,6 +16,42 @@ const LEGACY_STORAGE_PREFIX = "worldseed.creationDeskGoals."
 
 export function listActiveGoals(goals: readonly DeductionGoal[]): readonly DeductionGoal[] {
   return goals.filter((goal) => goal.lifecycle === "active")
+}
+
+export function listChapterRelevantGoals(
+  goals: readonly DeductionGoal[],
+  chapterSequence: number,
+): readonly DeductionGoal[] {
+  return listActiveGoals(goals).filter((goal) => isGoalRelevantToChapter(goal, chapterSequence))
+}
+
+export function narrativeKindLabel(kind: DeductionGoal["narrativeKind"]): string {
+  if (kind === "foreshadow") return "伏笔"
+  if (kind === "climax") return "高潮"
+  return "目标"
+}
+
+export function scaleLabel(scale: DeductionGoal["scale"]): string {
+  if (scale === "medium") return "中"
+  if (scale === "long") return "长"
+  return "短"
+}
+
+export type GoalTaxonomyInput = Readonly<{
+  narrativeKind?: DeductionGoal["narrativeKind"]
+  scale?: DeductionGoal["scale"]
+  plantChapterSequence?: number
+  payoffChapterSequence?: number
+}>
+
+export function formatGoalTaxonomyChip(
+  kind: DeductionGoal["narrativeKind"] | undefined,
+  scale: DeductionGoal["scale"] | undefined,
+): string | undefined {
+  if (kind === undefined || kind === "general") {
+    return scale === undefined || scale === "short" ? undefined : `目标·${scaleLabel(scale)}`
+  }
+  return `${narrativeKindLabel(kind)}·${scaleLabel(scale ?? "short")}`
 }
 
 export function listPendingProposals(
@@ -67,7 +108,7 @@ export function countFilledChapterProgress(
   progress: readonly DeductionGoalProgress[],
   chapterSequence: number,
 ): Readonly<{ filled: number; total: number; unfilled: number }> {
-  const active = listActiveGoals(goals)
+  const active = listChapterRelevantGoals(goals, chapterSequence)
   let filled = 0
   for (const goal of active) {
     const item = findChapterProgress(progress, goal.goalId, chapterSequence)
@@ -130,27 +171,30 @@ export function resolveGoalRowStatus(input: Readonly<{
   scope: GoalRowScope
   reviewable: boolean
 }>): GoalRowStatus {
+  const kind = input.goal.narrativeKind
   if (input.scope === "overview") {
-    if (input.goal.lifecycle === "completed") return { kind: "completed", label: "已完成" }
+    if (input.goal.lifecycle === "completed") {
+      return { kind: "completed", label: labelForGoalRowChip("completed", kind) }
+    }
     return { kind: "planned", label: "进行中" }
   }
-  if (input.reviewable) return { kind: "review", label: "待复盘" }
+  if (input.reviewable) return { kind: "review", label: labelForGoalRowChip("review", kind) }
   const item = input.chapterProgress
-  if (item === undefined || item.summary.trim().length === 0) return { kind: "empty", label: "未填写" }
-  if (item.status === "achieved") return { kind: "achieved", label: "已达成" }
-  if (item.status === "partial") return { kind: "partial", label: "部分达成" }
-  if (item.status === "missed") return { kind: "missed", label: "未达成" }
-  if (item.lockedAtMs !== undefined) return { kind: "locked", label: "已锁定" }
-  return { kind: "planned", label: "已填写" }
+  if (item === undefined || item.summary.trim().length === 0) {
+    return { kind: "empty", label: labelForGoalRowChip("empty", kind) }
+  }
+  if (item.status === "achieved") return { kind: "achieved", label: labelForGoalRowChip("achieved", kind) }
+  if (item.status === "partial") return { kind: "partial", label: labelForGoalRowChip("partial", kind) }
+  if (item.status === "missed") return { kind: "missed", label: labelForGoalRowChip("missed", kind) }
+  if (item.lockedAtMs !== undefined) return { kind: "locked", label: labelForGoalRowChip("locked", kind) }
+  return { kind: "planned", label: labelForGoalRowChip("planned", kind) }
 }
 
-export function progressStatusLabel(status: DeductionGoalProgress["status"]): string {
-  if (status === "planned") return "预期"
-  if (status === "achieved") return "已达成"
-  if (status === "partial") return "部分达成"
-  if (status === "missed") return "未达成"
-  if (status === "superseded") return "已取代"
-  return status
+export function progressStatusLabel(
+  status: DeductionGoalProgress["status"],
+  narrativeKind: DeductionGoal["narrativeKind"] = "general",
+): string {
+  return labelForGoalProgressStatus(status, narrativeKind)
 }
 
 export type LegacyCreationDeskGoal = Readonly<{

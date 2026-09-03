@@ -79,9 +79,19 @@ export type AppSettings = Readonly<{
   workDirectory: string
 }>
 
+export type BackendWaitTimeoutInfo = Readonly<{
+  requestId: string
+  method: string
+  waitTimeoutMs: number
+  elapsedMs: number
+}>
+
 export type WorldseedBridge = Readonly<{
   defaultWorkDirectoryPath: string
-  invoke(request: ClientRequest): Promise<ClientResponse>
+  invoke(request: ClientRequest, options?: { waitTimeoutMs?: number }): Promise<ClientResponse>
+  continueBackendWait(requestId: string): Promise<boolean>
+  abandonBackendRequest(requestId: string): Promise<boolean>
+  onBackendWaitTimeout(listener: (info: BackendWaitTimeoutInfo) => void): () => void
   readModelProfiles(): Promise<DesktopModelProfiles>
   saveModelProfiles(input: { profiles: readonly DesktopModelProfile[]; activeProfileId: string }): Promise<DesktopModelProfiles>
   listModels(input: { baseUrl: string; apiKey?: string; credentialRef: string }): Promise<ModelListResult>
@@ -92,6 +102,7 @@ export type WorldseedBridge = Readonly<{
   removeWorkDirectory(input: Readonly<{ directoryPath: string; mode: RemoveWorkDirectoryMode }>): Promise<AppSettingsReadResult>
   allocateBookPath(workDirectory: string): Promise<string>
   selectDirectory(input?: { title?: string; defaultPath?: string }): Promise<string | undefined>
+  selectMarkdownFiles(input?: { title?: string; defaultPath?: string }): Promise<readonly string[]>
   onCommand(listener: (command: WorldseedCommand) => void): () => void
   windowControl(action: WindowControlAction): Promise<boolean | undefined>
   onWindowMaximized(listener: (maximized: boolean) => void): () => void
@@ -100,9 +111,22 @@ export type WorldseedBridge = Readonly<{
 
 export const worldseedBridge: WorldseedBridge = {
   defaultWorkDirectoryPath: resolveDefaultWorkDirectoryPath(),
-  invoke: async (request) => {
-    const response = await ipcRenderer.invoke("worldseed:request", clientRequestSchema.parse(request)) as unknown
+  invoke: async (request, options) => {
+    const response = await ipcRenderer.invoke(
+      "worldseed:request",
+      clientRequestSchema.parse(request),
+      options === undefined ? {} : { waitTimeoutMs: options.waitTimeoutMs },
+    ) as unknown
     return clientResponseSchema.parse(response)
+  },
+  continueBackendWait: async (requestId) => ipcRenderer.invoke("worldseed:backend-continue-wait", requestId) as Promise<boolean>,
+  abandonBackendRequest: async (requestId) => ipcRenderer.invoke("worldseed:backend-abandon", requestId) as Promise<boolean>,
+  onBackendWaitTimeout: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, info: BackendWaitTimeoutInfo): void => {
+      listener(info)
+    }
+    ipcRenderer.on("worldseed:backend-wait-timeout", handler)
+    return () => ipcRenderer.removeListener("worldseed:backend-wait-timeout", handler)
   },
   readModelProfiles: async () => ipcRenderer.invoke("worldseed:model-profiles:read") as Promise<DesktopModelProfiles>,
   saveModelProfiles: async (input) => ipcRenderer.invoke("worldseed:model-profiles:save", input) as Promise<DesktopModelProfiles>,
@@ -114,6 +138,10 @@ export const worldseedBridge: WorldseedBridge = {
   removeWorkDirectory: async (input) => normalizeAppSettingsReadResult(await ipcRenderer.invoke("worldseed:app-settings:work-directory:remove", input)),
   allocateBookPath: async (workDirectory) => ipcRenderer.invoke("worldseed:book-path:allocate", { workDirectory }) as Promise<string>,
   selectDirectory: async (input) => ipcRenderer.invoke("worldseed:select-directory", input) as Promise<string | undefined>,
+  selectMarkdownFiles: async (input) => {
+    const paths = await ipcRenderer.invoke("worldseed:select-markdown-files", input ?? {}) as unknown
+    return Array.isArray(paths) ? paths.filter((entry): entry is string => typeof entry === "string") : []
+  },
   onCommand: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, command: WorldseedCommand): void => { listener(command); }
     ipcRenderer.on("worldseed:command", handler)

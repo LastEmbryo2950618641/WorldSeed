@@ -6,17 +6,28 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
+  rmdir,
   unlink,
   writeFile,
 } from "node:fs/promises"
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path"
 
 import {
+  assertUserCanCreateMarkdown,
+  assertUserCanCreateDirectory,
+  assertUserCanDeleteVolumeDirectory,
+  assertUserCanDeleteMarkdown,
+  assertVolumeSequenceAvailable,
   assertWorkspaceMutationAllowed,
   digest,
+  deriveVolumeDirectoryPath,
   fixedWorkspaceEntries,
-  isSynopsisMarkdownPath,
+  isChapterBodyMarkdownPath,
+  isChapterPlanningMarkdownPath,
+  isVolumeDirectoryPath,
   normalizeWorkspacePath,
+  validateVolumeFolderName,
   validateWorkspaceInventory,
   type WorkspaceInventoryEntry,
   type WorkspaceValidationIssue,
@@ -172,11 +183,142 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     await writeFile(path, content, { encoding: "utf8" })
   }
 
+  public async createUserDirectory(workspaceRootRef: string, relativePath: string): Promise<void> {
+    const root = await realpath(resolve(workspaceRootRef))
+    const normalized = assertUserCanCreateDirectory(relativePath)
+    if (isVolumeDirectoryPath(normalized)) {
+      const folderName = normalized.slice("章节正文/".length)
+      const existing = await this.listVolumeFolderNames(root)
+      assertVolumeSequenceAvailable(folderName, existing)
+    }
+    const path = resolveInside(root, normalized)
+    await assertParentChainContainsNoLinks(root, path)
+    await mkdir(path, { recursive: true })
+  }
+
+  public async removeUserMarkdown(workspaceRootRef: string, relativePath: string): Promise<void> {
+    const root = await realpath(resolve(workspaceRootRef))
+    const normalized = assertUserCanDeleteMarkdown(relativePath)
+    const path = resolveInside(root, normalized)
+    try {
+      await unlink(path)
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error
+    }
+  }
+
+  public async listVolumeFolderNames(workspaceRootRef: string): Promise<readonly string[]> {
+    const root = await realpath(resolve(workspaceRootRef))
+    const chaptersRoot = resolveInside(root, "章节正文")
+    let names: string[] = []
+    try {
+      const entries = await readdir(chaptersRoot, { withFileTypes: true })
+      names = entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .filter((name) => validateVolumeFolderName(name).ok)
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error
+    }
+    return names
+  }
+
+  public async removeEmptyVolumeDirectory(workspaceRootRef: string, relativePath: string): Promise<void> {
+    await this.removeVolumeDirectory(workspaceRootRef, relativePath)
+  }
+
+  public async removeVolumeDirectory(workspaceRootRef: string, relativePath: string): Promise<void> {
+    const root = await realpath(resolve(workspaceRootRef))
+    const normalized = assertUserCanDeleteVolumeDirectory(relativePath)
+    const path = resolveInside(root, normalized)
+    await assertParentChainContainsNoLinks(root, path)
+    let children: string[]
+    try {
+      children = await readdir(path)
+    } catch (error) {
+      if (isNotFoundError(error)) return
+      throw error
+    }
+    const bodyFiles: string[] = []
+    const removableFiles: string[] = []
+    for (const name of children) {
+      const childRelative = `${normalized}/${name}`
+      const childAbsolute = resolveInside(root, childRelative)
+      const stats = await lstat(childAbsolute)
+      if (stats.isSymbolicLink()) {
+        throw new Error(`卷文件夹含符号链接，不能删除：${childRelative}`)
+      }
+      if (stats.isDirectory()) {
+        throw new Error(`卷文件夹含嵌套目录，不能删除：${childRelative}`)
+      }
+      if (!stats.isFile() || !name.endsWith(".md")) {
+        throw new Error(`卷文件夹含不可自动清理的文件，不能删除：${childRelative}`)
+      }
+      if (isChapterBodyMarkdownPath(childRelative)) {
+        bodyFiles.push(childRelative)
+        continue
+      }
+      if (isChapterPlanningMarkdownPath(childRelative)) {
+        removableFiles.push(childRelative)
+        continue
+      }
+      // Unknown markdown under a volume: treat as body to be safe.
+      bodyFiles.push(childRelative)
+    }
+    if (bodyFiles.length > 0) {
+      throw new Error(
+        `卷文件夹含正式章节正文，不能直接删除（请先走章节修订/迁移）。冲突文件：${bodyFiles.join("、")}`,
+      )
+    }
+    for (const file of removableFiles) {
+      try {
+        await unlink(resolveInside(root, file))
+      } catch (error) {
+        if (!isNotFoundError(error)) throw error
+      }
+    }
+    await rmdir(path)
+  }
+
+  public async renameVolumeDirectory(
+    workspaceRootRef: string,
+    fromFolderName: string,
+    toFolderName: string,
+  ): Promise<void> {
+    const root = await realpath(resolve(workspaceRootRef))
+    const fromValidated = validateVolumeFolderName(fromFolderName)
+    const toValidated = validateVolumeFolderName(toFolderName)
+    if (!fromValidated.ok) throw new Error(fromValidated.reason)
+    if (!toValidated.ok) throw new Error(toValidated.reason)
+    if (fromValidated.folderName === toValidated.folderName) return
+    if (fromValidated.sequence !== toValidated.sequence) {
+      throw new Error(
+        `卷原地重命名必须保持同一序号（当前 ${fromValidated.folderName} → ${toValidated.folderName}）`,
+      )
+    }
+    const existing = await this.listVolumeFolderNames(root)
+    assertVolumeSequenceAvailable(toValidated.folderName, existing, {
+      excludeFolderName: fromValidated.folderName,
+    })
+    const fromPath = resolveInside(root, deriveVolumeDirectoryPath(fromValidated.folderName))
+    const toPath = resolveInside(root, deriveVolumeDirectoryPath(toValidated.folderName))
+    await assertParentChainContainsNoLinks(root, fromPath)
+    await assertParentChainContainsNoLinks(root, toPath)
+    try {
+      await lstat(toPath)
+      throw new Error(`目标卷文件夹已存在：${toValidated.folderName}`)
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("目标卷文件夹已存在")) throw error
+      if (!isNotFoundError(error)) throw error
+    }
+    await rename(fromPath, toPath)
+  }
+
   public async saveSynopsisMarkdown(workspaceRootRef: string, relativePath: string, content: string): Promise<void> {
     const root = await realpath(resolve(workspaceRootRef))
     const normalized = assertWorkspaceMutationAllowed(relativePath, "file", "platform")
-    if (!isSynopsisMarkdownPath(normalized)) {
-      throw new Error(`Only synopsis markdown paths can be saved through synopsis workflow: ${normalized}`)
+    if (!isChapterPlanningMarkdownPath(normalized)) {
+      throw new Error(`Only synopsis/outline markdown paths can be saved through synopsis workflow: ${normalized}`)
     }
     const path = resolveInside(root, normalized)
     await assertParentChainContainsNoLinks(root, path)
@@ -186,12 +328,17 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
 
   public async removeSynopsisMarkdown(workspaceRootRef: string, relativePath: string): Promise<void> {
     const root = await realpath(resolve(workspaceRootRef))
-    const normalized = assertWorkspaceMutationAllowed(relativePath, "file", "platform")
-    if (!isSynopsisMarkdownPath(normalized)) {
-      throw new Error(`Only synopsis markdown paths can be removed through synopsis workflow: ${normalized}`)
+    // Allow removing both canonical and legacy/invalid planning-named files (cleanup).
+    const normalized = normalizeWorkspacePath(relativePath)
+    if (!isChapterPlanningMarkdownPath(normalized)) {
+      throw new Error(`Only synopsis/outline markdown paths can be removed through synopsis workflow: ${normalized}`)
     }
     const path = resolveInside(root, normalized)
-    await unlink(path)
+    try {
+      await unlink(path)
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error
+    }
   }
 
   public async publishChapter(workspaceRootRef: string, relativePath: string, content: string): Promise<void> {
@@ -199,6 +346,7 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     const normalized = assertWorkspaceMutationAllowed(relativePath, "file", "chapter_publisher")
     const path = resolveInside(root, normalized)
     await assertParentChainContainsNoLinks(root, path)
+    await mkdir(resolve(path, ".."), { recursive: true })
     try {
       await writeFile(path, content, { encoding: "utf8", flag: "wx" })
     } catch (error) {
@@ -245,7 +393,10 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     if (currentContent === undefined && nextContent === undefined) {
       throw new Error(`Published chapter is missing: ${currentNormalized}`)
     }
-    if (nextContent !== content) await writeFile(nextPath, content, { encoding: "utf8" })
+    if (nextContent !== content) {
+      await mkdir(resolve(nextPath, ".."), { recursive: true })
+      await writeFile(nextPath, content, { encoding: "utf8" })
+    }
     if (currentPath !== nextPath && currentContent !== undefined) await unlink(currentPath)
   }
 
@@ -262,7 +413,7 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
         throw new Error(`Imported files must be regular .md files: ${sourcePath}`)
       }
       const targetRelativePath = normalizeWorkspacePath(`${destination}/${basename(source)}`)
-      assertWorkspaceMutationAllowed(targetRelativePath, "file", "user")
+      assertUserCanCreateMarkdown(targetRelativePath)
       return { source, target: resolveInside(root, targetRelativePath) }
     }))
     for (const copy of copies) {
@@ -288,7 +439,7 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     const copies = files.map((source) => {
       const sourceRelativePath = relative(sourceRoot, source).replaceAll("\\", "/")
       const targetRelativePath = normalizeWorkspacePath(`${destination}/${sourceRelativePath}`)
-      assertWorkspaceMutationAllowed(targetRelativePath, "file", "user")
+      assertUserCanCreateMarkdown(targetRelativePath)
       return { source, target: resolveInside(root, targetRelativePath) }
     })
     for (const copy of copies) {

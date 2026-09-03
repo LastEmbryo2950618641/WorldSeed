@@ -5,6 +5,7 @@ import { invokeBackend } from "../../api/client.js"
 import {
   clearLegacyCreationDeskGoals,
   loadLegacyCreationDeskGoals,
+  type GoalTaxonomyInput,
 } from "./creation-desk-goals.js"
 
 const emptySnapshot = (projectId: string): DeductionGoalsSnapshot => ({
@@ -15,6 +16,20 @@ const emptySnapshot = (projectId: string): DeductionGoalsSnapshot => ({
   updatedAtMs: 0,
 })
 
+function taxonomyPayload(taxonomy: GoalTaxonomyInput | undefined): GoalTaxonomyInput {
+  if (taxonomy === undefined) return {}
+  return {
+    ...(taxonomy.narrativeKind === undefined ? {} : { narrativeKind: taxonomy.narrativeKind }),
+    ...(taxonomy.scale === undefined ? {} : { scale: taxonomy.scale }),
+    ...(taxonomy.plantChapterSequence === undefined
+      ? {}
+      : { plantChapterSequence: taxonomy.plantChapterSequence }),
+    ...(taxonomy.payoffChapterSequence === undefined
+      ? {}
+      : { payoffChapterSequence: taxonomy.payoffChapterSequence }),
+  }
+}
+
 export function useDeductionGoals(input: Readonly<{
   projectId: string | undefined
   workspaceRootRef: string | undefined
@@ -23,7 +38,8 @@ export function useDeductionGoals(input: Readonly<{
   busy: boolean
   error: string | undefined
   refresh(): Promise<void>
-  addGoal(content: string): Promise<void>
+  addGoal(content: string, taxonomy?: GoalTaxonomyInput): Promise<void>
+  updateGoal(goalId: string, patch: { content?: string } & GoalTaxonomyInput): Promise<void>
   updateContent(goalId: string, content: string): Promise<void>
   completeGoal(goalId: string): Promise<void>
   removeGoal(goalId: string): Promise<void>
@@ -99,30 +115,45 @@ export function useDeductionGoals(input: Readonly<{
     return { projectId: input.projectId, workspaceRootRef: input.workspaceRootRef }
   }
 
+  const updateGoal = async (
+    goalId: string,
+    patch: { content?: string } & GoalTaxonomyInput,
+  ): Promise<void> => {
+    const content = patch.content?.trim()
+    const taxonomy = taxonomyPayload(patch)
+    const hasTaxonomy = taxonomy.narrativeKind !== undefined
+      || taxonomy.scale !== undefined
+      || taxonomy.plantChapterSequence !== undefined
+      || taxonomy.payoffChapterSequence !== undefined
+    if ((content === undefined || content.length === 0) && !hasTaxonomy) return
+    const project = requireProject()
+    await mutate(() => invokeBackend("deduction.goals.update", {
+      ...project,
+      goalId,
+      action: "update_content",
+      ...(content === undefined || content.length === 0 ? {} : { content }),
+      ...taxonomy,
+    }))
+  }
+
   return {
     snapshot,
     busy,
     error,
     refresh,
-    addGoal: async (content: string): Promise<void> => {
+    addGoal: async (content: string, taxonomy?: GoalTaxonomyInput): Promise<void> => {
       const trimmed = content.trim()
       if (trimmed.length === 0) return
       const project = requireProject()
       await mutate(() => invokeBackend("deduction.goals.create", {
         ...project,
         content: trimmed,
+        ...taxonomyPayload(taxonomy),
       }))
     },
+    updateGoal,
     updateContent: async (goalId: string, content: string): Promise<void> => {
-      const trimmed = content.trim()
-      if (trimmed.length === 0) return
-      const project = requireProject()
-      await mutate(() => invokeBackend("deduction.goals.update", {
-        ...project,
-        goalId,
-        action: "update_content",
-        content: trimmed,
-      }))
+      await updateGoal(goalId, { content })
     },
     completeGoal: async (goalId: string): Promise<void> => {
       const project = requireProject()

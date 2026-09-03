@@ -50,6 +50,8 @@ import {
   synopsisConversationListPayloadSchema,
   synopsisConversationSendPayloadSchema,
   synopsisConversationRefreshChoicesPayloadSchema,
+  synopsisConversationDiscardLastUserTurnPayloadSchema,
+  synopsisConversationAcknowledgeBudgetPayloadSchema,
   synopsisConversationStreamPeekPayloadSchema,
   synopsisResolveTurnInputPayloadSchema,
   synopsisBeginTurnPayloadSchema,
@@ -64,6 +66,13 @@ import {
   settingsExtractionListPayloadSchema,
   settingsExtractionProposalApprovePayloadSchema,
   settingsExtractionProposalRejectPayloadSchema,
+  settingsLineageListPayloadSchema,
+  settingsLineageGetCommitPayloadSchema,
+  settingsLineageHeadMetaPayloadSchema,
+  settingsLineagePathsPayloadSchema,
+  settingsLineageReadAsOfPayloadSchema,
+  settingsLineageRestoreAsCurrentPayloadSchema,
+  settingsLineageAnnotatePayloadSchema,
   synopsisStagingPromoteListPayloadSchema,
   synopsisStagingPromoteApprovePayloadSchema,
   synopsisStagingPromoteRejectPayloadSchema,
@@ -80,10 +89,14 @@ import {
   turnStartPayloadSchema,
   workspaceReadPayloadSchema,
   workspaceSavePayloadSchema,
+  workspaceDeletePayloadSchema,
+  workspaceCreateDirectoryPayloadSchema,
+  workspaceImportFilesPayloadSchema,
+  workspaceImportFolderPayloadSchema,
   worldEvolvePayloadSchema,
   worldQueryPayloadSchema,
 } from "@worldseed/contracts"
-import { digest } from "../core/index.js"
+import { digest, isChapterVolumeContainerPath } from "../core/index.js"
 import {
   ChapterNotFoundError,
   ProjectLifecycleError,
@@ -337,6 +350,38 @@ export class BackendFacade {
         await runtime.saveMarkdown(payload.relativePath, payload.content)
         return { relativePath: payload.relativePath, saved: true }
       }
+      case "workspace.delete": {
+        const payload = workspaceDeletePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.ensureWritableHistoryBranch(this.container.now())
+        if (isChapterVolumeContainerPath(payload.relativePath)) {
+          await runtime.deleteEmptyVolumeDirectory(payload.relativePath)
+        } else {
+          await runtime.deleteMarkdown(payload.relativePath)
+        }
+        return { relativePath: payload.relativePath, deleted: true }
+      }
+      case "workspace.createDirectory": {
+        const payload = workspaceCreateDirectoryPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.ensureWritableHistoryBranch(this.container.now())
+        await runtime.createDirectory(payload.relativePath)
+        return { relativePath: payload.relativePath, created: true }
+      }
+      case "workspace.importFiles": {
+        const payload = workspaceImportFilesPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.ensureWritableHistoryBranch(this.container.now())
+        const imported = await runtime.importMarkdownFiles(payload.destination, payload.sourcePaths)
+        return { destination: payload.destination, imported }
+      }
+      case "workspace.importFolder": {
+        const payload = workspaceImportFolderPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.ensureWritableHistoryBranch(this.container.now())
+        const imported = await runtime.importMarkdownFolder(payload.destination, payload.sourceFolder)
+        return { destination: payload.destination, imported }
+      }
       case "chapter.list": {
         const payload = chapterListPayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
@@ -500,7 +545,10 @@ export class BackendFacade {
       case "synopsis.conversation.list": {
         const payload = synopsisConversationListPayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
-        return runtime.createSynopsisConversationService().list(payload.projectId)
+        return runtime.createSynopsisConversationService().list({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+        })
       }
       case "synopsis.conversation.send": {
         const payload = synopsisConversationSendPayloadSchema.parse(request.payload)
@@ -510,6 +558,7 @@ export class BackendFacade {
           workspaceRootRef: payload.workspaceRootRef,
           message: payload.message,
           model: this.resolveModel(payload.model),
+          ...(payload.presentation === undefined ? {} : { presentation: payload.presentation }),
           ...(payload.chapterIntent === undefined ? {} : { chapterIntent: payload.chapterIntent }),
           ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
           ...(payload.deadlineMs === undefined ? {} : { deadlineMs: payload.deadlineMs }),
@@ -523,9 +572,26 @@ export class BackendFacade {
           workspaceRootRef: payload.workspaceRootRef,
           model: this.resolveModel(payload.model),
           ...(payload.messageId === undefined ? {} : { messageId: payload.messageId }),
+          ...(payload.presentation === undefined ? {} : { presentation: payload.presentation }),
           ...(payload.chapterIntent === undefined ? {} : { chapterIntent: payload.chapterIntent }),
           ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
           ...(payload.deadlineMs === undefined ? {} : { deadlineMs: payload.deadlineMs }),
+        })
+      }
+      case "synopsis.conversation.discardLastUserTurn": {
+        const payload = synopsisConversationDiscardLastUserTurnPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSynopsisConversationService().discardLastUserTurn({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          ...(payload.sessionId === undefined ? {} : { sessionId: payload.sessionId }),
+        })
+      }
+      case "synopsis.conversation.acknowledgeBudget": {
+        const payload = synopsisConversationAcknowledgeBudgetPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSynopsisConversationService().acknowledgeBudget({
+          projectId: payload.projectId,
         })
       }
       case "synopsis.conversation.streamPeek": {
@@ -580,6 +646,14 @@ export class BackendFacade {
         return runtime.createDeductionGoalsService().create({
           projectId: payload.projectId,
           content: payload.content,
+          ...(payload.narrativeKind === undefined ? {} : { narrativeKind: payload.narrativeKind }),
+          ...(payload.scale === undefined ? {} : { scale: payload.scale }),
+          ...(payload.plantChapterSequence === undefined
+            ? {}
+            : { plantChapterSequence: payload.plantChapterSequence }),
+          ...(payload.payoffChapterSequence === undefined
+            ? {}
+            : { payoffChapterSequence: payload.payoffChapterSequence }),
         })
       }
       case "deduction.goals.update": {
@@ -590,6 +664,14 @@ export class BackendFacade {
           goalId: payload.goalId,
           ...(payload.content === undefined ? {} : { content: payload.content }),
           ...(payload.action === undefined ? {} : { action: payload.action }),
+          ...(payload.narrativeKind === undefined ? {} : { narrativeKind: payload.narrativeKind }),
+          ...(payload.scale === undefined ? {} : { scale: payload.scale }),
+          ...(payload.plantChapterSequence === undefined
+            ? {}
+            : { plantChapterSequence: payload.plantChapterSequence }),
+          ...(payload.payoffChapterSequence === undefined
+            ? {}
+            : { payoffChapterSequence: payload.payoffChapterSequence }),
         })
       }
       case "deduction.goals.progress.set": {
@@ -639,6 +721,7 @@ export class BackendFacade {
           projectId: payload.projectId,
           workspaceRootRef: payload.workspaceRootRef,
           proposalIds: payload.proposalIds,
+          ...(payload.reasonOverride === undefined ? {} : { reasonOverride: payload.reasonOverride }),
         })
       }
       case "settings.extraction.proposal.reject": {
@@ -648,6 +731,72 @@ export class BackendFacade {
           projectId: payload.projectId,
           proposalIds: payload.proposalIds,
         })
+      }
+      case "settings.lineage.list": {
+        const payload = settingsLineageListPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.ensureSettingsLineageSeeded()
+        return runtime.createSettingsLineageService().list({
+          relativePath: payload.relativePath,
+          ...(payload.limit === undefined ? {} : { limit: payload.limit }),
+        })
+      }
+      case "settings.lineage.getCommit": {
+        const payload = settingsLineageGetCommitPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSettingsLineageService().getCommit(payload.commitId)
+      }
+      case "settings.lineage.headMeta": {
+        const payload = settingsLineageHeadMetaPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.ensureSettingsLineageSeeded()
+        return runtime.createSettingsLineageService().headMeta(payload.relativePath)
+      }
+      case "settings.lineage.paths": {
+        const payload = settingsLineagePathsPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.ensureSettingsLineageSeeded()
+        return runtime.createSettingsLineageService().listPaths()
+      }
+      case "settings.lineage.readAsOf": {
+        const payload = settingsLineageReadAsOfPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.ensureSettingsLineageSeeded()
+        const resolved = await runtime.createSettingsLineageService().readAsOfChapter({
+          relativePath: payload.relativePath,
+          chapterSequence: payload.chapterSequence,
+        })
+        if (resolved === undefined) {
+          throw new Error(`settings lineage as-of not found: ${payload.relativePath} @ chapter ${String(payload.chapterSequence)}`)
+        }
+        return {
+          relativePath: payload.relativePath.replaceAll("\\", "/"),
+          chapterSequence: payload.chapterSequence,
+          commitId: resolved.commitId,
+          commitSeq: resolved.commitSeq,
+          markdown: resolved.markdown,
+        }
+      }
+      case "settings.lineage.restoreAsCurrent": {
+        const payload = settingsLineageRestoreAsCurrentPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.ensureSettingsLineageSeeded()
+        const entry = await runtime.createSettingsLineageService().restoreAsCurrent({
+          commitId: payload.commitId,
+          confirmPhrase: payload.confirmPhrase,
+        })
+        return { entry }
+      }
+      case "settings.lineage.annotate": {
+        const payload = settingsLineageAnnotatePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.ensureSettingsLineageSeeded()
+        const entry = await runtime.createSettingsLineageService().annotate({
+          commitId: payload.commitId,
+          ...(payload.storyTime === undefined ? {} : { storyTime: payload.storyTime }),
+          ...(payload.summary === undefined ? {} : { summary: payload.summary }),
+        })
+        return { entry }
       }
       case "synopsis.staging.promote.list": {
         const payload = synopsisStagingPromoteListPayloadSchema.parse(request.payload)
@@ -664,6 +813,7 @@ export class BackendFacade {
           projectId: payload.projectId,
           workspaceRootRef: payload.workspaceRootRef,
           proposalIds: payload.proposalIds,
+          ...(payload.reasonOverride === undefined ? {} : { reasonOverride: payload.reasonOverride }),
         })
       }
       case "synopsis.staging.promote.reject": {

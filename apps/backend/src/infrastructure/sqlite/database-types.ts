@@ -312,6 +312,10 @@ export type DeductionGoalRow = {
   content: string
   source: "user" | "agent"
   lifecycle: "active" | "completed" | "removed"
+  narrative_kind: "general" | "foreshadow" | "climax"
+  scale: "short" | "medium" | "long"
+  plant_chapter_sequence: number | null
+  payoff_chapter_sequence: number | null
   created_at_ms: Timestamp
   updated_at_ms: Timestamp
   completed_at_ms: Timestamp | null
@@ -370,6 +374,38 @@ export type SynopsisStagingPromoteProposalRow = {
   source_message_id: string | null
   created_at_ms: Timestamp
   resolved_at_ms: Timestamp | null
+}
+
+export type SettingsBlobRow = {
+  digest: string
+  markdown: string
+  byte_size: number
+  created_at_ms: Timestamp
+}
+
+export type SettingsCommitRow = {
+  commit_id: string
+  project_id: string
+  commit_seq: number
+  relative_path: string
+  op: "upsert" | "delete"
+  blob_digest: string | null
+  causing_chapter_id: string | null
+  causing_chapter_sequence: number | null
+  story_time: string | null
+  source_kind: "extraction_approve" | "staging_promote" | "workspace_save" | "migration_seed" | "history_restore"
+  source_ref: string | null
+  summary: string | null
+  created_at_ms: Timestamp
+}
+
+export type SettingsHeadRow = {
+  project_id: string
+  relative_path: string
+  commit_id: string
+  blob_digest: string | null
+  commit_seq: number
+  updated_at_ms: Timestamp
 }
 
 export type ActiveScopeRefRow = {
@@ -838,6 +874,9 @@ export type ProjectDatabase = {
   deduction_goal_proposals: DeductionGoalProposalRow
   settings_extraction_proposals: SettingsExtractionProposalRow
   synopsis_staging_promote_proposals: SynopsisStagingPromoteProposalRow
+  settings_blobs: SettingsBlobRow
+  settings_commits: SettingsCommitRow
+  settings_heads: SettingsHeadRow
   model_context_chains: ModelContextChainRow
   model_context_messages: ModelContextMessageRow
   active_scope_refs: ActiveScopeRefRow

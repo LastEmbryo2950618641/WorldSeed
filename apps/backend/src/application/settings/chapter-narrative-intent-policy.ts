@@ -31,6 +31,44 @@ export function chapterNarrativeIntentPhaseAppendix(
   ].join("\n")
 }
 
+export type ChapterPresentationBudget = Readonly<{
+  descriptionRulePath?: string | undefined
+  proseStyleRulePath?: string | undefined
+  minimumWordCount: number
+  maximumWordCount: number
+}>
+
+/** Inject creation-desk presentation controls into synopsis discuss (word budget, style paths). */
+export function chapterPresentationPhaseAppendix(
+  presentation: ChapterPresentationBudget | undefined,
+  phase: AIPhase,
+): string | undefined {
+  if (phase !== "synopsis_discuss" || presentation === undefined) return undefined
+  const lines = [
+    "## 创作台正文预算（本轮强制）",
+    "说明：下列字数来自用户在创作台勾选的**单章正文主体字数范围**（标题不计入）。",
+    "规划弧大纲、估章数、判断是否超单章容量时，**必须**以此为准，不得改用自拟的「每章一两万字」之类默认。",
+    "",
+    `### 单章字数：${String(presentation.minimumWordCount)}–${String(presentation.maximumWordCount)} 字`,
+    "- 弧大纲中的「节奏与字数」须引用此区间；",
+    "- 若情节容量明显超出该区间，应建议拆章 / 先落大纲，而不是暗中提高单章字数。",
+  ]
+  if (presentation.descriptionRulePath !== undefined && presentation.descriptionRulePath.length > 0) {
+    lines.push("", `### 描写规则路径：\`${presentation.descriptionRulePath}\``)
+  }
+  if (presentation.proseStyleRulePath !== undefined && presentation.proseStyleRulePath.length > 0) {
+    lines.push("", `### 笔风规则路径：\`${presentation.proseStyleRulePath}\``)
+  }
+  lines.push(
+    "",
+    "### 表现规则协作",
+    "- 可用 `request_read` + `sourceKinds: [\"rule\"]` 读取 `表现输出/描写规则/` 与 `表现输出/笔风规则/`（可先 `list` 目录再全文/片段读取）；",
+    "- 用户要求修改或新建描写/笔风规则时，在 `artifact.presentationWrites` 给出完整 Markdown 与路径（`mode: create|update`）；系统会立即写入工作区；",
+    "- 路径只能落在 `表现输出/描写规则/*.md` 或 `表现输出/笔风规则/*.md`；这不是设定集，也**不要**放进 `stagingPromote`。",
+  )
+  return lines.join("\n")
+}
+
 function boundaryPaceSection(pace: ChapterNarrativeIntent["boundaryPace"]): string {
   if (pace === "hold_without_resolution") {
     return [

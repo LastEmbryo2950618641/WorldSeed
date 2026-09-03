@@ -101,7 +101,7 @@ describe("synopsis discuss missing artifact recovery", () => {
           sessionId,
           projectId,
           chapterSequence: 1,
-          synopsisPath: "章节正文/第一章 待命名 [剧情梗概].md",
+          synopsisPath: "章节正文/第一卷 待命名/第一章 待命名 [剧情梗概].md",
           title: "第一章 待命名",
           status: "active" as const,
           createdAtMs: 1,
@@ -109,6 +109,9 @@ describe("synopsis discuss missing artifact recovery", () => {
         }
       },
       async listMessages() {
+        return [...storedMessages]
+      },
+      async listMessagesForProject() {
         return [...storedMessages]
       },
       async appendMessage(input: (typeof storedMessages)[number]) {
@@ -123,7 +126,7 @@ describe("synopsis discuss missing artifact recovery", () => {
           sessionId,
           projectId,
           chapterSequence: 1,
-          synopsisPath: "章节正文/第一章 待命名 [剧情梗概].md",
+          synopsisPath: "章节正文/第一卷 待命名/第一章 待命名 [剧情梗概].md",
           title: "第一章 待命名",
           status: "active" as const,
           createdAtMs: 1,

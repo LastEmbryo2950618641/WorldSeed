@@ -304,7 +304,7 @@ describe("shared contracts", () => {
         contextCompressionTargetRatio: 0.5,
         outputTokenLimitMode: "model",
         maxWallTimeMs: 7_200_000,
-        maxRetrievalRounds: 10,
+        maxRetrievalRounds: 30,
       },
       retrieval: {
         maxRequestsPerRound: 10,
@@ -468,5 +468,85 @@ describe("shared contracts", () => {
       baseRulesDigest: "base-digest",
       digest: "manifest-digest",
     }).success).toBe(true)
+  })
+})
+
+describe("deduction goal taxonomy helpers", () => {
+  it("filters chapter relevance by plant/payoff window", async () => {
+    const {
+      isGoalRelevantToChapter,
+      selectGoalsForChapterContext,
+      deductionGoalSchema,
+      goalProposalPayloadSchema,
+    } = await import("../src/deduction-goals.js")
+
+    const base = {
+      goalId: "00000000-0000-4000-8000-000000000010",
+      projectId: "00000000-0000-4000-8000-000000000011",
+      content: "潮纹",
+      source: "user" as const,
+      lifecycle: "active" as const,
+      narrativeKind: "foreshadow" as const,
+      scale: "long" as const,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+    }
+    expect(isGoalRelevantToChapter({ ...base }, 5)).toBe(true)
+    expect(isGoalRelevantToChapter({
+      ...base,
+      plantChapterSequence: 10,
+      payoffChapterSequence: 40,
+    }, 5)).toBe(false)
+    expect(isGoalRelevantToChapter({
+      ...base,
+      plantChapterSequence: 10,
+      payoffChapterSequence: 40,
+    }, 20)).toBe(true)
+    expect(isGoalRelevantToChapter({
+      ...base,
+      plantChapterSequence: 10,
+    }, 9)).toBe(false)
+    expect(isGoalRelevantToChapter({
+      ...base,
+      payoffChapterSequence: 40,
+    }, 41)).toBe(false)
+
+    const goals = Array.from({ length: 30 }, (_, index) => deductionGoalSchema.parse({
+      ...base,
+      goalId: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      content: `目标 ${String(index)}`,
+      narrativeKind: index % 3 === 0 ? "climax" : index % 3 === 1 ? "foreshadow" : "general",
+      createdAtMs: index + 1,
+      updatedAtMs: index + 1,
+    }))
+    expect(selectGoalsForChapterContext(goals, 1, 24)).toHaveLength(24)
+
+    expect(goalProposalPayloadSchema.safeParse({
+      kind: "create",
+      content: "坏窗口",
+      plantChapterSequence: 40,
+      payoffChapterSequence: 10,
+    }).success).toBe(false)
+  })
+
+  it("maps chapter situation and progress labels by narrative kind", async () => {
+    const {
+      chapterSituationSectionTitle,
+      chapterSituationEmptyHint,
+      editChapterSituationLabel,
+      labelForGoalProgressStatus,
+      labelForGoalRowChip,
+    } = await import("../src/deduction-goals.js")
+
+    expect(chapterSituationSectionTitle("general", 3)).toBe("第 3 章完成情况")
+    expect(chapterSituationSectionTitle("foreshadow", 3)).toBe("第 3 章收束情况")
+    expect(chapterSituationSectionTitle("climax", 3)).toBe("第 3 章推进情况")
+    expect(editChapterSituationLabel("foreshadow")).toBe("编辑本章收束预期")
+    expect(chapterSituationEmptyHint("climax")).toContain("峰值才标已爆发")
+    expect(labelForGoalProgressStatus("achieved", "foreshadow")).toBe("已收束")
+    expect(labelForGoalProgressStatus("achieved", "climax")).toBe("已爆发")
+    expect(labelForGoalProgressStatus("partial", "climax")).toBe("在升温")
+    expect(labelForGoalRowChip("review", "foreshadow")).toBe("待核对收束")
+    expect(labelForGoalRowChip("planned", "climax")).toBe("已填写")
   })
 })

@@ -121,6 +121,13 @@ export const internalDraftArtifactSchema = z.object({
 export const chapterNamingArtifactSchema = z.object({
   chapterNumberText: z.string().min(1),
   heading: z.string().min(1),
+  /** Volume folder under 章节正文, e.g. `第一卷 潮水退去时`. */
+  volumeFolderName: z.string().min(1).refine(
+    (value) => /^第(?:\d+|[零一二三四五六七八九十百]+)卷\s+\S.*$/u.test(value.trim()),
+    {
+      message: "volumeFolderName 必须为「第N卷 标题」形式（例如「第一卷 潮水退去时」）；章节不能直接放在章节正文根下",
+    },
+  ),
   continuityEvidenceRefs: z.array(referenceSchema),
 })
 
@@ -490,16 +497,61 @@ export const revisionAssistArtifactSchema = z.object({
 })
 
 const synopsisDiscussGoalIdSchema = z.string().min(1)
+const synopsisDiscussGoalNarrativeKindSchema = z.enum(["general", "foreshadow", "climax"])
+const synopsisDiscussGoalScaleSchema = z.enum(["short", "medium", "long"])
 
 const synopsisDiscussGoalProposalPayloadSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("create"),
     content: z.string().min(1).max(2_000),
+    narrativeKind: synopsisDiscussGoalNarrativeKindSchema.optional(),
+    scale: synopsisDiscussGoalScaleSchema.optional(),
+    plantChapterSequence: z.number().int().positive().optional(),
+    payoffChapterSequence: z.number().int().positive().optional(),
+  }).superRefine((payload, context) => {
+    if (
+      payload.plantChapterSequence !== undefined
+      && payload.payoffChapterSequence !== undefined
+      && payload.plantChapterSequence > payload.payoffChapterSequence
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "plantChapterSequence must be ≤ payoffChapterSequence",
+        path: ["plantChapterSequence"],
+      })
+    }
   }),
   z.object({
     kind: z.literal("update_content"),
     goalId: synopsisDiscussGoalIdSchema,
-    content: z.string().min(1).max(2_000),
+    content: z.string().min(1).max(2_000).optional(),
+    narrativeKind: synopsisDiscussGoalNarrativeKindSchema.optional(),
+    scale: synopsisDiscussGoalScaleSchema.optional(),
+    plantChapterSequence: z.number().int().positive().optional(),
+    payoffChapterSequence: z.number().int().positive().optional(),
+  }).superRefine((payload, context) => {
+    const hasTaxonomy = payload.narrativeKind !== undefined
+      || payload.scale !== undefined
+      || payload.plantChapterSequence !== undefined
+      || payload.payoffChapterSequence !== undefined
+    if ((payload.content === undefined || payload.content.trim().length === 0) && !hasTaxonomy) {
+      context.addIssue({
+        code: "custom",
+        message: "content or taxonomy fields required for update_content",
+        path: ["content"],
+      })
+    }
+    if (
+      payload.plantChapterSequence !== undefined
+      && payload.payoffChapterSequence !== undefined
+      && payload.plantChapterSequence > payload.payoffChapterSequence
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "plantChapterSequence must be ≤ payoffChapterSequence",
+        path: ["plantChapterSequence"],
+      })
+    }
   }),
   z.object({
     kind: z.literal("complete"),
@@ -552,10 +604,29 @@ export const synopsisStagingPromoteArtifactSchema = z.object({
   reason: z.string().max(1_000).optional(),
 })
 
+/** Immediate create/update for 描写规则 / 笔风规则 during synopsis discuss. */
+export const synopsisPresentationWriteSchema = z.object({
+  relativePath: z.string().regex(
+    /^表现输出\/(?:描写规则|笔风规则)\/[^/][^\n]*\.md$/u,
+    "presentationWrites 路径必须位于 表现输出/描写规则/ 或 表现输出/笔风规则/ 下",
+  ),
+  markdown: z.string().min(1).max(80_000),
+  mode: z.enum(["create", "update"]),
+})
+
 export const synopsisDiscussArtifactSchema = z.object({
   assistantMessage: z.string().min(1),
   chapterTitle: z.string().min(1).optional(),
+  /** Volume folder under 章节正文, e.g. `第一卷 潮水退去时`. */
+  volumeFolderName: z.string().min(1).refine(
+    (value) => /^第(?:\d+|[零一二三四五六七八九十百]+)卷\s+\S.*$/u.test(value.trim()),
+    {
+      message: "volumeFolderName 必须为「第N卷 标题」形式（例如「第一卷 潮水退去时」）",
+    },
+  ).optional(),
   synopsisBody: z.string().min(1).optional(),
+  /** Full chapter outline markdown (`…[剧情细纲].md`); preferred turn bootstrap when present. */
+  outlineBody: z.string().min(1).optional(),
   choices: z.array(z.object({
     label: z.string().min(1),
     action: z.enum(["start_turn", "continue_discuss", "promote_staging", "confirm_arc_plan"]),
@@ -563,6 +634,8 @@ export const synopsisDiscussArtifactSchema = z.object({
   goalProposals: z.array(synopsisDiscussGoalProposalSchema).optional(),
   stagingDelta: synopsisStagingDeltaSchema.optional(),
   stagingPromote: synopsisStagingPromoteArtifactSchema.optional(),
+  /** Create or overwrite 描写/笔风规则 Markdown; applied immediately (not 设定集 promote). */
+  presentationWrites: z.array(synopsisPresentationWriteSchema).min(1).max(20).optional(),
   arcPlan: z.object({
     markdown: z.string().min(1).max(20_000),
     estimatedChapterCount: z.number().int().positive().max(50).optional(),
@@ -655,4 +728,5 @@ export type CommitReviewArtifact = z.infer<typeof commitReviewArtifactSchema>
 export type RevisionReviewArtifact = z.infer<typeof revisionReviewArtifactSchema>
 export type RevisionAssistArtifact = z.infer<typeof revisionAssistArtifactSchema>
 export type SynopsisDiscussArtifact = z.infer<typeof synopsisDiscussArtifactSchema>
+export type SynopsisPresentationWrite = z.infer<typeof synopsisPresentationWriteSchema>
 export type SettingsExtractionArtifact = z.infer<typeof settingsExtractionArtifactSchema>

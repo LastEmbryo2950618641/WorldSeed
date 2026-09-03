@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels"
-import { ChevronDown, Cloud, Cpu, FolderOpen, PanelLeftClose, PanelRightClose, Save, Settings2 } from "lucide-react"
+import { ChevronDown, Cloud, Cpu, FolderOpen, PanelLeftClose, PanelRightClose, Save, Settings2, X } from "lucide-react"
 import type {
   ChapterRevision,
   ChapterRevisionConversationListResult,
@@ -19,15 +19,19 @@ import type {
   SynopsisConversationMessage,
   SynopsisConversationSendResult,
   SynopsisConversationStreamSnapshot,
+  SynopsisConversationBudgetAdvisory,
+  SynopsisConversationStreamUsage,
   SynopsisStagingPromoteProposal,
-  ChapterNarrativeIntent,
 } from "@worldseed/contracts"
 
 import {
   browserDemoProject,
   invokeBackend,
+  abandonBackendRequest,
+  BackendRequestAbandonedError,
   readModelProfiles,
   saveModelProfiles as persistModelProfiles,
+  type BackendWaitTimeoutInfo,
   type GraphSlice,
   type OpenProject,
   type RecoverableTaskList,
@@ -41,12 +45,21 @@ import { ProjectRail } from "../features/projects/ProjectRail.js"
 import { WorkNameControl } from "../features/projects/WorkNameControl.js"
 import { rememberWorkName } from "../features/projects/work-name-history.js"
 import { WorkspaceTree } from "../features/workspace/WorkspaceTree.js"
+import { WorkspaceNameDialog } from "../features/workspace/WorkspaceNameDialog.js"
+import { canCreateFolderInDirectory, findDuplicateVolumeSequence, isValidVolumeFolderName, isChapterVolumeContainerPath, isVolumeDirectoryPath, resolveCreateDestination } from "../features/workspace/workspace-locks.js"
 import { EditorArea } from "../features/editor/EditorArea.js"
+import { useCreationDeskPresentationPreferences } from "../features/editor/creation-desk-presentation-preferences.js"
+import { SettingsLineagePanel } from "../features/settings/SettingsLineagePanel.js"
 import { ChapterWorkspaceRail } from "../features/editor/ChapterWorkspaceRail.js"
 import { CreationDeskProgressReviewDialog } from "../features/editor/CreationDeskProgressReviewDialog.js"
 import { countPendingReviews } from "../features/editor/creation-desk-goals.js"
-import { isSynopsisMarkdownPath, resolveChapterMarkdownKind } from "../features/editor/synopsis-path.js"
-import { RightRail } from "../features/status/RightRail.js"
+import {
+  isChapterPlanningMarkdownPath,
+  resolveChapterMarkdownKind,
+  resolveChapterSurfacePath,
+} from "../features/editor/synopsis-path.js"
+import { BackendWaitTimeoutDialog } from "../features/status/BackendWaitTimeoutDialog.js"
+import { RightRail, summarizeSynopsisStreamTokenMetrics, summarizeSynopsisUsageTokenMetrics, type TaskTokenMetrics } from "../features/status/RightRail.js"
 import { RightPanelViewport } from "../features/status/RightPanelViewport.js"
 import { ModelConfigurationDialog, type ModelProfile } from "../features/settings/ModelConfigurationDialog.js"
 import { ProjectSettingsDialog } from "../features/settings/ProjectSettingsDialog.js"
@@ -63,6 +76,7 @@ export function App(): React.JSX.Element {
   const [project, setProject] = useState<OpenProject | undefined>(browserDemoProject)
   const [report, setReport] = useState<WorkspaceReport>({ inventory: [], issues: [] })
   const [selectedPath, setSelectedPath] = useState<string>()
+  const [lineageMode, setLineageMode] = useState(false)
   const [openedDocumentPath, setOpenedDocumentPath] = useState<string>()
   const [content, setContent] = useState("")
   const [chapterBody, setChapterBody] = useState("")
@@ -74,26 +88,44 @@ export function App(): React.JSX.Element {
   const [chapterConversationBusy, setChapterConversationBusy] = useState(false)
   const [synopsisConversation, setSynopsisConversation] = useState<SynopsisConversationListResult>({ messages: [] })
   const [synopsisConversationBusy, setSynopsisConversationBusy] = useState(false)
+  const [synopsisDraftRestore, setSynopsisDraftRestore] = useState<{ text: string; token: number }>()
+  const [backendWaitPrompt, setBackendWaitPrompt] = useState<{
+    info: BackendWaitTimeoutInfo
+    decide: (choice: "continue" | "abandon") => void
+  }>()
   const [pendingStagingPromotes, setPendingStagingPromotes] = useState<readonly SynopsisStagingPromoteProposal[]>([])
   const [synopsisStream, setSynopsisStream] = useState<SynopsisConversationStreamSnapshot>()
+  const [synopsisUsage, setSynopsisUsage] = useState<SynopsisConversationStreamUsage>()
+  const synopsisActiveRequestRef = useRef<string | null>(null)
+  const synopsisStopDraftRef = useRef<string | null>(null)
+  const synopsisSendInFlightRef = useRef(false)
   const [chapterSynopsis, setChapterSynopsis] = useState<ChapterSynopsis>()
   const [synopsisPanelOpen, setSynopsisPanelOpen] = useState(false)
   const [prompt, setPrompt] = useState("")
-  const [descriptionRule, setDescriptionRule] = useState("")
-  const [proseRule, setProseRule] = useState("")
-  const [minimumWordCount, setMinimumWordCount] = useState("2000")
-  const [maximumWordCount, setMaximumWordCount] = useState("3000")
-  const [boundaryPace, setBoundaryPace] = useState<ChapterNarrativeIntent["boundaryPace"]>("advance_allowed")
-  const [causalityFocus, setCausalityFocus] = useState<ChapterNarrativeIntent["causalityFocus"]>("auto")
+  const [presentation, updatePresentation] = useCreationDeskPresentationPreferences(project?.projectId)
+  const {
+    descriptionRule,
+    proseRule,
+    minimumWordCount,
+    maximumWordCount,
+    boundaryPace,
+    causalityFocus,
+  } = presentation
   const [task, setTask] = useState<TaskSnapshot>()
   const [graphSlice, setGraphSlice] = useState<GraphSlice>()
   const [error, setError] = useState<string>()
+  const dismissedWorkspaceIssueKeysRef = useRef(new Set<string>())
+  const [synopsisBudgetWarning, setSynopsisBudgetWarning] = useState<SynopsisConversationBudgetAdvisory>()
   const [postCommitNotice, setPostCommitNotice] = useState<string>()
   const [progressReviewOpen, setProgressReviewOpen] = useState(false)
   const [pendingReviewCount, setPendingReviewCount] = useState(0)
   const [pendingGraphLoad, setPendingGraphLoad] = useState<PendingGraphLoad>()
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
   const [projectSettingsOpen, setProjectSettingsOpen] = useState(false)
+  const [workspaceCreatePrompt, setWorkspaceCreatePrompt] = useState<{
+    kind: "file" | "directory"
+    parentPath: string
+  }>()
   const [projectSettings, setProjectSettings] = useState<ProjectSettings>()
   const [history, setHistory] = useState<HistoryOverview>()
   const [historyLoading, setHistoryLoading] = useState(false)
@@ -146,11 +178,62 @@ export function App(): React.JSX.Element {
         workspaceRootRef: project.workspaceRootRef,
       }),
     ])
-    const inventory = [
-      ...next.inventory.filter((entry) => !entry.path.startsWith("章节正文/") || entry.kind === "directory" || isSynopsisMarkdownPath(entry.path)),
+    const chapterFiles = [
+      ...next.inventory.filter((entry) => (
+        entry.path.startsWith("章节正文/")
+        && entry.kind === "file"
+        && isChapterPlanningMarkdownPath(entry.path)
+      )),
       ...chapters.map((chapter) => ({ path: chapter.publishPath, kind: "file" as const })),
+    ]
+    const surfaceByDir = new Map<string, string>()
+    const byDir = new Map<string, string[]>()
+    for (const entry of chapterFiles) {
+      const dir = entry.path.includes("/")
+        ? entry.path.slice(0, entry.path.lastIndexOf("/"))
+        : "章节正文"
+      const list = byDir.get(dir) ?? []
+      list.push(entry.path)
+      byDir.set(dir, list)
+    }
+    for (const [dir, paths] of byDir) {
+      // Group by chapter sequence stem loosely: keep one surface per unique basename stem.
+      const groups = new Map<string, string[]>()
+      for (const path of paths) {
+        const name = path.slice(path.lastIndexOf("/") + 1)
+        const stem = name
+          .replace(/\s*\[剧情梗概\]\.md$/u, "")
+          .replace(/\[剧情梗概\]\.md$/u, "")
+          .replace(/\s*\[剧情细纲\]\.md$/u, "")
+          .replace(/\[剧情细纲\]\.md$/u, "")
+          .replace(/\.md$/u, "")
+        const group = groups.get(stem) ?? []
+        group.push(path)
+        groups.set(stem, group)
+      }
+      for (const groupPaths of groups.values()) {
+        const surface = resolveChapterSurfacePath(groupPaths)
+        if (surface !== undefined) surfaceByDir.set(surface, surface)
+      }
+    }
+    const foldedChapterFiles = chapterFiles.filter((entry) => surfaceByDir.has(entry.path))
+    const inventory = [
+      ...next.inventory.filter((entry) => !entry.path.startsWith("章节正文/") || entry.kind === "directory"),
+      ...foldedChapterFiles,
     ].sort((left, right) => left.path.localeCompare(right.path, "zh-CN"))
     setReport({ ...next, inventory })
+    const workspaceGateIssues = next.issues.filter((issue) => (
+      issue.code === "invalid_synopsis_name"
+      || issue.code === "chapter_missing_volume"
+      || issue.code === "invalid_volume_name"
+    ))
+    const visibleIssues = workspaceGateIssues.filter((issue) => {
+      const key = `${issue.code}:${issue.path}:${issue.message}`
+      return !dismissedWorkspaceIssueKeysRef.current.has(key)
+    })
+    if (visibleIssues.length > 0) {
+      setError(visibleIssues.map((issue) => `${issue.path}：${issue.message}`).join("\n"))
+    }
   }, [project])
 
   const loadHistoryGraph = useCallback(async (anchorIds: readonly string[]): Promise<void> => {
@@ -204,6 +287,7 @@ export function App(): React.JSX.Element {
       setGraphSlice(undefined)
       setHistory(undefined)
       setPostCommitNotice(undefined)
+      dismissedWorkspaceIssueKeysRef.current.clear()
       return
     }
     let active = true
@@ -275,6 +359,7 @@ export function App(): React.JSX.Element {
       setError("无法打开文件：工作区文件路径为空或无效")
       return
     }
+    setLineageMode(false)
     setError(undefined)
     try {
       if (resolveChapterMarkdownKind(path) === "plot_synopsis") {
@@ -592,6 +677,102 @@ export function App(): React.JSX.Element {
     setSavedContent(content)
   }
 
+  const createWorkspaceMarkdown = (destinationOverride?: string): void => {
+    if (project === undefined) return
+    const destination = destinationOverride ?? resolveCreateDestination(selectedPath ?? openedDocumentPath)
+    setWorkspaceCreatePrompt({ kind: "file", parentPath: destination })
+  }
+
+  const createWorkspaceDirectory = (parentPath?: string): void => {
+    if (project === undefined) return
+    const destination = parentPath ?? resolveCreateDestination(selectedPath ?? openedDocumentPath)
+    setWorkspaceCreatePrompt({
+      kind: "directory",
+      parentPath: canCreateFolderInDirectory(destination) ? destination : "设定集",
+    })
+  }
+
+  const confirmWorkspaceCreate = async (rawName: string): Promise<void> => {
+    if (project === undefined || workspaceCreatePrompt === undefined) return
+    const { kind, parentPath } = workspaceCreatePrompt
+    setWorkspaceCreatePrompt(undefined)
+    setError(undefined)
+    try {
+      if (kind === "file") {
+        const trimmed = rawName.trim().replaceAll("\\", "/").split("/").at(-1) ?? ""
+        const filename = trimmed.length === 0
+          ? "未命名.md"
+          : trimmed.toLowerCase().endsWith(".md")
+            ? trimmed
+            : `${trimmed}.md`
+        const relativePath = `${parentPath}/${filename}`
+        await invokeBackend("workspace.save", {
+          projectId: project.projectId,
+          workspaceRootRef: project.workspaceRootRef,
+          relativePath,
+          content: `# ${filename.replace(/\.md$/iu, "")}\n\n`,
+        })
+        await refreshWorkspace()
+        await openFile(relativePath)
+        setPostCommitNotice(`已新建「${relativePath}」`)
+        return
+      }
+      const folderName = rawName.trim().replaceAll("\\", "/").split("/").filter((part) => part.length > 0).at(-1)
+      if (folderName === undefined || folderName.length === 0) return
+      if (parentPath === "章节正文" && !isValidVolumeFolderName(folderName)) {
+        setError("卷文件夹必须命名为「第N卷 标题」，例如「第一卷 潮水退去时」")
+        return
+      }
+      if (parentPath === "章节正文") {
+        const existingVolumes = report.inventory
+          .filter((entry) => entry.kind === "directory" && isVolumeDirectoryPath(entry.path))
+          .map((entry) => entry.path.slice("章节正文/".length))
+        const duplicate = findDuplicateVolumeSequence(folderName, existingVolumes)
+        if (duplicate !== undefined) {
+          setError(`卷序号重复：已存在「${duplicate}」，不能再创建「${folderName}」。同一序号只能有一个卷。`)
+          return
+        }
+      }
+      const relativePath = `${parentPath}/${folderName}`
+      await invokeBackend("workspace.createDirectory", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        relativePath,
+      })
+      await refreshWorkspace()
+      setSelectedPath(relativePath)
+      setPostCommitNotice(`已新建文件夹「${relativePath}」`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  const deleteWorkspaceMarkdown = async (path: string): Promise<void> => {
+    if (project === undefined) return
+    const isVolume = isChapterVolumeContainerPath(path)
+    const confirmLabel = isVolume
+      ? `确定删除卷文件夹「${path}」？其中的梗概/细纲会一并删除；若含正式正文则无法删除。`
+      : `确定删除「${path}」？此操作不可撤销。`
+    if (!window.confirm(confirmLabel)) return
+    setError(undefined)
+    try {
+      await invokeBackend("workspace.delete", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        relativePath: path,
+      })
+      if (selectedPath === path || openedDocumentPath === path) {
+        setSelectedPath(undefined)
+        setOpenedDocumentPath(undefined)
+        setContent("")
+        setSavedContent("")
+      }
+      await refreshWorkspace()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
   const monitorTask = async (taskId: string): Promise<void> => {
     let consecutiveFailures = 0
     for (;;) {
@@ -650,6 +831,11 @@ export function App(): React.JSX.Element {
       setError("模型配置尚未加载完成，请稍候再发送")
       return
     }
+    if (synopsisSendInFlightRef.current) {
+      setError("上一轮回复仍在收尾，请稍候再发送")
+      return
+    }
+    synopsisSendInFlightRef.current = true
     const optimisticId = crypto.randomUUID()
     const optimisticMessage: SynopsisConversationMessage = {
       messageId: optimisticId,
@@ -664,6 +850,7 @@ export function App(): React.JSX.Element {
       messages: [...current.messages, optimisticMessage],
     }))
     setSynopsisConversationBusy(true)
+    synopsisStopDraftRef.current = message
     setSynopsisStream({
       status: "running",
       thinking: "",
@@ -683,6 +870,11 @@ export function App(): React.JSX.Element {
             ...(synopsisConversation.session?.sessionId === undefined
               ? {}
               : { sessionId: synopsisConversation.session.sessionId }),
+          }, {
+            // Peeks must not inherit the long soft-wait used by send; a hung peek
+            // would keep the Stop button stuck after the reply is already visible.
+            waitTimeoutMs: 15_000,
+            onWaitTimeout: async () => "abandon",
           })
           // Ignore idle until send() begins the hub; ignore stale completed/failed
           // leftovers from the previous turn until this send has been observed as running.
@@ -696,10 +888,24 @@ export function App(): React.JSX.Element {
               continue
             }
             setSynopsisStream(peek)
-            break
+            if (peek.usage !== undefined) {
+              setSynopsisUsage(peek.usage)
+            }
+            if (peek.budgetAdvisory !== undefined) {
+              setSynopsisBudgetWarning(peek.budgetAdvisory)
+            }
+            // Keep peeking until send() sets pollStopped so post-discuss
+            // staging search updates still reach the stream bubble.
+          } else {
+            observedRunningStream = true
+            setSynopsisStream(peek)
+            if (peek.usage !== undefined) {
+              setSynopsisUsage(peek.usage)
+            }
+            if (peek.budgetAdvisory !== undefined) {
+              setSynopsisBudgetWarning(peek.budgetAdvisory)
+            }
           }
-          observedRunningStream = true
-          setSynopsisStream(peek)
         } catch {
           // Peek is best-effort while the model streams.
         }
@@ -723,6 +929,12 @@ export function App(): React.JSX.Element {
         projectId: project.projectId,
         workspaceRootRef: project.workspaceRootRef,
         message,
+        presentation: {
+          ...(descriptionRule.length === 0 ? {} : { descriptionRulePath: descriptionRule }),
+          ...(proseRule.length === 0 ? {} : { proseStyleRulePath: proseRule }),
+          minimumWordCount: parsedMinimumWordCount,
+          maximumWordCount: parsedMaximumWordCount,
+        },
         chapterIntent: { boundaryPace, causalityFocus },
         model: {
           baseUrl: activeModelProfile.baseUrl,
@@ -736,25 +948,130 @@ export function App(): React.JSX.Element {
           disableResponseStorage: activeModelProfile.disableResponseStorage,
           serviceTier: activeModelProfile.serviceTier,
         },
+      }, {
+        waitTimeoutMs: projectSettings?.execution.backendRequestWaitTimeoutMs
+          ?? 600_000,
+        onRequestStarted: ({ requestId }) => {
+          synopsisActiveRequestRef.current = requestId
+        },
+        onWaitTimeout: (info) => new Promise<"continue" | "abandon">((resolve) => {
+          setBackendWaitPrompt({ info, decide: resolve })
+        }),
+      })
+      setBackendWaitPrompt((current) => {
+        current?.decide("continue")
+        return undefined
       })
       pollStopped = true
       setSynopsisConversation(sent)
       setPendingStagingPromotes(sent.pendingStagingPromotes ?? [])
+      if (sent.budgetAdvisory !== undefined) {
+        setSynopsisBudgetWarning(sent.budgetAdvisory)
+      }
+      if (sent.usage !== undefined) {
+        setSynopsisUsage(sent.usage)
+      }
       setSynopsisStream(undefined)
-      await refreshWorkspace()
+      setSynopsisConversationBusy(false)
+      void refreshWorkspace().catch(() => undefined)
     } catch (cause) {
       pollStopped = true
+      setBackendWaitPrompt((current) => {
+        current?.decide("continue")
+        return undefined
+      })
+      setSynopsisStream(undefined)
+      if (cause instanceof BackendRequestAbandonedError || isSynopsisSendCancelledError(cause)) {
+        setSynopsisConversation((current) => ({
+          ...current,
+          messages: current.messages.filter((entry) => entry.messageId !== optimisticId),
+        }))
+        setSynopsisDraftRestore({ text: message, token: Date.now() })
+        try {
+          const discarded = await invokeBackend<SynopsisConversationListResult>(
+            "synopsis.conversation.discardLastUserTurn",
+            {
+              projectId: project.projectId,
+              workspaceRootRef: project.workspaceRootRef,
+              ...(synopsisConversation.session?.sessionId === undefined
+                ? {}
+                : { sessionId: synopsisConversation.session.sessionId }),
+            },
+          )
+          setSynopsisConversation(discarded)
+        } catch {
+          // Best-effort context rollback; draft is already restored locally.
+        }
+        return
+      }
       setSynopsisConversation((current) => ({
         ...current,
         messages: current.messages.filter((entry) => entry.messageId !== optimisticId),
       }))
-      setSynopsisStream(undefined)
+      if (isSynopsisBudgetError(cause)) {
+        setSynopsisBudgetWarning(parseSynopsisBudgetError(cause))
+        return
+      }
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       pollStopped = true
-      await pollTask.catch(() => undefined)
+      synopsisSendInFlightRef.current = false
+      synopsisActiveRequestRef.current = null
+      synopsisStopDraftRef.current = null
+      setBackendWaitPrompt((current) => {
+        current?.decide("continue")
+        return undefined
+      })
       setSynopsisConversationBusy(false)
+      void pollTask.catch(() => undefined)
     }
+  }
+
+  const stopSynopsisMessage = async (): Promise<void> => {
+    if (project === undefined || !synopsisConversationBusy) return
+    const requestId = synopsisActiveRequestRef.current
+    const draftText = synopsisStopDraftRef.current
+    setError(undefined)
+    setBackendWaitPrompt((current) => {
+      current?.decide("abandon")
+      return undefined
+    })
+    try {
+      const discarded = await invokeBackend<SynopsisConversationListResult>(
+        "synopsis.conversation.discardLastUserTurn",
+        {
+          projectId: project.projectId,
+          workspaceRootRef: project.workspaceRootRef,
+          ...(synopsisConversation.session?.sessionId === undefined
+            ? {}
+            : { sessionId: synopsisConversation.session.sessionId }),
+        },
+      )
+      setSynopsisConversation(discarded)
+    } catch {
+      // discard is best-effort; abandon below still unblocks the UI.
+    }
+    if (requestId !== null) {
+      await abandonBackendRequest(requestId).catch(() => undefined)
+    }
+    if (draftText !== null && draftText.length > 0) {
+      setSynopsisDraftRestore({ text: draftText, token: Date.now() })
+    }
+    setSynopsisStream(undefined)
+    setSynopsisConversationBusy(false)
+  }
+
+  const acknowledgeSynopsisBudget = async (): Promise<void> => {
+    if (project === undefined) return
+    try {
+      await invokeBackend("synopsis.conversation.acknowledgeBudget", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+      })
+    } catch {
+      // Local dismiss still improves UX if backend is unreachable.
+    }
+    setSynopsisBudgetWarning(undefined)
   }
 
   const refreshSynopsisChoices = async (messageId: string): Promise<void> => {
@@ -768,6 +1085,12 @@ export function App(): React.JSX.Element {
         projectId: project.projectId,
         workspaceRootRef: project.workspaceRootRef,
         messageId,
+        presentation: {
+          ...(descriptionRule.length === 0 ? {} : { descriptionRulePath: descriptionRule }),
+          ...(proseRule.length === 0 ? {} : { proseStyleRulePath: proseRule }),
+          minimumWordCount: parsedMinimumWordCount,
+          maximumWordCount: parsedMaximumWordCount,
+        },
         chapterIntent: { boundaryPace, causalityFocus },
         model: {
           baseUrl: activeModelProfile.baseUrl,
@@ -807,7 +1130,7 @@ export function App(): React.JSX.Element {
         proposals = listed.proposals
       }
       if (proposals.length === 0) {
-        await sendSynopsisMessage("确认落盘到设定集与目标")
+        setError("当前没有可落盘的提案。请等 Agent 给出「确认落盘」类选项后再点底部按钮。")
         return
       }
       setSynopsisConversationBusy(true)
@@ -816,8 +1139,21 @@ export function App(): React.JSX.Element {
         workspaceRootRef: project.workspaceRootRef,
         proposalIds: proposals.map((proposal) => proposal.proposalId),
       })
+      const writtenPaths = [...new Set(proposals.flatMap((proposal) => (
+        proposal.settingsWrites.map((write) => write.relativePath)
+      )))]
       setPendingStagingPromotes([])
       await refreshWorkspace()
+      const reopenPath = writtenPaths.find((path) => path === selectedPath || path === openedDocumentPath)
+        ?? writtenPaths[0]
+      if (reopenPath !== undefined) {
+        await openFile(reopenPath)
+      }
+      setPostCommitNotice(
+        writtenPaths.length === 0
+          ? "落盘已确认。"
+          : `已落盘：${writtenPaths.join("、")}`,
+      )
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -1053,6 +1389,45 @@ export function App(): React.JSX.Element {
     setModelDialogOpen(false)
   }
 
+  const applyModelProfiles = async (
+    profiles: readonly ModelProfile[],
+    activeProfileId: string,
+  ): Promise<void> => {
+    const saved = await persistModelProfiles({
+      profiles,
+      activeProfileId,
+    })
+    setModelProfiles(saved.profiles)
+    setActiveModelProfileId(saved.activeProfileId)
+  }
+
+  const updateActiveModelId = async (modelId: string): Promise<void> => {
+    if (activeModelProfile === undefined) return
+    const nextModel = modelId.trim()
+    if (nextModel.length === 0 || activeModelProfile.model === nextModel) return
+    const nextProfiles = modelProfiles.map((profile) => (
+      profile.id !== activeModelProfile.id
+        ? profile
+        : { ...profile, model: nextModel }
+    ))
+    await applyModelProfiles(nextProfiles, activeModelProfileId)
+  }
+
+  const updateActiveReasoningEffort = async (effort: ModelProfile["reasoningEffort"]): Promise<void> => {
+    if (activeModelProfile === undefined) return
+    if (activeModelProfile.reasoningEffort === effort) return
+    const nextProfiles = modelProfiles.map((profile) => (
+      profile.id !== activeModelProfile.id
+        ? profile
+        : {
+            ...profile,
+            reasoningEffort: effort,
+            ...(effort === "none" ? {} : { thinkingModeEnabled: true }),
+          }
+    ))
+    await applyModelProfiles(nextProfiles, activeModelProfileId)
+  }
+
   const saveProjectSettings = async (settings: ProjectSettings): Promise<void> => {
     if (project === undefined) return
     if (settings.history.retentionLimit !== projectSettings?.history.retentionLimit) {
@@ -1076,6 +1451,26 @@ export function App(): React.JSX.Element {
   const descriptionRules = useMemo(() => report.inventory.filter((entry) => entry.kind === "file" && entry.path.startsWith("表现输出/描写规则/")).map((entry) => entry.path), [report])
   const proseRules = useMemo(() => report.inventory.filter((entry) => entry.kind === "file" && entry.path.startsWith("表现输出/笔风规则/")).map((entry) => entry.path), [report])
 
+  useEffect(() => {
+    if (report.inventory.length === 0) return
+    if (descriptionRule.length > 0 && !descriptionRules.includes(descriptionRule)) {
+      updatePresentation({ descriptionRule: "" })
+    }
+  }, [descriptionRule, descriptionRules, report.inventory.length, updatePresentation])
+
+  useEffect(() => {
+    if (report.inventory.length === 0) return
+    if (proseRule.length > 0 && !proseRules.includes(proseRule)) {
+      updatePresentation({ proseRule: "" })
+    }
+  }, [proseRule, proseRules, report.inventory.length, updatePresentation])
+
+  const synopsisTokenMetrics = useMemo((): TaskTokenMetrics => {
+    const fromUsage = summarizeSynopsisUsageTokenMetrics(synopsisUsage)
+    if (Object.keys(fromUsage).length > 0) return fromUsage
+    return summarizeSynopsisStreamTokenMetrics(synopsisStream)
+  }, [synopsisUsage, synopsisStream])
+
   const resetWorkbenchForProject = useCallback((next: OpenProject | undefined): void => {
     setProject(next)
     setReport({ inventory: [], issues: [] })
@@ -1092,6 +1487,7 @@ export function App(): React.JSX.Element {
     setSynopsisConversation({ messages: [] })
     setSynopsisConversationBusy(false)
     setSynopsisStream(undefined)
+    setSynopsisUsage(undefined)
     setChapterSynopsis(undefined)
     setSynopsisPanelOpen(false)
     setPrompt("")
@@ -1110,11 +1506,20 @@ export function App(): React.JSX.Element {
 
   const openWorkspaceHome = (): void => {
     setSelectedPath(undefined)
+    setLineageMode(false)
     setSynopsisPanelOpen(false)
+  }
+
+  const openSettingsLineage = (): void => {
+    setLineageMode(true)
+    setSelectedPath(undefined)
+    setSynopsisPanelOpen(false)
+    setError(undefined)
   }
 
   const reopenOpenedDocument = (): void => {
     if (openedDocumentPath === undefined) return
+    setLineageMode(false)
     setSelectedPath(openedDocumentPath)
   }
 
@@ -1125,14 +1530,14 @@ export function App(): React.JSX.Element {
   }
 
   const readOnly = selectedPath?.startsWith("世界推演规则/基础规则/") === true
-    || (selectedPath?.startsWith("章节正文/") === true && !isSynopsisMarkdownPath(selectedPath))
+    || (selectedPath?.startsWith("章节正文/") === true && !isChapterPlanningMarkdownPath(selectedPath))
   const dirty = content !== savedContent
   const inGraphSyncRecovery = chapterRevision?.decision === "submit"
     && chapterRevision.graphSyncStatus !== "completed"
   const showChapterConversation = selectedPath?.startsWith("章节正文/") === true
-    && !isSynopsisMarkdownPath(selectedPath ?? "")
+    && !isChapterPlanningMarkdownPath(selectedPath ?? "")
     && !inGraphSyncRecovery
-  const showRightPanel = selectedPath === undefined || showChapterConversation
+  const showRightPanel = !lineageMode && (selectedPath === undefined || showChapterConversation)
 
   return <AppChrome
     rail={
@@ -1162,7 +1567,44 @@ export function App(): React.JSX.Element {
     }
   >
   <main className="app-shell">
-    {error === undefined ? null : <div className="error-banner">{error}</div>}
+    {synopsisBudgetWarning === undefined
+      ? null
+      : <div className="budget-warning-banner" role="status">
+          <span>{synopsisBudgetWarning.message}</span>
+          <button type="button" onClick={() => { void acknowledgeSynopsisBudget(); }}>已知晓</button>
+        </div>}
+    {error === undefined ? null : <div className="error-banner" role="alert">
+      <span className="error-banner-text">{error}</span>
+      <button
+        type="button"
+        className="error-banner-dismiss"
+        aria-label="关闭提示"
+        title="关闭"
+        onClick={() => {
+          for (const line of error.split("\n")) {
+            const sep = line.indexOf("：")
+            if (sep > 0) {
+              const path = line.slice(0, sep)
+              const message = line.slice(sep + 1)
+              for (const code of ["invalid_synopsis_name", "chapter_missing_volume", "invalid_volume_name"] as const) {
+                dismissedWorkspaceIssueKeysRef.current.add(`${code}:${path}:${message}`)
+              }
+            }
+          }
+          setError(undefined)
+        }}
+      >
+        <X size={14} aria-hidden="true" />
+      </button>
+    </div>}
+    {workspaceCreatePrompt === undefined
+      ? null
+      : <WorkspaceNameDialog
+          kind={workspaceCreatePrompt.kind}
+          parentPath={workspaceCreatePrompt.parentPath}
+          onCancel={() => { setWorkspaceCreatePrompt(undefined) }}
+          onConfirm={(name) => { void confirmWorkspaceCreate(name) }}
+        />}
     {postCommitNotice === undefined ? null : <div className="post-commit-notice" role="status">
       <span>{postCommitNotice}</span>
       <div>
@@ -1198,13 +1640,45 @@ export function App(): React.JSX.Element {
           }}
         />
       : null}
+    {backendWaitPrompt === undefined
+      ? null
+      : <BackendWaitTimeoutDialog
+          method={backendWaitPrompt.info.method}
+          waitTimeoutMs={backendWaitPrompt.info.waitTimeoutMs}
+          elapsedMs={backendWaitPrompt.info.elapsedMs}
+          onContinue={() => {
+            const decide = backendWaitPrompt.decide
+            setBackendWaitPrompt(undefined)
+            decide("continue")
+          }}
+          onStop={() => {
+            const decide = backendWaitPrompt.decide
+            setBackendWaitPrompt(undefined)
+            decide("abandon")
+          }}
+        />}
     <PanelGroup className="workbench-panels" direction="horizontal">
       <Panel defaultSize={19} minSize={14} maxSize={28} collapsible>
-        <WorkspaceTree entries={report.inventory} selectedPath={selectedPath ?? openedDocumentPath} onSelect={(path) => void openFile(path)} onRefresh={() => void refreshWorkspace()} />
+        <WorkspaceTree
+          entries={report.inventory}
+          selectedPath={selectedPath ?? openedDocumentPath}
+          lineageActive={lineageMode}
+          onSelect={(path) => void openFile(path)}
+          onSelectLineage={openSettingsLineage}
+          onRefresh={() => void refreshWorkspace()}
+          onCreateMarkdown={(destination) => { createWorkspaceMarkdown(destination) }}
+          onCreateDirectory={(parentPath) => { createWorkspaceDirectory(parentPath) }}
+          onDeletePath={(path) => { void deleteWorkspaceMarkdown(path) }}
+        />
       </Panel>
       <PanelResizeHandle className="resize-handle"><PanelLeftClose size={12} /></PanelResizeHandle>
       <Panel minSize={42}>
-        <EditorArea
+        {lineageMode
+          ? <SettingsLineagePanel
+              projectId={project.projectId}
+              workspaceRootRef={project.workspaceRootRef}
+            />
+          : <EditorArea
           projectId={project.projectId}
           workspaceRootRef={project.workspaceRootRef}
           selectedPath={selectedPath}
@@ -1227,12 +1701,16 @@ export function App(): React.JSX.Element {
           onHome={openWorkspaceHome}
           onOpenDocument={reopenOpenedDocument}
           onPromptChange={setPrompt}
-          onDescriptionRuleChange={setDescriptionRule}
-          onProseRuleChange={setProseRule}
-          onMinimumWordCountChange={setMinimumWordCount}
-          onMaximumWordCountChange={setMaximumWordCount}
-          onBoundaryPaceChange={setBoundaryPace}
-          onCausalityFocusChange={setCausalityFocus}
+          onDescriptionRuleChange={(value) => { updatePresentation({ descriptionRule: value }); }}
+          onProseRuleChange={(value) => { updatePresentation({ proseRule: value }); }}
+          onMinimumWordCountChange={(value) => { updatePresentation({ minimumWordCount: value }); }}
+          onMaximumWordCountChange={(value) => { updatePresentation({ maximumWordCount: value }); }}
+          onBoundaryPaceChange={(value) => { updatePresentation({ boundaryPace: value }); }}
+          onCausalityFocusChange={(value) => { updatePresentation({ causalityFocus: value }); }}
+          modelProfiles={modelProfiles}
+          activeModelProfileId={activeModelProfileId}
+          onActiveModelIdChange={(modelId) => { void updateActiveModelId(modelId); }}
+          onReasoningEffortChange={(effort) => { void updateActiveReasoningEffort(effort); }}
           onSave={() => void saveFile()}
           onRun={() => void startTurn()}
           chapter={selectedChapter}
@@ -1249,15 +1727,24 @@ export function App(): React.JSX.Element {
           synopsisMessages={synopsisConversation.messages}
           synopsisBusy={synopsisConversationBusy}
           synopsisStream={synopsisStream}
+          synopsisDraftRestore={synopsisDraftRestore}
+          synopsisTokenMetrics={{
+            ...synopsisTokenMetrics,
+            ...(activeModelProfile?.contextWindowTokens === undefined
+              ? {}
+              : { contextWindowTokens: activeModelProfile.contextWindowTokens }),
+          }}
           pendingStagingPromotes={pendingStagingPromotes}
           onSynopsisSend={sendSynopsisMessage}
+          onSynopsisStop={stopSynopsisMessage}
           onSynopsisRefreshChoices={refreshSynopsisChoices}
           onPromoteStaging={promoteStaging}
           onRejectStagingPromote={rejectStagingPromote}
           onOpenSynopsisFile={(path) => { void openFile(path); }}
+          onOpenSettingsLineage={openSettingsLineage}
           diffFocusMessageId={diffFocusMessageId}
           onDiffFocusHandled={() => { setDiffFocusMessageId(undefined); }}
-        />
+        />}
       </Panel>
       {showRightPanel
         ? <>
@@ -1283,6 +1770,8 @@ export function App(): React.JSX.Element {
                   historyRetentionLimit={projectSettings?.history.retentionLimit}
                   history={history}
                   historyLoading={historyLoading}
+                  contextWindowTokens={activeModelProfile?.contextWindowTokens}
+                  supplementalTokenMetrics={synopsisTokenMetrics}
                   onOpenProjectSettings={() => { setProjectSettingsOpen(true); }}
                   onResumeTask={resumeTask}
                   onResetTaskMetrics={resetTaskMetrics}
@@ -1346,6 +1835,28 @@ function modelSelection(profile: ModelProfile) {
 
 export function shouldMonitorChapterRevision(status: ChapterRevision["graphSyncStatus"]): boolean {
   return status === "running"
+}
+
+function isSynopsisBudgetError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return error.message.includes("预算")
+}
+
+function parseSynopsisBudgetError(error: Error): SynopsisConversationBudgetAdvisory {
+  return {
+    message: error.message.includes("提醒阈值")
+      ? error.message
+      : "梗概讨论模型调用次数较多。可在右侧查看 Token 与上下文占用；点击「已知晓」后将重置计数，再次达到阈值时会重新提醒。",
+    callsUsed: 0,
+    softLimit: 1,
+  }
+}
+
+function isSynopsisSendCancelledError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return error.name === "SynopsisSendCancelledError"
+    || error.message.includes("SynopsisSendCancelled")
+    || error.message.includes("用户停止")
 }
 
 function isWorkspaceFilePath(value: string | undefined): value is string {

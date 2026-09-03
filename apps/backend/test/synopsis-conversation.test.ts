@@ -70,7 +70,7 @@ describe("synopsis conversation", () => {
         workspaceRootRef: harness.workspaceRootRef,
         message: "这一章从雨夜站台开始",
       })
-      expect(sent.session.synopsisPath).toBe("章节正文/第一章 世界种子 [剧情梗概].md")
+      expect(sent.session.synopsisPath).toBe("章节正文/第一卷 待命名/第一章 世界种子 [剧情梗概].md")
       expect(sent.session.title).toBe("世界种子")
       expect(sent.messages.filter((message) => message.role === "assistant")).toHaveLength(1)
       const file = readFileSync(join(harness.workspaceRootRef, sent.session.synopsisPath), "utf8")

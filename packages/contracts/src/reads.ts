@@ -42,12 +42,30 @@ export const readRequestSchema = z.object({
     grepMaxMatchesPerFile: z.number().int().positive().max(80).optional(),
     lineStart: z.number().int().positive().optional(),
     lineEnd: z.number().int().positive().optional(),
+    /**
+     * Temporal read intent for settings/chapter recall (P1).
+     * - current (default): read workspace head / catalog as today
+     * - as_of_chapter: settings markdown as known at or before asOfChapterSequence
+     * - past_chapter_text: committed chapter prose by chapter sequence (not workspace 章节正文)
+     */
+    purpose: z.enum(["current", "as_of_chapter", "past_chapter_text"]).optional(),
+    asOfChapterSequence: z.number().int().positive().optional(),
+    entityHints: z.array(z.string().min(1).max(120)).max(12).optional(),
+    maxChars: z.number().int().positive().max(12_000).optional(),
   }).superRefine((query, context) => {
     if (query.lineStart !== undefined && query.lineEnd !== undefined && query.lineEnd < query.lineStart) {
       context.addIssue({
         code: "custom",
         message: "lineEnd must be >= lineStart",
         path: ["lineEnd"],
+      })
+    }
+    const purpose = query.purpose ?? "current"
+    if (purpose !== "current" && query.asOfChapterSequence === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "asOfChapterSequence is required when purpose is not current",
+        path: ["asOfChapterSequence"],
       })
     }
   }),

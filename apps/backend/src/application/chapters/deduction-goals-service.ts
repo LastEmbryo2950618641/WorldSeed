@@ -1,15 +1,18 @@
 import type {
   DeductionGoal,
+  DeductionGoalNarrativeKind,
   DeductionGoalProgress,
   DeductionGoalProposal,
   DeductionGoalReconcileIssue,
   DeductionGoalReconcileResult,
+  DeductionGoalScale,
   DeductionGoalsLegacyImportItem,
   DeductionGoalsSnapshot,
   GoalProposalPayload,
   ProjectId,
   TurnDeductionGoalBundle,
 } from "@worldseed/contracts"
+import { goalProposalPayloadSchema, selectGoalsForChapterContext } from "@worldseed/contracts"
 
 import type { SqliteDeductionGoalsRepository } from "../../infrastructure/sqlite/repositories/sqlite-deduction-goals-repository.js"
 
@@ -46,7 +49,12 @@ export class DeductionGoalsService {
   public async create(input: Readonly<{
     projectId: ProjectId
     content: string
+    narrativeKind?: DeductionGoalNarrativeKind
+    scale?: DeductionGoalScale
+    plantChapterSequence?: number
+    payoffChapterSequence?: number
   }>): Promise<DeductionGoalsSnapshot> {
+    assertPlantPayoffWindow(input.plantChapterSequence, input.payoffChapterSequence)
     const now = this.dependencies.now()
     const goal: DeductionGoal = {
       goalId: this.dependencies.createId(),
@@ -54,8 +62,16 @@ export class DeductionGoalsService {
       content: input.content.trim(),
       source: "user",
       lifecycle: "active",
+      narrativeKind: input.narrativeKind ?? "general",
+      scale: input.scale ?? "short",
       createdAtMs: now,
       updatedAtMs: now,
+      ...(input.plantChapterSequence === undefined
+        ? {}
+        : { plantChapterSequence: input.plantChapterSequence }),
+      ...(input.payoffChapterSequence === undefined
+        ? {}
+        : { payoffChapterSequence: input.payoffChapterSequence }),
     }
     await this.dependencies.goals.insertGoal(goal)
     return this.list(input.projectId)
@@ -66,23 +82,53 @@ export class DeductionGoalsService {
     goalId: string
     content?: string
     action?: "update_content" | "complete" | "remove"
+    narrativeKind?: DeductionGoalNarrativeKind
+    scale?: DeductionGoalScale
+    plantChapterSequence?: number
+    payoffChapterSequence?: number
   }>): Promise<DeductionGoalsSnapshot> {
     const goal = await this.requireGoal(input.projectId, input.goalId)
-    const action = input.action ?? "update_content"
+    const hasTaxonomy = input.narrativeKind !== undefined
+      || input.scale !== undefined
+      || input.plantChapterSequence !== undefined
+      || input.payoffChapterSequence !== undefined
+    const action = input.action
+      ?? (input.content !== undefined || hasTaxonomy ? "update_content" : undefined)
     const now = this.dependencies.now()
+
+    if (action === undefined) {
+      throw new Error("content, taxonomy fields, or action is required")
+    }
 
     if (action === "update_content") {
       const content = input.content?.trim()
-      if (content === undefined || content.length === 0) {
+      if ((content === undefined || content.length === 0) && !hasTaxonomy) {
         throw new Error("content is required for update_content")
       }
       if (goal.lifecycle !== "active") {
         throw new Error("only active goals can be edited")
       }
+      const nextPlant = input.plantChapterSequence ?? goal.plantChapterSequence
+      const nextPayoff = input.payoffChapterSequence ?? goal.payoffChapterSequence
+      if (
+        nextPlant !== undefined
+        && nextPayoff !== undefined
+        && nextPlant > nextPayoff
+      ) {
+        throw new Error("plantChapterSequence must be ≤ payoffChapterSequence")
+      }
       await this.dependencies.goals.updateGoal({
         ...goal,
-        content,
+        content: content !== undefined && content.length > 0 ? content : goal.content,
+        narrativeKind: input.narrativeKind ?? goal.narrativeKind,
+        scale: input.scale ?? goal.scale,
         updatedAtMs: now,
+        ...(input.plantChapterSequence === undefined
+          ? (goal.plantChapterSequence === undefined ? {} : { plantChapterSequence: goal.plantChapterSequence })
+          : { plantChapterSequence: input.plantChapterSequence }),
+        ...(input.payoffChapterSequence === undefined
+          ? (goal.payoffChapterSequence === undefined ? {} : { payoffChapterSequence: goal.payoffChapterSequence })
+          : { payoffChapterSequence: input.payoffChapterSequence }),
       })
       return this.list(input.projectId)
     }
@@ -244,6 +290,8 @@ export class DeductionGoalsService {
         content: item.content,
         source: item.source,
         lifecycle: item.status === "completed" ? "completed" : "active",
+        narrativeKind: "general",
+        scale: "short",
         createdAtMs: item.createdAtMs,
         updatedAtMs: item.completedAtMs ?? item.createdAtMs,
         ...(item.status === "completed"
@@ -263,17 +311,20 @@ export class DeductionGoalsService {
     const now = this.dependencies.now()
     const created: DeductionGoalProposal[] = []
     for (const item of input.proposals) {
-      if (!(await this.isValidProposalPayload(input.projectId, item.payload))) {
+      const parsed = goalProposalPayloadSchema.safeParse(item.payload)
+      if (!parsed.success) continue
+      const payload = parsed.data
+      if (!(await this.isValidProposalPayload(input.projectId, payload))) {
         continue
       }
       const proposal: DeductionGoalProposal = {
         proposalId: this.dependencies.createId(),
         projectId: input.projectId,
-        kind: item.payload.kind,
-        ...(item.payload.kind === "create"
+        kind: payload.kind,
+        ...(payload.kind === "create"
           ? {}
-          : { goalId: "goalId" in item.payload ? item.payload.goalId : undefined }),
-        payload: item.payload,
+          : { goalId: "goalId" in payload ? payload.goalId : undefined }),
+        payload,
         status: "pending",
         ...(input.sourceMessageId === undefined ? {} : { sourceMessageId: input.sourceMessageId }),
         createdAtMs: now,
@@ -311,11 +362,15 @@ export class DeductionGoalsService {
       this.dependencies.goals.listGoals(input.projectId),
       this.dependencies.goals.listProgress(input.projectId),
     ])
+    const activeGoals = [...selectGoalsForChapterContext(goals, input.chapterSequence)]
+    const activeIds = new Set(activeGoals.map((goal) => goal.goalId))
     return {
       chapterSequence: input.chapterSequence,
-      activeGoals: goals.filter((goal) => goal.lifecycle === "active"),
+      activeGoals,
       chapterProgress: progress.filter(
-        (item) => item.chapterSequence === input.chapterSequence && item.status !== "superseded",
+        (item) => item.chapterSequence === input.chapterSequence
+          && item.status !== "superseded"
+          && activeIds.has(item.goalId),
       ),
     }
   }
@@ -328,7 +383,7 @@ export class DeductionGoalsService {
     const snapshot = await this.list(input.projectId)
     const warnings: DeductionGoalReconcileIssue[] = []
     const blocking: DeductionGoalReconcileIssue[] = []
-    const activeGoals = snapshot.goals.filter((goal) => goal.lifecycle === "active")
+    const activeGoals = selectGoalsForChapterContext(snapshot.goals, input.chapterSequence)
     const chapterProgress = snapshot.progress.filter(
       (item) => item.chapterSequence === input.chapterSequence && item.status !== "superseded",
     )
@@ -371,24 +426,45 @@ export class DeductionGoalsService {
     const payload = proposal.payload
 
     if (payload.kind === "create") {
+      assertPlantPayoffWindow(payload.plantChapterSequence, payload.payoffChapterSequence)
       await this.dependencies.goals.insertGoal({
         goalId: this.dependencies.createId(),
         projectId: proposal.projectId,
         content: payload.content,
         source: "agent",
         lifecycle: "active",
+        narrativeKind: payload.narrativeKind ?? "general",
+        scale: payload.scale ?? "short",
         createdAtMs: now,
         updatedAtMs: now,
+        ...(payload.plantChapterSequence === undefined
+          ? {}
+          : { plantChapterSequence: payload.plantChapterSequence }),
+        ...(payload.payoffChapterSequence === undefined
+          ? {}
+          : { payoffChapterSequence: payload.payoffChapterSequence }),
       })
       return
     }
 
     if (payload.kind === "update_content") {
       const goal = await this.requireGoal(proposal.projectId, payload.goalId)
+      const nextContent = payload.content?.trim()
+      const nextPlant = payload.plantChapterSequence ?? goal.plantChapterSequence
+      const nextPayoff = payload.payoffChapterSequence ?? goal.payoffChapterSequence
+      assertPlantPayoffWindow(nextPlant, nextPayoff)
       await this.dependencies.goals.updateGoal({
         ...goal,
-        content: payload.content,
+        content: nextContent !== undefined && nextContent.length > 0 ? nextContent : goal.content,
+        narrativeKind: payload.narrativeKind ?? goal.narrativeKind,
+        scale: payload.scale ?? goal.scale,
         updatedAtMs: now,
+        ...(payload.plantChapterSequence === undefined
+          ? (goal.plantChapterSequence === undefined ? {} : { plantChapterSequence: goal.plantChapterSequence })
+          : { plantChapterSequence: payload.plantChapterSequence }),
+        ...(payload.payoffChapterSequence === undefined
+          ? (goal.payoffChapterSequence === undefined ? {} : { payoffChapterSequence: goal.payoffChapterSequence })
+          : { payoffChapterSequence: payload.payoffChapterSequence }),
       })
       return
     }
@@ -444,6 +520,19 @@ export class DeductionGoalsService {
     return goal !== undefined
       && goal.projectId === projectId
       && goal.lifecycle === "active"
+  }
+}
+
+function assertPlantPayoffWindow(
+  plantChapterSequence: number | undefined,
+  payoffChapterSequence: number | undefined,
+): void {
+  if (
+    plantChapterSequence !== undefined
+    && payoffChapterSequence !== undefined
+    && plantChapterSequence > payoffChapterSequence
+  ) {
+    throw new Error("plantChapterSequence must be ≤ payoffChapterSequence")
   }
 }
 

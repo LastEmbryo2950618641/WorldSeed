@@ -178,11 +178,39 @@ describe("prompt contracts", () => {
   it("exposes optional deduction-goal fields on synopsis_discuss and semantic_review artifacts", () => {
     const synopsis = JSON.stringify(phaseArtifactJsonSchema("synopsis_discuss"))
     expect(synopsis).toContain("goalProposals")
+    expect(synopsis).toContain("narrativeKind")
     expect(synopsis).not.toContain('"format":"uuid"')
 
     const semantic = phaseArtifactJsonSchema("semantic_review") as { required?: string[] }
     expect(JSON.stringify(semantic)).toContain("goalCompliance")
     expect(semantic.required ?? []).not.toContain("goalCompliance")
+  })
+
+  it("mentions narrative goal taxonomy in synopsis discuss prompt", () => {
+    const packageRoot = resolve(process.cwd(), "packages/prompt-contracts")
+    const prompt = readFileSync(
+      resolve(packageRoot, promptDefinitions.synopsis_discuss.resourcePath),
+      "utf8",
+    )
+    expect(prompt).toContain("narrativeKind")
+    expect(prompt).toContain("戏核")
+    expect(prompt).toContain("维护主路径是你")
+    expect(prompt).toContain("人物性格")
+    expect(prompt).toContain("性格与背景")
+  })
+
+  it("requires character personality in settings revision and draft prompts", () => {
+    const packageRoot = resolve(process.cwd(), "packages/prompt-contracts")
+    const revision = readFileSync(resolve(packageRoot, SETTINGS_REVISION_GUIDE_RESOURCE), "utf8")
+    const draft = readFileSync(resolve(packageRoot, promptDefinitions.draft.resourcePath), "utf8")
+    const extraction = readFileSync(
+      resolve(packageRoot, promptDefinitions.settings_extraction.resourcePath),
+      "utf8",
+    )
+    expect(revision).toContain("## 性格")
+    expect(revision).toContain("## 背景")
+    expect(draft).toContain("人物按性格行事")
+    expect(extraction).toContain("## 性格")
   })
 
   it("keeps rule assembly semantic and lets the runtime own its snapshot identity", () => {

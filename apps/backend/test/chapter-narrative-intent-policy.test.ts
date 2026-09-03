@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   chapterNarrativeIntentPhaseAppendix,
+  chapterPresentationPhaseAppendix,
   DEFAULT_CHAPTER_NARRATIVE_INTENT,
   resolveChapterNarrativeIntent,
 } from "../src/application/settings/chapter-narrative-intent-policy.js"
@@ -28,5 +29,20 @@ describe("chapter narrative intent policy", () => {
 
     expect(chapterNarrativeIntentPhaseAppendix(undefined, "rule_assembly")).toBeUndefined()
     expect(chapterNarrativeIntentPhaseAppendix(undefined, "settings_extraction")).toBeUndefined()
+  })
+
+  it("injects creation-desk word budget into synopsis_discuss", () => {
+    const appendix = chapterPresentationPhaseAppendix({
+      minimumWordCount: 2000,
+      maximumWordCount: 3000,
+      proseStyleRulePath: "表现输出/笔风规则/吞心萌动.md",
+    }, "synopsis_discuss")
+    expect(appendix).toContain("2000–3000")
+    expect(appendix).toContain("不得改用自拟")
+    expect(appendix).toContain("吞心萌动.md")
+    expect(chapterPresentationPhaseAppendix({
+      minimumWordCount: 2000,
+      maximumWordCount: 3000,
+    }, "draft")).toBeUndefined()
   })
 })

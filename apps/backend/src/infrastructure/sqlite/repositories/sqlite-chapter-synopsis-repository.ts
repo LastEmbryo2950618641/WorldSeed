@@ -23,14 +23,32 @@ export class SqliteChapterSynopsisRepository {
     return row === undefined ? undefined : mapRow(row)
   }
 
+  public async findByChapterSequence(projectId: ProjectId, chapterSequence: number): Promise<ChapterSynopsis | undefined> {
+    const row = await this.database.selectFrom("chapter_synopsis").selectAll()
+      .where("project_id", "=", projectId)
+      .where("chapter_sequence", "=", chapterSequence)
+      .orderBy("linked_at_ms", "desc")
+      .executeTakeFirst()
+    return row === undefined ? undefined : mapRow(row)
+  }
+
+  public async listByProject(projectId: ProjectId): Promise<readonly ChapterSynopsis[]> {
+    const rows = await this.database.selectFrom("chapter_synopsis").selectAll()
+      .where("project_id", "=", projectId)
+      .orderBy("chapter_sequence", "asc")
+      .execute()
+    return rows.map(mapRow)
+  }
+
   public async upsert(projectId: ProjectId, input: ChapterSynopsis): Promise<ChapterSynopsis> {
+    const source = input.source === "outline_file" ? "synopsis_file" : input.source
     await this.database.insertInto("chapter_synopsis").values({
       chapter_id: input.chapterId,
       project_id: projectId,
       chapter_sequence: input.chapterSequence,
       chapter_path: input.chapterPath,
       synopsis_markdown: input.synopsisMarkdown,
-      source: input.source,
+      source,
       original_synopsis_path: input.originalSynopsisPath ?? null,
       turn_bootstrap_input: input.turnBootstrapInput ?? null,
       linked_at_ms: input.linkedAtMs,
@@ -38,12 +56,12 @@ export class SqliteChapterSynopsisRepository {
       chapter_sequence: input.chapterSequence,
       chapter_path: input.chapterPath,
       synopsis_markdown: input.synopsisMarkdown,
-      source: input.source,
+      source,
       original_synopsis_path: input.originalSynopsisPath ?? null,
       turn_bootstrap_input: input.turnBootstrapInput ?? null,
       linked_at_ms: input.linkedAtMs,
     })).executeTakeFirstOrThrow()
-    return input
+    return { ...input, source }
   }
 }
 

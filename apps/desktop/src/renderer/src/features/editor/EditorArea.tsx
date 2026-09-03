@@ -4,7 +4,7 @@ import type { editor } from "monaco-editor"
 import type { ChapterNarrativeIntent, ChapterRevision, ChapterRevisionConversationMessage, SynopsisConversationMessage, SynopsisConversationSession, SynopsisConversationStreamSnapshot, SynopsisStagingPromoteProposal } from "@worldseed/contracts"
 import { WORLDSEED_EDITOR_THEME, ensureWorldseedEditorTheme } from "../../monaco.js"
 import { SynopsisConversationComposer } from "./SynopsisConversationComposer.js"
-import { isSynopsisMarkdownPath } from "./synopsis-path.js"
+import { isChapterPlanningMarkdownPath } from "./synopsis-path.js"
 import { AlertTriangle, BookOpenText, RotateCcw, Save, Sparkles } from "lucide-react"
 import { ChapterDraftDiffView } from "./ChapterDraftDiffView.js"
 import { ChapterDraftVersionsPrototype, type DraftDisplayMode } from "./ChapterDraftVersionsPrototype.js"
@@ -70,6 +70,19 @@ type Props = Readonly<{
   onMaximumWordCountChange(value: string): void
   onBoundaryPaceChange(value: ChapterNarrativeIntent["boundaryPace"]): void
   onCausalityFocusChange(value: ChapterNarrativeIntent["causalityFocus"]): void
+  modelProfiles: readonly Readonly<{
+    id: string
+    name: string
+    model: string
+    baseUrl: string
+    credentialRef: string
+    apiKey: string
+    hasApiKey: boolean
+    reasoningEffort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+  }>[]
+  activeModelProfileId: string
+  onActiveModelIdChange(modelId: string): void
+  onReasoningEffortChange(effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"): void
   onSave(): void
   onRun(): void
   chapter: Readonly<{ chapterId: string; sourceId: string }> | undefined
@@ -88,12 +101,21 @@ type Props = Readonly<{
   synopsisMessages: readonly SynopsisConversationMessage[]
   synopsisBusy: boolean
   synopsisStream?: SynopsisConversationStreamSnapshot | undefined
+  synopsisDraftRestore?: { text: string; token: number } | undefined
   pendingStagingPromotes?: readonly SynopsisStagingPromoteProposal[]
   onSynopsisSend(message: string): Promise<void>
+  onSynopsisStop?(): Promise<void>
   onSynopsisRefreshChoices(messageId: string): Promise<void>
   onPromoteStaging(): Promise<void>
   onRejectStagingPromote?(proposalIds: readonly string[]): Promise<void>
   onOpenSynopsisFile(path: string): void
+  onOpenSettingsLineage?(): void
+  synopsisTokenMetrics?: Readonly<{
+    kvRate?: number
+    totalTokens?: number
+    currentContextTokens?: number
+    contextWindowTokens?: number
+  }>
   diffFocusMessageId: string | undefined
   onDiffFocusHandled(): void
 }>
@@ -101,7 +123,7 @@ type Props = Readonly<{
 export function EditorArea(props: Props): React.JSX.Element {
   const mode = props.selectedPath === undefined
     ? "home"
-    : isSynopsisMarkdownPath(props.selectedPath)
+    : isChapterPlanningMarkdownPath(props.selectedPath)
       ? "synopsis"
     : props.selectedPath.startsWith("章节正文/")
       ? "chapter"
@@ -116,11 +138,17 @@ export function EditorArea(props: Props): React.JSX.Element {
         messages={props.synopsisMessages}
         busy={props.synopsisBusy}
         stream={props.synopsisStream}
+        {...(props.synopsisDraftRestore === undefined
+          ? {}
+          : { draftRestore: props.synopsisDraftRestore })}
         running={props.running}
         {...(props.pendingStagingPromotes === undefined
           ? {}
           : { pendingStagingPromotes: props.pendingStagingPromotes })}
         onSend={props.onSynopsisSend}
+        {...(props.onSynopsisStop === undefined
+          ? {}
+          : { onStop: props.onSynopsisStop })}
         onRefreshChoices={props.onSynopsisRefreshChoices}
         onPromoteStaging={props.onPromoteStaging}
         {...(props.onRejectStagingPromote === undefined
@@ -128,6 +156,12 @@ export function EditorArea(props: Props): React.JSX.Element {
           : { onRejectStagingPromote: props.onRejectStagingPromote })}
         onStartTurn={props.onRun}
         onOpenSynopsisFile={props.onOpenSynopsisFile}
+        {...(props.onOpenSettingsLineage === undefined
+          ? {}
+          : { onOpenSettingsLineage: props.onOpenSettingsLineage })}
+        {...(props.synopsisTokenMetrics === undefined
+          ? {}
+          : { tokenMetrics: props.synopsisTokenMetrics })}
         descriptionRule={props.descriptionRule}
         proseRule={props.proseRule}
         minimumWordCount={props.minimumWordCount}
@@ -143,6 +177,10 @@ export function EditorArea(props: Props): React.JSX.Element {
         onMaximumWordCountChange={props.onMaximumWordCountChange}
         onBoundaryPaceChange={props.onBoundaryPaceChange}
         onCausalityFocusChange={props.onCausalityFocusChange}
+        modelProfiles={props.modelProfiles}
+        activeModelProfileId={props.activeModelProfileId}
+        onActiveModelIdChange={props.onActiveModelIdChange}
+        onReasoningEffortChange={props.onReasoningEffortChange}
       />
     : mode === "synopsis"
       ? <MarkdownEditor content={props.content} readOnly={false} onContentChange={props.onContentChange} />

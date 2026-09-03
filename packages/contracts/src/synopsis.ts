@@ -8,7 +8,12 @@ import {
 } from "./deduction-goals.js"
 import { idSchema } from "./ids.js"
 
-export const chapterSynopsisSourceSchema = z.enum(["synopsis_file", "conversation", "turn_input"])
+export const chapterSynopsisSourceSchema = z.enum([
+  "synopsis_file",
+  "outline_file",
+  "conversation",
+  "turn_input",
+])
 export type ChapterSynopsisSource = z.infer<typeof chapterSynopsisSourceSchema>
 
 export const synopsisConversationChoiceSchema = z.object({
@@ -98,6 +103,8 @@ export const synopsisConversationMessageSchema = z.object({
     query: z.string().min(1),
     status: z.enum(["running", "completed", "failed"]),
     resultSummary: z.string().optional(),
+    asOfChapterSequence: z.number().int().positive().optional(),
+    temporalRole: z.enum(["as_of", "current"]).optional(),
   })).optional(),
   choices: z.array(synopsisConversationChoiceSchema).optional(),
   hidden: z.boolean().optional(),
@@ -109,8 +116,26 @@ export const synopsisConversationStreamSearchSchema = z.object({
   query: z.string().min(1),
   status: z.enum(["running", "completed", "failed"]),
   resultSummary: z.string().optional(),
+  asOfChapterSequence: z.number().int().positive().optional(),
+  temporalRole: z.enum(["as_of", "current"]).optional(),
 })
 export type SynopsisConversationStreamSearch = z.infer<typeof synopsisConversationStreamSearchSchema>
+
+export const synopsisConversationStreamUsageSchema = z.object({
+  inputTokens: z.number().int().nonnegative().optional(),
+  outputTokens: z.number().int().nonnegative().optional(),
+  cacheHitInputTokens: z.number().int().nonnegative().optional(),
+  cacheMissInputTokens: z.number().int().nonnegative().optional(),
+  lastRequestInputTokens: z.number().int().nonnegative().optional(),
+})
+export type SynopsisConversationStreamUsage = z.infer<typeof synopsisConversationStreamUsageSchema>
+
+export const synopsisConversationBudgetAdvisorySchema = z.object({
+  message: z.string().min(1),
+  callsUsed: z.number().int().nonnegative(),
+  softLimit: z.number().int().positive(),
+})
+export type SynopsisConversationBudgetAdvisory = z.infer<typeof synopsisConversationBudgetAdvisorySchema>
 
 export const synopsisConversationStreamSnapshotSchema = z.object({
   sessionId: idSchema.optional(),
@@ -118,6 +143,8 @@ export const synopsisConversationStreamSnapshotSchema = z.object({
   thinking: z.string().default(""),
   content: z.string().default(""),
   searching: z.array(synopsisConversationStreamSearchSchema).default([]),
+  usage: synopsisConversationStreamUsageSchema.optional(),
+  budgetAdvisory: synopsisConversationBudgetAdvisorySchema.optional(),
   error: z.string().optional(),
   updatedAtMs: z.number().int().nonnegative(),
 })
@@ -140,6 +167,8 @@ export const synopsisConversationSendResultSchema = z.object({
   messages: z.array(synopsisConversationMessageSchema),
   pendingProposals: z.array(deductionGoalProposalSchema).optional(),
   pendingStagingPromotes: z.array(synopsisStagingPromoteProposalSchema).optional(),
+  budgetAdvisory: synopsisConversationBudgetAdvisorySchema.optional(),
+  usage: synopsisConversationStreamUsageSchema.optional(),
 })
 export type SynopsisConversationSendResult = z.infer<typeof synopsisConversationSendResultSchema>
 

@@ -381,7 +381,7 @@ describe("TurnOrchestrator", () => {
     } | undefined
 
     expect(task?.status).toBe("completed")
-    expect(result.chapterPath).toBe("章节正文/第一章 世界种子.md")
+    expect(result.chapterPath).toBe("章节正文/第一卷 世界种子/第一章 世界种子.md")
     expect(checkpoints).toHaveLength(0)
     expect(finalReview?.requestedReads?.length).toBeGreaterThan(0)
     expect(finalReview?.artifact?.verificationProbeAssessments).toEqual([])
@@ -991,7 +991,8 @@ describe("TurnOrchestrator", () => {
     const occurrenceContent = JSON.parse(occurrence?.content_json ?? "{}") as Record<string, unknown>
     expect(result.graphAnchorIds).toContain(occurrenceContent.timeRef)
     expect(result.graphAnchorIds).toContain(occurrenceContent.locationRef)
-    expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual(["第一章 世界种子.md"])
+    expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual(["第一卷 世界种子"])
+    expect(readdirSync(join(fixture.workspaceRoot, "章节正文", "第一卷 世界种子"))).toEqual(["第一章 世界种子.md"])
     const chapter = readFileSync(join(fixture.workspaceRoot, result.chapterPath), "utf8")
     expect(chapter.split("\n", 1)[0]).toBe(`# ${result.chapterHeading}`)
 
@@ -3055,7 +3056,8 @@ describe("TurnOrchestrator", () => {
     expect(observedPhases[callsBeforeResume]).toBe("rule_assembly")
     expect(result.modelCalls).toBe(17)
     expect((await fixture.taskScopes.findTask(task.id))?.status).toBe("completed")
-    expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual(["第一章 世界种子.md"])
+    expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual(["第一卷 世界种子"])
+    expect(readdirSync(join(fixture.workspaceRoot, "章节正文", "第一卷 世界种子"))).toEqual(["第一章 世界种子.md"])
   })
 
   it("supersedes an orphaned running phase before resuming from its stable input", async () => {
@@ -3379,7 +3381,8 @@ describe("TurnOrchestrator", () => {
     expect(canonicalMessages[0]?.content_digest).toBe(completedFinalization.content_digest)
     expect(repeatedCommit.committedSequence).toBe(1)
     expect(project.committed_sequence).toBe(1)
-    expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual(["第一章 世界种子.md"])
+    expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual(["第一卷 世界种子"])
+    expect(readdirSync(join(fixture.workspaceRoot, "章节正文", "第一卷 世界种子"))).toEqual(["第一章 世界种子.md"])
   })
 
   it("resumes finalization from a prepared record after scope commit fails", async () => {

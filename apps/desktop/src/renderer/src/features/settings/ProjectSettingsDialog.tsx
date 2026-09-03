@@ -42,7 +42,7 @@ type SectionDefinition = Readonly<{
 }>
 
 const sections: readonly SectionDefinition[] = [
-  { id: "execution", label: "推演执行", group: "项目", keywords: "模型调用 token 耗时 预算 检索轮次 发散 设定 世界观", icon: Gauge },
+  { id: "execution", label: "推演执行", group: "项目", keywords: "模型调用 token 耗时 预算 检索轮次 发散 设定 世界观 剧情目标 采纳 伏笔 高潮", icon: Gauge },
   { id: "retrieval", label: "资料检索", group: "项目", keywords: "读取 请求 候选 深度 证据 token 联网 网页 搜索", icon: Database },
   { id: "graph", label: "世界图", group: "项目", keywords: "出度 入度 合并 预警 展开 节点 连接 入口 布局", icon: Network },
   { id: "history", label: "推演历史", group: "项目", keywords: "保存 历史 世界线 保留 上限 删除", icon: History },
@@ -92,6 +92,13 @@ export function ProjectSettingsDialog({
   }
   const updateWorldDivergenceMode = (worldDivergenceMode: WorldDivergenceMode): void => {
     setDraft((current) => ({ ...current, execution: { ...current.execution, worldDivergenceMode } }))
+    setSaveError(undefined)
+  }
+  const updateAutoApproveGoalProposals = (autoApproveGoalProposals: boolean): void => {
+    setDraft((current) => ({
+      ...current,
+      creationDesk: { ...current.creationDesk, autoApproveGoalProposals },
+    }))
     setSaveError(undefined)
   }
   const updateRetrieval = <K extends keyof ProjectSettings["retrieval"]>(
@@ -151,7 +158,13 @@ export function ProjectSettingsDialog({
           </div>
         </aside>
         <div className="settings-editor">
-          {section === "execution" ? <ExecutionSettings value={draft.execution} onChange={updateExecution} onDivergenceModeChange={updateWorldDivergenceMode} /> : null}
+          {section === "execution" ? <ExecutionSettings
+            value={draft.execution}
+            creationDesk={draft.creationDesk}
+            onChange={updateExecution}
+            onDivergenceModeChange={updateWorldDivergenceMode}
+            onCreationDeskChange={updateAutoApproveGoalProposals}
+          /> : null}
           {section === "retrieval" ? <RetrievalSettings value={draft.retrieval} onChange={updateRetrieval} /> : null}
           {section === "graph" ? <GraphSettings value={draft.graph} onChange={updateGraph} /> : null}
           {section === "history" ? <HistorySettings value={draft.history} entryCount={historyEntryCount} onChange={updateHistoryLimit} /> : null}
@@ -172,10 +185,12 @@ export function ProjectSettingsDialog({
   </div>
 }
 
-function ExecutionSettings({ value, onChange, onDivergenceModeChange }: {
+function ExecutionSettings({ value, creationDesk, onChange, onDivergenceModeChange, onCreationDeskChange }: {
   value: ProjectSettings["execution"]
+  creationDesk: ProjectSettings["creationDesk"]
   onChange: (key: NumericExecutionSetting, value: number) => void
   onDivergenceModeChange: (mode: WorldDivergenceMode) => void
+  onCreationDeskChange: (autoApproveGoalProposals: boolean) => void
 }): React.JSX.Element {
   return <SettingsPage icon={Gauge} title="推演执行" description="默认按每轮可能失败并保留约 30% 重试冗余计算。">
     <div className="settings-field-row">
@@ -207,6 +222,30 @@ function ExecutionSettings({ value, onChange, onDivergenceModeChange }: {
         </button>
       </div>
     </div>
+    <div className="settings-field-row">
+      <span>
+        <strong>剧情目标自动写入</strong>
+        <small>开启后，创作台 Agent 提出的目标/伏笔/高潮直接写入目标库，无需逐条采纳</small>
+      </span>
+      <div className="settings-segmented" role="group" aria-label="剧情目标自动写入">
+        <button
+          className={creationDesk.autoApproveGoalProposals ? "active" : ""}
+          type="button"
+          data-testid="settings-auto-approve-goals-on"
+          onClick={() => { onCreationDeskChange(true); }}
+        >
+          自动写入
+        </button>
+        <button
+          className={creationDesk.autoApproveGoalProposals ? "" : "active"}
+          type="button"
+          data-testid="settings-auto-approve-goals-off"
+          onClick={() => { onCreationDeskChange(false); }}
+        >
+          需手动采纳
+        </button>
+      </div>
+    </div>
     <NumberSetting label="最大模型调用次数" description="包含阶段调用和业务 Schema 修复调用" value={value.maxModelCalls} min={1} max={400} onChange={(next) => { onChange("maxModelCalls", next); }} />
     <NumberSetting label="主动压缩阈值" description="按当前模型 Profile 的最大上下文容量计算，达到该比例时开始机械压缩" value={Math.round(value.contextCompactionThresholdRatio * 100)} min={50} max={99} suffix="%" onChange={(next) => { onChange("contextCompactionThresholdRatio", next / 100); }} />
     <NumberSetting label="压缩目标" description="触发压缩后，将当前可见上下文降到模型容量的该比例以内" value={Math.round(value.contextCompressionTargetRatio * 100)} min={10} max={90} suffix="%" onChange={(next) => { onChange("contextCompressionTargetRatio", next / 100); }} />
@@ -215,6 +254,16 @@ function ExecutionSettings({ value, onChange, onDivergenceModeChange }: {
       <div className="settings-readonly-value"><Binary size={14} />由模型决定</div>
     </div>
     <NumberSetting label="单次模型请求最长时间" description="单次 AI 请求超过此时间后暂停并等待用户选择，不影响已保存检查点" value={value.maxModelRequestTimeMs} min={30_000} max={3_600_000} step={1000} suffix="ms" onChange={(next) => { onChange("maxModelRequestTimeMs", next); }} />
+    <NumberSetting
+      label="等待 Agent 响应"
+      description="等待后端/Agent 返回的时间；超时后询问是否继续等待，不会自动中断。继续等待会再按此时长计时"
+      value={Math.round(value.backendRequestWaitTimeoutMs / 60_000)}
+      min={1}
+      max={120}
+      step={1}
+      suffix="分钟"
+      onChange={(next) => { onChange("backendRequestWaitTimeoutMs", next * 60_000); }}
+    />
     <NumberSetting label="最长运行时间" description="墙钟时间上限，单位毫秒" value={value.maxWallTimeMs} min={1} max={7_200_000} step={1000} suffix="ms" onChange={(next) => { onChange("maxWallTimeMs", next); }} />
     <NumberSetting label="最大检索轮次" description="同一阶段允许模型补充读取资料的轮数" value={value.maxRetrievalRounds} min={1} max={10} onChange={(next) => { onChange("maxRetrievalRounds", next); }} />
   </SettingsPage>

@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react"
-import { Bot, ChevronDown, Ellipsis, FileText, Globe, Play, RefreshCw, Send, Settings2, Sparkles, UserRound } from "lucide-react"
+import { memo, useCallback, useEffect, useRef, useState } from "react"
+import { Bot, ChevronDown, Ellipsis, FileText, Globe, Play, RefreshCw, Send, Settings2, Sparkles, Square, UserRound } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type {
@@ -11,6 +11,12 @@ import type {
 } from "@worldseed/contracts"
 
 import { UiTooltip } from "../../components/UiTooltip.js"
+import { listModelCatalog } from "../../api/client.js"
+import {
+  catalogSignature,
+  hasValidBaseUrl,
+  isOfficialDeepSeekEndpoint,
+} from "../settings/ModelConfigurationDialog.js"
 import { toolbarBadgeCount } from "./creation-desk-goals.js"
 import { CreationDeskGoalsPopover } from "./CreationDeskGoalsPopover.js"
 import { CreationDeskToolbar } from "./CreationDeskToolbar.js"
@@ -34,6 +40,26 @@ type PresentationProps = Readonly<{
   onCausalityFocusChange(value: ChapterNarrativeIntent["causalityFocus"]): void
 }>
 
+type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+
+type ModelQuickProfile = Readonly<{
+  id: string
+  name: string
+  model: string
+  baseUrl: string
+  credentialRef: string
+  apiKey: string
+  hasApiKey: boolean
+  reasoningEffort: ReasoningEffort
+}>
+
+type ModelQuickSelectProps = Readonly<{
+  modelProfiles: readonly ModelQuickProfile[]
+  activeModelProfileId: string
+  onActiveModelIdChange(modelId: string): void
+  onReasoningEffortChange(effort: ReasoningEffort): void
+}>
+
 type Props = Readonly<{
   projectId: string | undefined
   workspaceRootRef: string | undefined
@@ -41,18 +67,26 @@ type Props = Readonly<{
   messages: readonly SynopsisConversationMessage[]
   busy: boolean
   stream?: SynopsisConversationStreamSnapshot | undefined
+  draftRestore?: { text: string; token: number } | undefined
   running: boolean
   pendingStagingPromotes?: readonly SynopsisStagingPromoteProposal[]
   onSend(message: string): Promise<void>
+  onStop?(): Promise<void>
   onRefreshChoices(messageId: string): Promise<void>
   onPromoteStaging(): Promise<void>
   onRejectStagingPromote?(proposalIds: readonly string[]): Promise<void>
   onStartTurn(): void
   onOpenSynopsisFile?(path: string): void
-}> & PresentationProps
+  onOpenSettingsLineage?(): void
+  tokenMetrics?: Readonly<{
+    kvRate?: number
+    totalTokens?: number
+    currentContextTokens?: number
+    contextWindowTokens?: number
+  }>
+}> & PresentationProps & ModelQuickSelectProps
 
 export function SynopsisConversationComposer(props: Props): React.JSX.Element {
-  const [draft, setDraft] = useState("")
   const [advancedMenuOpen, setAdvancedMenuOpen] = useState(false)
   const [goalsOpen, setGoalsOpen] = useState(false)
   const [focusUnfilled, setFocusUnfilled] = useState(false)
@@ -67,6 +101,10 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
   const stickToLatestRef = useRef(true)
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const visibleMessages = props.messages.filter((message) => message.hidden !== true)
+  // Stream can be "completed" while send() still persists; don't keep showing Stop.
+  const replyFinalizing = props.busy
+    && (props.stream?.status === "completed" || props.stream?.status === "failed")
+  const showStop = props.busy && !replyFinalizing
 
   const scrollThreadToLatest = (): void => {
     const thread = threadRef.current
@@ -76,17 +114,14 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
     thread.scrollTop = thread.scrollHeight
   }
 
-  const submit = async (): Promise<void> => {
-    const message = draft.trim()
-    if (message.length === 0 || props.busy || choicesRefreshing) return
-    setDraft("")
+  const sendMessage = useCallback(async (message: string): Promise<void> => {
     stickToLatestRef.current = true
     setShowJumpToLatest(false)
     await props.onSend(message)
     await goals.refresh()
-  }
+  }, [goals.refresh, props.onSend])
 
-  const refreshChoices = async (messageId: string): Promise<void> => {
+  const refreshChoices = useCallback(async (messageId: string): Promise<void> => {
     if (props.busy || choicesRefreshing) return
     setChoicesRefreshing(true)
     try {
@@ -94,7 +129,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
     } finally {
       setChoicesRefreshing(false)
     }
-  }
+  }, [choicesRefreshing, props.busy, props.onRefreshChoices])
 
   useEffect(() => {
     if (!stickToLatestRef.current) return
@@ -192,7 +227,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
               setFocusUnfilled(false)
             }}
             onAdd={goals.addGoal}
-            onUpdateContent={goals.updateContent}
+            onUpdateGoal={goals.updateGoal}
             onComplete={goals.completeGoal}
             onRemove={goals.removeGoal}
             onSetProgress={goals.setProgress}
@@ -201,44 +236,6 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
             onReject={goals.rejectProposals}
           />}
         />
-        {(props.pendingStagingPromotes?.length ?? 0) > 0
-          ? <div className="synopsis-staging-promote-panel" data-testid="synopsis-staging-promote-panel">
-              <div className="synopsis-staging-promote-panel-title">待确认落盘</div>
-              {props.pendingStagingPromotes?.map((proposal) => (
-                <div className="synopsis-staging-promote-card" key={proposal.proposalId}>
-                  <p>{proposal.reason ?? "将暂存区确认内容写入设定集"}</p>
-                  <ul>
-                    {proposal.settingsWrites.map((write) => (
-                      <li key={`${write.entryId}:${write.relativePath}`}>
-                        <code>{write.relativePath}</code>
-                        <span>{write.mode === "create" ? "新建" : "更新"}</span>
-                      </li>
-                    ))}
-                  </ul>
-                  <div className="synopsis-staging-promote-actions">
-                    <button
-                      type="button"
-                      className="synopsis-choice"
-                      disabled={props.busy || props.running}
-                      onClick={() => { void props.onPromoteStaging() }}
-                    >
-                      确认落盘到设定集与目标
-                    </button>
-                    {props.onRejectStagingPromote === undefined
-                      ? null
-                      : <button
-                          type="button"
-                          className="synopsis-choice muted"
-                          disabled={props.busy || props.running}
-                          onClick={() => { void props.onRejectStagingPromote?.([proposal.proposalId]) }}
-                        >
-                          暂不落盘
-                        </button>}
-                  </div>
-                </div>
-              ))}
-            </div>
-          : null}
         <div className="creation-desk-thread overlay-scrollbar" ref={threadRef} aria-live="polite">
         <div className="creation-desk-thread-inner">
           {visibleMessages.length === 0 && !props.busy
@@ -251,60 +248,21 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
                   : null}
               </div>
             : <>
-                {visibleMessages.map((message) => <article className={`creation-desk-message ${message.role}`} key={message.messageId}>
-                  <div className="creation-desk-message-avatar" aria-hidden="true">
-                    {message.role === "user" ? <UserRound size={16} /> : <Bot size={16} />}
-                  </div>
-                  <div className="creation-desk-message-body">
-                    <header>{message.role === "user" ? "你" : "Agent"}</header>
-                    {message.role === "assistant"
-                      ? <AgentStructuredBody
-                          thinking={resolveThinkingDisplay(message.reasoningContent)}
-                          searching={message.searching}
-                          content={message.content}
-                          defaultThinkingOpen={false}
-                        />
-                      : <p>{message.content}</p>}
-                    {message.role === "assistant" && message.choices !== undefined && message.choices.length > 0
-                      ? <div className="synopsis-conversation-choices">
-                          {message.choices.map((choice) => <button
-                            key={choice.label}
-                            type="button"
-                            className="synopsis-choice"
-                            disabled={props.running || props.busy || choicesRefreshing}
-                            onClick={() => {
-                              if (choice.action === "start_turn") {
-                                props.onStartTurn()
-                                return
-                              }
-                              if (choice.action === "promote_staging") {
-                                void props.onPromoteStaging()
-                                return
-                              }
-                              void props.onSend(choice.label)
-                            }}
-                          >
-                            {choice.label}
-                          </button>)}
-                          {message.messageId === latestChoiceMessageId
-                            ? <button
-                                type="button"
-                                className={`synopsis-choice-refresh${choicesRefreshing ? " is-spinning" : ""}`}
-                                data-testid="synopsis-choice-refresh"
-                                title="换一批不同选项"
-                                aria-label="换一批不同选项"
-                                disabled={props.running || props.busy || choicesRefreshing}
-                                onClick={() => {
-                                  void refreshChoices(message.messageId)
-                                }}
-                              >
-                                <RefreshCw size={14} aria-hidden="true" />
-                              </button>
-                            : null}
-                        </div>
-                      : null}
-                  </div>
-                </article>)}
+                {visibleMessages.map((message) => <CreationDeskMessage
+                  key={message.messageId}
+                  message={message}
+                  running={props.running}
+                  busy={props.busy}
+                  choicesRefreshing={choicesRefreshing}
+                  isLatestChoiceMessage={message.messageId === latestChoiceMessageId}
+                  pendingStagingPromotes={props.pendingStagingPromotes}
+                  onSend={sendMessage}
+                  onPromoteStaging={props.onPromoteStaging}
+                  onRejectStagingPromote={props.onRejectStagingPromote}
+                  onStartTurn={props.onStartTurn}
+                  onRefreshChoices={refreshChoices}
+                  onOpenSettingsLineage={props.onOpenSettingsLineage}
+                />)}
                 {props.busy
                   ? <article className="creation-desk-message assistant pending" aria-live="polite">
                       <div className="creation-desk-message-avatar" aria-hidden="true"><Bot size={16} /></div>
@@ -316,6 +274,9 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
                           content={extractAssistantPreview(props.stream?.content)}
                           defaultThinkingOpen
                           streaming
+                          {...(props.onOpenSettingsLineage === undefined
+                            ? {}
+                            : { onOpenSettingsLineage: props.onOpenSettingsLineage })}
                         />
                       </div>
                     </article>
@@ -408,83 +369,371 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
             </select>
           </label>
         </div>
-        <div className="creation-desk-composer">
-          <textarea
-            value={draft}
-            disabled={props.busy || props.running}
-            placeholder="告诉 Agent 下一章想怎么推进…"
-            rows={3}
-            onChange={(event) => { setDraft(event.target.value); }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault()
-                void submit()
-              }
-            }}
-          />
-          <div className="creation-desk-composer-actions">
-            <button
-              type="button"
-              className="creation-desk-send"
-              disabled={props.busy || props.running || draft.trim().length === 0}
-              onClick={() => { void submit(); }}
-            >
-              <Send size={15} aria-hidden="true" />{props.busy ? "处理中" : "发送"}
-            </button>
-            <div className="creation-desk-advanced-menu" ref={advancedMenuRef}>
-              <UiTooltip label="更多操作">
-                <button
-                  type="button"
-                  className={`creation-desk-advanced-trigger${advancedMenuOpen ? " open" : ""}`}
-                  data-testid="creation-desk-advanced-trigger"
-                  aria-label="更多操作"
-                  aria-expanded={advancedMenuOpen}
-                  aria-haspopup="menu"
-                  disabled={props.busy && !props.running}
-                  onClick={() => { setAdvancedMenuOpen((open) => !open); }}
-                >
-                  <Ellipsis size={16} aria-hidden="true" />
-                </button>
-              </UiTooltip>
-              {advancedMenuOpen
-                ? <div className="creation-desk-advanced-panel" role="menu" data-testid="creation-desk-advanced-menu">
-                    <p className="creation-desk-advanced-hint">建议先与 Agent 讨论并确认梗概</p>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className="creation-desk-start-turn"
-                      data-testid="creation-desk-start-turn"
-                      disabled={props.running || props.busy}
-                      onClick={() => {
-                        setAdvancedMenuOpen(false)
-                        props.onStartTurn()
-                      }}
-                    >
-                      <span><Play size={15} aria-hidden="true" />{props.running ? "推演中" : "开始推演"}</span>
-                      <small>使用当前梗概直接推演</small>
-                    </button>
-                  </div>
-                : null}
-            </div>
-          </div>
-        </div>
+        <CreationDeskComposerInput
+          busy={props.busy}
+          running={props.running}
+          showStop={showStop}
+          replyFinalizing={replyFinalizing}
+          tokenMetrics={props.tokenMetrics}
+          draftRestore={props.draftRestore}
+          advancedMenuOpen={advancedMenuOpen}
+          advancedMenuRef={advancedMenuRef}
+          modelProfiles={props.modelProfiles}
+          activeModelProfileId={props.activeModelProfileId}
+          onActiveModelIdChange={props.onActiveModelIdChange}
+          onReasoningEffortChange={props.onReasoningEffortChange}
+          onToggleAdvancedMenu={() => { setAdvancedMenuOpen((open) => !open); }}
+          onCloseAdvancedMenu={() => { setAdvancedMenuOpen(false); }}
+          onSend={sendMessage}
+          onStop={props.onStop}
+          onStartTurn={props.onStartTurn}
+        />
       </footer>
     </div>
   </div>
 }
 
-function AgentStructuredBody({
+type ComposerInputProps = Readonly<{
+  busy: boolean
+  running: boolean
+  showStop: boolean
+  replyFinalizing: boolean
+  tokenMetrics?: Props["tokenMetrics"]
+  draftRestore?: Props["draftRestore"]
+  advancedMenuOpen: boolean
+  advancedMenuRef: React.RefObject<HTMLDivElement | null>
+  modelProfiles: ModelQuickSelectProps["modelProfiles"]
+  activeModelProfileId: string
+  onActiveModelIdChange(modelId: string): void
+  onReasoningEffortChange(effort: ReasoningEffort): void
+  onToggleAdvancedMenu(): void
+  onCloseAdvancedMenu(): void
+  onSend(message: string): Promise<void>
+  onStop?(): Promise<void>
+  onStartTurn(): void
+}>
+
+/** Owns draft text so keystrokes do not re-render the markdown message thread. */
+function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element {
+  const [draft, setDraft] = useState("")
+  const [catalogModels, setCatalogModels] = useState<readonly string[]>([])
+  const [catalogStatus, setCatalogStatus] = useState<"idle" | "loading" | "ready" | "error">("idle")
+  const loadedCatalogSigRef = useRef("")
+
+  useEffect(() => {
+    if (props.draftRestore === undefined) return
+    setDraft(props.draftRestore.text)
+  }, [props.draftRestore])
+
+  const activeProfile = props.modelProfiles.find((profile) => profile.id === props.activeModelProfileId)
+    ?? props.modelProfiles[0]
+
+  useEffect(() => {
+    if (activeProfile === undefined) {
+      loadedCatalogSigRef.current = ""
+      setCatalogModels([])
+      setCatalogStatus("idle")
+      return
+    }
+    const currentModel = activeProfile.model.trim()
+    if (!isOfficialDeepSeekEndpoint(activeProfile.baseUrl)) {
+      loadedCatalogSigRef.current = ""
+      setCatalogModels(currentModel.length === 0 ? [] : [currentModel])
+      setCatalogStatus("ready")
+      return
+    }
+    if ((!activeProfile.hasApiKey && activeProfile.apiKey.trim().length === 0) || !hasValidBaseUrl(activeProfile.baseUrl)) {
+      loadedCatalogSigRef.current = ""
+      setCatalogModels(currentModel.length === 0 ? [] : [currentModel])
+      setCatalogStatus("idle")
+      return
+    }
+    const signature = `${activeProfile.id}\u0000${catalogSignature({
+      id: activeProfile.id,
+      name: activeProfile.name,
+      baseUrl: activeProfile.baseUrl,
+      model: activeProfile.model,
+      credentialRef: activeProfile.credentialRef,
+      apiProtocol: "openai_chat_completions",
+      contextWindowTokens: 1,
+      apiKey: activeProfile.apiKey,
+      hasApiKey: activeProfile.hasApiKey,
+      thinkingModeEnabled: true,
+      reasoningEffort: activeProfile.reasoningEffort,
+      jsonModeEnabled: false,
+      disableResponseStorage: true,
+      serviceTier: "auto",
+    })}`
+    if (signature === loadedCatalogSigRef.current) return
+    let cancelled = false
+    setCatalogStatus("loading")
+    const timeout = window.setTimeout(() => {
+      void listModelCatalog({
+        baseUrl: activeProfile.baseUrl.trim(),
+        credentialRef: activeProfile.credentialRef,
+        apiKey: activeProfile.apiKey.trim(),
+      }).then((result) => {
+        if (cancelled) return
+        const ids = result.models.map((model) => model.id)
+        setCatalogModels(currentModel.length > 0 && !ids.includes(currentModel) ? [currentModel, ...ids] : ids)
+        setCatalogStatus("ready")
+        loadedCatalogSigRef.current = signature
+      }).catch(() => {
+        if (cancelled) return
+        setCatalogModels(currentModel.length === 0 ? [] : [currentModel])
+        setCatalogStatus("error")
+        loadedCatalogSigRef.current = signature
+      })
+    }, 200)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timeout)
+    }
+  }, [activeProfile])
+
+  const submit = async (): Promise<void> => {
+    const message = draft.trim()
+    if (message.length === 0 || props.busy) return
+    setDraft("")
+    await props.onSend(message)
+  }
+
+  const modelOptions = (() => {
+    const current = activeProfile?.model.trim() ?? ""
+    if (catalogModels.length === 0) return current.length === 0 ? [] : [current]
+    if (current.length > 0 && !catalogModels.includes(current)) return [current, ...catalogModels]
+    return catalogModels
+  })()
+
+  return <div className="creation-desk-composer">
+    <div className="creation-desk-token-metrics" data-testid="creation-desk-token-metrics">
+      <span>KV <strong>{formatDeskKv(props.tokenMetrics?.kvRate)}</strong></span>
+      <span>Token <strong>{formatDeskTokens(props.tokenMetrics?.totalTokens)}</strong></span>
+      <span>上下文 <strong>{formatDeskContext(props.tokenMetrics?.currentContextTokens, props.tokenMetrics?.contextWindowTokens)}</strong></span>
+    </div>
+    <textarea
+      value={draft}
+      disabled={props.busy || props.running}
+      placeholder="告诉 Agent 下一章想怎么推进…"
+      rows={3}
+      onChange={(event) => { setDraft(event.target.value); }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault()
+          void submit()
+        }
+      }}
+    />
+    <div className="creation-desk-composer-actions">
+      <div className="creation-desk-model-quick" data-testid="creation-desk-model-quick">
+        <label>
+          <UiTooltip label="当前模型配置下的可选模型（与「模型配置」里的模型列表相同）">
+            <span>模型</span>
+          </UiTooltip>
+          <select
+            aria-label="选择模型"
+            value={activeProfile?.model ?? ""}
+            disabled={activeProfile === undefined || (modelOptions.length === 0 && catalogStatus === "loading")}
+            onChange={(event) => { props.onActiveModelIdChange(event.target.value); }}
+          >
+            {modelOptions.length === 0
+              ? <option value="">
+                  {catalogStatus === "loading"
+                    ? "正在获取模型…"
+                    : catalogStatus === "error"
+                      ? "获取失败"
+                      : "暂无可用模型"}
+                </option>
+              : modelOptions.map((modelId) => (
+                  <option key={modelId} value={modelId}>{modelId}</option>
+                ))}
+          </select>
+        </label>
+        <label>
+          <UiTooltip label="思考强度 / 推理效果（与「模型配置」中的思考强度相同）">
+            <span>效果</span>
+          </UiTooltip>
+          <select
+            aria-label="模型效果"
+            value={activeProfile?.reasoningEffort ?? "high"}
+            disabled={activeProfile === undefined}
+            onChange={(event) => {
+              props.onReasoningEffortChange(event.target.value as ReasoningEffort)
+            }}
+          >
+            <option value="none">无</option>
+            <option value="minimal">最小</option>
+            <option value="low">低</option>
+            <option value="medium">中</option>
+            <option value="high">高</option>
+            <option value="xhigh">极高</option>
+            <option value="max">最大</option>
+          </select>
+        </label>
+      </div>
+      {props.showStop
+        ? <button
+            type="button"
+            className="creation-desk-stop"
+            data-testid="creation-desk-stop"
+            disabled={props.onStop === undefined}
+            onClick={() => { void props.onStop?.(); }}
+          >
+            <Square size={15} aria-hidden="true" />停止
+          </button>
+        : props.replyFinalizing
+          ? <button
+              type="button"
+              className="creation-desk-send"
+              data-testid="creation-desk-finalizing"
+              disabled
+            >
+              收尾中…
+            </button>
+          : <button
+            type="button"
+            className="creation-desk-send"
+            disabled={props.running || draft.trim().length === 0}
+            onClick={() => { void submit(); }}
+          >
+            <Send size={15} aria-hidden="true" />发送
+          </button>}
+      <div className="creation-desk-advanced-menu" ref={props.advancedMenuRef}>
+        <UiTooltip label="更多操作">
+          <button
+            type="button"
+            className={`creation-desk-advanced-trigger${props.advancedMenuOpen ? " open" : ""}`}
+            data-testid="creation-desk-advanced-trigger"
+            aria-label="更多操作"
+            aria-expanded={props.advancedMenuOpen}
+            aria-haspopup="menu"
+            disabled={props.busy && !props.running}
+            onClick={() => { props.onToggleAdvancedMenu(); }}
+          >
+            <Ellipsis size={16} aria-hidden="true" />
+          </button>
+        </UiTooltip>
+        {props.advancedMenuOpen
+          ? <div className="creation-desk-advanced-panel" role="menu" data-testid="creation-desk-advanced-menu">
+              <p className="creation-desk-advanced-hint">建议先与 Agent 讨论并确认梗概</p>
+              <button
+                type="button"
+                role="menuitem"
+                className="creation-desk-start-turn"
+                data-testid="creation-desk-start-turn"
+                disabled={props.running || props.busy}
+                onClick={() => {
+                  props.onCloseAdvancedMenu()
+                  props.onStartTurn()
+                }}
+              >
+                <span><Play size={15} aria-hidden="true" />{props.running ? "推演中" : "开始推演"}</span>
+                <small>使用当前梗概直接推演</small>
+              </button>
+            </div>
+          : null}
+      </div>
+    </div>
+  </div>
+}
+
+const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
+  message: SynopsisConversationMessage
+  running: boolean
+  busy: boolean
+  choicesRefreshing: boolean
+  isLatestChoiceMessage: boolean
+  pendingStagingPromotes?: readonly SynopsisStagingPromoteProposal[]
+  onSend(message: string): Promise<void>
+  onPromoteStaging(): Promise<void>
+  onRejectStagingPromote?(proposalIds: readonly string[]): Promise<void>
+  onStartTurn(): void
+  onRefreshChoices(messageId: string): Promise<void>
+  onOpenSettingsLineage?(): void
+}>): React.JSX.Element {
+  const { message } = props
+  return <article className={`creation-desk-message ${message.role}`}>
+    <div className="creation-desk-message-avatar" aria-hidden="true">
+      {message.role === "user" ? <UserRound size={16} /> : <Bot size={16} />}
+    </div>
+    <div className="creation-desk-message-body">
+      <header>{message.role === "user" ? "你" : "Agent"}</header>
+      {message.role === "assistant"
+        ? <AgentStructuredBody
+            thinking={resolveThinkingDisplay(message.reasoningContent)}
+            searching={message.searching}
+            content={message.content}
+            defaultThinkingOpen={false}
+            {...(props.onOpenSettingsLineage === undefined
+              ? {}
+              : { onOpenSettingsLineage: props.onOpenSettingsLineage })}
+          />
+        : <p>{message.content}</p>}
+      {message.role === "assistant" && message.choices !== undefined && message.choices.length > 0
+        ? <div className="synopsis-conversation-choices">
+            {message.choices.map((choice) => <button
+              key={choice.label}
+              type="button"
+              className="synopsis-choice"
+              disabled={props.running || props.busy || props.choicesRefreshing}
+              onClick={() => {
+                if (choice.action === "start_turn") {
+                  props.onStartTurn()
+                  return
+                }
+                if (choice.action === "promote_staging") {
+                  void props.onPromoteStaging()
+                  return
+                }
+                if (
+                  choice.label.includes("暂不落盘")
+                  && props.onRejectStagingPromote !== undefined
+                  && (props.pendingStagingPromotes?.length ?? 0) > 0
+                ) {
+                  void props.onRejectStagingPromote(
+                    props.pendingStagingPromotes!.map((proposal) => proposal.proposalId),
+                  )
+                }
+                void props.onSend(choice.label)
+              }}
+            >
+              {choice.label}
+            </button>)}
+            {props.isLatestChoiceMessage
+              ? <button
+                  type="button"
+                  className={`synopsis-choice-refresh${props.choicesRefreshing ? " is-spinning" : ""}`}
+                  data-testid="synopsis-choice-refresh"
+                  title="换一批不同选项"
+                  aria-label="换一批不同选项"
+                  disabled={props.running || props.busy || props.choicesRefreshing}
+                  onClick={() => {
+                    void props.onRefreshChoices(message.messageId)
+                  }}
+                >
+                  <RefreshCw size={14} aria-hidden="true" />
+                </button>
+              : null}
+          </div>
+        : null}
+    </div>
+  </article>
+})
+
+const AgentStructuredBody = memo(function AgentStructuredBody({
   thinking,
   searching,
   content,
   defaultThinkingOpen,
   streaming = false,
+  onOpenSettingsLineage,
 }: Readonly<{
   thinking?: string | undefined
   searching?: SynopsisConversationStreamSnapshot["searching"] | SynopsisConversationMessage["searching"]
   content?: string | undefined
   defaultThinkingOpen: boolean
   streaming?: boolean
+  onOpenSettingsLineage?(): void
 }>): React.JSX.Element {
   const hasThinking = (thinking?.trim().length ?? 0) > 0
   const hasSearching = (searching?.length ?? 0) > 0
@@ -515,6 +764,17 @@ function AgentStructuredBody({
           <ul>
             {(searching ?? []).map((item) => <li key={item.query}>
               <strong>{item.query}</strong>
+              {item.asOfChapterSequence !== undefined && item.temporalRole === "as_of"
+                ? onOpenSettingsLineage === undefined
+                  ? <span className="settings-as-of-chip">按第 {item.asOfChapterSequence} 章视角（非当前设定全文）</span>
+                  : <button
+                      type="button"
+                      className="settings-as-of-chip settings-as-of-chip-button"
+                      onClick={onOpenSettingsLineage}
+                    >
+                      按第 {item.asOfChapterSequence} 章视角（非当前设定全文）
+                    </button>
+                : null}
               <small>{item.status === "running" ? "查询中" : item.status === "failed" ? "失败" : "完成"}</small>
               {item.resultSummary === undefined ? null : <pre>{item.resultSummary}</pre>}
             </li>)}
@@ -530,7 +790,7 @@ function AgentStructuredBody({
         ? <p className="creation-desk-pending">{hasThinking ? "正在整理正式回复…" : "正在生成正式回复…"}</p>
         : null}
   </div>
-}
+})
 
 function resolveThinkingDisplay(thinking: string | undefined, phaseJson?: string): string | undefined {
   return normalizeThinkingDisplayText(thinking) ?? normalizeThinkingDisplayText(phaseJson)
@@ -595,6 +855,22 @@ function extractAssistantPreview(raw: string | undefined): string | undefined {
 }
 
 const CREATION_DESK_NEAR_BOTTOM_PX = 72
+
+function formatDeskKv(rate: number | undefined): string {
+  return rate === undefined ? "—" : `${String(Math.round(rate * 100))}%`
+}
+
+function formatDeskTokens(total: number | undefined): string {
+  if (total === undefined) return "—"
+  if (total >= 1000) return `${(total / 1000).toFixed(1)}k`
+  return String(total)
+}
+
+function formatDeskContext(current: number | undefined, maximum: number | undefined): string {
+  const left = current === undefined ? "—" : formatDeskTokens(current)
+  const right = maximum === undefined || maximum <= 0 ? "—" : formatDeskTokens(maximum)
+  return `${left}/${right}`
+}
 
 export function isCreationDeskNearBottom(thread: Readonly<{
   scrollHeight: number

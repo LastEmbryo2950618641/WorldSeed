@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worldseed · 设定沿革原型</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      --panel: #f8f9fa;
+      --line: #cfd4d8;
+      --text: #26323a;
+      --muted: #6a757c;
+      --accent: #27725f;
+      --del-bg: #fde8e8;
+      --del: #a33b3b;
+      --add-bg: #e5f6ea;
+      --add: #1f6b3a;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #eef1f3; color: var(--text); }
+    .app { display: grid; grid-template-rows: 34px 1fr; min-height: 100vh; min-width: 960px; }
+    .menu { display: flex; align-items: center; gap: 12px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 12px; }
+    .brand { font-weight: 650; }
+    .workspace { display: grid; grid-template-columns: 240px 1fr; min-height: 0; }
+    .sidebar { border-right: 1px solid var(--line); background: var(--panel); }
+    .tool-title { height: 32px; display: flex; align-items: center; padding: 0 10px; border-bottom: 1px solid var(--line); font-size: 11px; font-weight: 650; color: #4f5d65; text-transform: uppercase; }
+    .tree { padding: 6px 4px; font-size: 12px; }
+    .tree-row { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 8px; border-radius: 3px; border: 0; background: transparent; width: 100%; text-align: left; color: inherit; cursor: pointer; font: inherit; }
+    .tree-row:hover { background: #e9edef; }
+    .tree-row.active { background: #dce9e5; color: #1c5d4c; }
+    .tree-row.indent { padding-left: 22px; }
+    .tree-row.virtual { font-weight: 650; color: #245e50; }
+    .badge { margin-left: auto; font-size: 10px; color: var(--accent); background: #e4f0ec; padding: 1px 6px; border-radius: 99px; }
+    .center { display: grid; grid-template-rows: 36px 1fr; background: white; min-width: 0; }
+    .tabs { display: flex; align-items: end; border-bottom: 1px solid var(--line); background: #f5f6f7; }
+    .tab { height: 32px; display: flex; align-items: center; padding: 0 14px; border-right: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+    .tab.active { background: white; color: var(--text); border-top: 2px solid var(--accent); }
+    .panel { overflow: auto; padding: 18px 24px 40px; }
+    .hint { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
+    .file-pick { display: grid; gap: 6px; max-width: 420px; margin-bottom: 20px; }
+    .file-pick button { text-align: left; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: #fafbfb; cursor: pointer; font: inherit; }
+    .file-pick button:hover, .file-pick button.active { border-color: #9cbcb2; background: #eef6f3; }
+    .timeline { display: grid; gap: 12px; max-width: 720px; }
+    .entry { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #fff; }
+    .entry-head { display: flex; gap: 10px; align-items: baseline; padding: 10px 12px; background: #f7f8f9; border-bottom: 1px solid #e6eaec; }
+    .entry-head strong { font-size: 13px; }
+    .entry-head span { font-size: 11px; color: var(--muted); }
+    .diff { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; line-height: 1.55; }
+    .diff-line { display: grid; grid-template-columns: 28px 1fr; padding: 2px 10px; }
+    .diff-line.del { background: var(--del-bg); color: var(--del); }
+    .diff-line.add { background: var(--add-bg); color: var(--add); }
+    .diff-line .g { opacity: 0.7; }
+    .note { margin-top: 28px; padding: 10px 12px; border-left: 3px solid #c48928; background: #fff7e8; color: #665334; font-size: 12px; max-width: 720px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="menu"><span class="brand">Worldseed</span><span>设定沿革 · 交互原型（非真实数据）</span></div>
+    <div class="workspace">
+      <aside class="sidebar">
+        <div class="tool-title">工作目录</div>
+        <div class="tree">
+          <div class="tree-row"><span>📁</span> 世界推演规则</div>
+          <div class="tree-row"><span>📁</span> 设定集</div>
+          <button class="tree-row indent" type="button" data-open-file>林照.md（当前编辑）</button>
+          <button class="tree-row virtual active" type="button" id="open-lineage"><span>📜</span> 设定沿革 <span class="badge">变动</span></button>
+          <div class="tree-row"><span>📁</span> 暂存区</div>
+          <div class="tree-row"><span>📁</span> 章节正文</div>
+        </div>
+      </aside>
+      <main class="center">
+        <div class="tabs"><div class="tab active" id="tab-label">设定沿革</div></div>
+        <div class="panel" id="panel">
+          <p class="hint">点击左侧「设定沿革」进入变动入口；再选文件，以时间线查看红删绿增。</p>
+          <div class="file-pick" id="picks">
+            <button type="button" data-file="设定集/人物/林照.md" class="active">设定集/人物/林照.md</button>
+            <button type="button" data-file="设定集/世界/盐雾城.md">设定集/世界/盐雾城.md</button>
+          </div>
+          <div class="timeline" id="timeline"></div>
+          <div class="note">普通「设定集/*.md」仍打开编辑器改当前真相；本入口只读沿革，不覆盖当前文件。</div>
+        </div>
+      </main>
+    </div>
+  </div>
+  <script>
+    const data = {
+      "设定集/人物/林照.md": [
+        {
+          title: "因第 42 章 · 身份揭晓后",
+          meta: "刚才 · 设定抽取采纳",
+          lines: [
+            { t: "del", g: "-", text: "他对外仍以凡人盐工身份活动。" },
+            { t: "add", g: "+", text: "近卫已确认他觉醒血脉；对外口径改为「失踪盐工」。" },
+          ],
+        },
+        {
+          title: "因第 18 章 · 初次登场",
+          meta: "更早 · 暂存落盘",
+          lines: [
+            { t: "add", g: "+", text: "林照，盐雾码头苦力，对外不谈出身。" },
+          ],
+        },
+      ],
+      "设定集/世界/盐雾城.md": [
+        {
+          title: "你保存了文件",
+          meta: "手工编辑",
+          lines: [
+            { t: "del", g: "-", text: "城门夜禁从亥时起。" },
+            { t: "add", g: "+", text: "城门夜禁从戌时起（冬令）。" },
+          ],
+        },
+      ],
+    };
+
+    function render(path) {
+      document.getElementById("tab-label").textContent = "设定沿革 · " + path.split("/").pop();
+      document.querySelectorAll("[data-file]").forEach((btn) => {
+        btn.classList.toggle("active", btn.getAttribute("data-file") === path);
+      });
+      const entries = data[path] || [];
+      document.getElementById("timeline").innerHTML = entries.map((entry) => `
+        <article class="entry">
+          <div class="entry-head"><strong>${entry.title}</strong><span>${entry.meta}</span></div>
+          <div class="diff">${entry.lines.map((line) => `
+            <div class="diff-line ${line.t}"><span class="g">${line.g}</span><span>${line.text}</span></div>
+          `).join("")}</div>
+        </article>
+      `).join("");
+    }
+
+    document.getElementById("open-lineage").addEventListener("click", () => {
+      document.getElementById("open-lineage").classList.add("active");
+      render("设定集/人物/林照.md");
+    });
+    document.querySelectorAll("[data-file]").forEach((btn) => {
+      btn.addEventListener("click", () => render(btn.getAttribute("data-file")));
+    });
+    render("设定集/人物/林照.md");
+  </script>
+</body>
+</html>

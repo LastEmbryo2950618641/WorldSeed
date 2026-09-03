@@ -164,6 +164,7 @@ export class FakeAiModelAdapter implements AIModelPort {
         return {
           chapterNumberText: `第${chineseNumber(input.chapterSequence)}章`,
           heading: `第${chineseNumber(input.chapterSequence)}章 世界种子`,
+          volumeFolderName: "第一卷 世界种子",
           continuityEvidenceRefs: [],
         }
       case "dependency_audit":

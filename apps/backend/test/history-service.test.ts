@@ -62,7 +62,7 @@ describe("HistoryService", () => {
     const snapshot = await fixture.vcs.readSnapshot(row.git_commit_oid as string)
     expect(snapshot.manifest.activeScopeIds).toEqual([fixture.scopeId])
     expect(snapshot.manifest.documentHeads).toEqual([expect.objectContaining({ chapterId: fixture.chapterId })])
-    expect(snapshot.files.some((file) => file.gitPath.includes("章节正文/第一章 开始.md"))).toBe(true)
+    expect(snapshot.files.some((file) => file.gitPath.includes("章节正文/第一卷 测试/第一章 开始.md"))).toBe(true)
     expect(snapshot.files.some((file) => file.gitPath.includes("base-rules.md"))).toBe(false)
     expect((await fixture.repository.listBranches(fixture.projectId))[0]).toMatchObject({
       worldHeadEntryId: first.entryId,
@@ -345,7 +345,7 @@ describe("HistoryService", () => {
       context_id: firstContextId,
       source_id: fixture.sourceId,
       chapter_sequence: 1,
-      chapter_path: "章节正文/第一章 开始.md",
+      chapter_path: "章节正文/第一卷 测试/第一章 开始.md",
       chapter_heading: "第一章 开始",
       content_ref: join(fixture.workspaceRoot, "chapter.md"),
       content_digest: "chapter-digest",
@@ -388,7 +388,7 @@ describe("HistoryService", () => {
       chapterId: secondChapterId,
       contentRef: join(fixture.workspaceRoot, "second.md"),
       heading: "第二章 继续",
-      publishPath: "章节正文/第二章 继续.md",
+      publishPath: "章节正文/第一卷 测试/第二章 继续.md",
       digest: "second-chapter-digest",
       createdAtMs: 410,
     })
@@ -409,13 +409,13 @@ describe("HistoryService", () => {
       context_id: secondContextId,
       source_id: secondSourceId,
       chapter_sequence: 2,
-      chapter_path: "章节正文/第二章 继续.md",
+      chapter_path: "章节正文/第一卷 测试/第二章 继续.md",
       chapter_heading: "第二章 继续",
       content_ref: join(fixture.workspaceRoot, "second.md"),
       content_digest: "second-chapter-digest",
       created_at: 410,
     }).executeTakeFirstOrThrow()
-    await fixture.workspace.publishChapter(fixture.workspaceRoot, "章节正文/第二章 继续.md", "# 第二章 继续\n\n第二轮正文。\n")
+    await fixture.workspace.publishChapter(fixture.workspaceRoot, "章节正文/第一卷 测试/第二章 继续.md", "# 第二章 继续\n\n第二轮正文。\n")
     await fixture.workspace.saveUserMarkdown(fixture.workspaceRoot, "设定集/readme.md", "# 第二轮设定索引\n")
     await fixture.database.insertInto("model_context_messages").values({
       id: randomUUID(),
@@ -468,7 +468,7 @@ describe("HistoryService", () => {
     expect(restored.activeGeneration).toBe(1)
     expect((await fixture.repository.readOverview(fixture.projectId)).graphAnchorIds).toEqual([fixture.nodeId])
     expect(await fixture.workspace.readMarkdown(fixture.workspaceRoot, "设定集/readme.md")).toBe("# 设定集索引\n")
-    await expect(fixture.workspace.readMarkdown(fixture.workspaceRoot, "章节正文/第二章 继续.md")).rejects.toThrow()
+    await expect(fixture.workspace.readMarkdown(fixture.workspaceRoot, "章节正文/第一卷 测试/第二章 继续.md")).rejects.toThrow()
     expect(await fixture.database.selectFrom("active_scope_refs").select("scope_id").orderBy("scope_id").execute())
       .toEqual([{ scope_id: fixture.scopeId }])
     expect((await new SqliteDocumentRepository(fixture.database).listCommittedChapters(fixture.projectId)).map((chapter) => chapter.chapterId))
@@ -861,7 +861,7 @@ async function createFixture() {
     chapterId,
     contentRef: join(internalRoot, "chapter.md"),
     heading: "第一章 开始",
-    publishPath: "章节正文/第一章 开始.md",
+    publishPath: "章节正文/第一卷 测试/第一章 开始.md",
     digest: "chapter-digest",
     createdAtMs: 20,
   })
@@ -869,7 +869,7 @@ async function createFixture() {
     createNodeRevision(randomUUID(), scopeId, nodeId, "第一轮节点"),
   ])
   await new SqliteScopeCommitRepository(database).commit(scopeId)
-  await workspace.publishChapter(workspaceRoot, "章节正文/第一章 开始.md", "# 第一章 开始\n\n正文。\n")
+  await workspace.publishChapter(workspaceRoot, "章节正文/第一卷 测试/第一章 开始.md", "# 第一章 开始\n\n正文。\n")
   const repository = new SqliteHistoryRepository(database, randomUUID)
   const vcs = new IsomorphicGitHistoryAdapter(join(internalRoot, "history.git"))
   const service = new HistoryService(

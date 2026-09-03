@@ -3,7 +3,7 @@ import { rmSync } from "node:fs"
 
 import { afterEach, describe, expect, it } from "vitest"
 
-import { PROTOCOL_VERSION, type DeductionGoalsSnapshot } from "@worldseed/contracts"
+import { PROTOCOL_VERSION, type DeductionGoalsSnapshot, type TurnDeductionGoalBundle } from "@worldseed/contracts"
 
 import { openChapterHarness, type ChapterHarness } from "./helpers/chapter-coordination-harness.js"
 
@@ -91,7 +91,7 @@ describe("deduction goals", () => {
     })
   })
 
-  it("imports legacy localStorage-shaped goals once", async () => {
+  it("imports legacy localStorage-shaped goals once with taxonomy defaults", async () => {
     await withHarness(async (harness) => {
       const base = {
         projectId: harness.projectId,
@@ -116,7 +116,9 @@ describe("deduction goals", () => {
           },
         ],
       })
-      expect(imported.goals.some((goal) => goal.content === "活跃目标")).toBe(true)
+      const active = imported.goals.find((goal) => goal.content === "活跃目标")
+      expect(active?.narrativeKind).toBe("general")
+      expect(active?.scale).toBe("short")
       expect(imported.pendingProposals.some((proposal) => proposal.kind === "create")).toBe(true)
 
       const again = await invoke<DeductionGoalsSnapshot>(harness, "deduction.goals.importLegacy", {
@@ -130,6 +132,67 @@ describe("deduction goals", () => {
         }],
       })
       expect(again.goals.some((goal) => goal.content === "不应再导入")).toBe(false)
+    })
+  })
+
+  it("creates foreshadow goals with chapter window and filters turn bundle", async () => {
+    await withHarness(async (harness) => {
+      const base = {
+        projectId: harness.projectId,
+        workspaceRootRef: harness.workspaceRootRef,
+      }
+      const foreshadow = await invoke<DeductionGoalsSnapshot>(harness, "deduction.goals.create", {
+        ...base,
+        content: "潮纹徽章再出现",
+        narrativeKind: "foreshadow",
+        scale: "long",
+        plantChapterSequence: 10,
+        payoffChapterSequence: 40,
+      })
+      expect(foreshadow.goals[0]?.narrativeKind).toBe("foreshadow")
+      expect(foreshadow.goals[0]?.scale).toBe("long")
+      expect(foreshadow.goals[0]?.plantChapterSequence).toBe(10)
+      expect(foreshadow.goals[0]?.payoffChapterSequence).toBe(40)
+
+      await invoke<DeductionGoalsSnapshot>(harness, "deduction.goals.create", {
+        ...base,
+        content: "本章冲突：码头对峙",
+        narrativeKind: "climax",
+        scale: "short",
+      })
+
+      const goalsService = (await harness.container.getRuntime(harness.projectId, harness.workspaceRootRef))
+        .createDeductionGoalsService()
+      const early = await goalsService.buildTurnBundle({
+        projectId: harness.projectId,
+        chapterSequence: 5,
+      }) as TurnDeductionGoalBundle
+      expect(early.activeGoals.some((goal) => goal.content === "潮纹徽章再出现")).toBe(false)
+      expect(early.activeGoals.some((goal) => goal.content === "本章冲突：码头对峙")).toBe(true)
+
+      const mid = await goalsService.buildTurnBundle({
+        projectId: harness.projectId,
+        chapterSequence: 20,
+      })
+      expect(mid.activeGoals.some((goal) => goal.content === "潮纹徽章再出现")).toBe(true)
+    })
+  })
+
+  it("rejects plant after payoff on create", async () => {
+    await withHarness(async (harness) => {
+      const response = await harness.facade.handle({
+        protocolVersion: PROTOCOL_VERSION,
+        requestId: randomUUID(),
+        method: "deduction.goals.create",
+        payload: {
+          projectId: harness.projectId,
+          workspaceRootRef: harness.workspaceRootRef,
+          content: "坏窗口",
+          plantChapterSequence: 40,
+          payoffChapterSequence: 10,
+        },
+      })
+      expect(response.ok).toBe(false)
     })
   })
 

@@ -1,2 +1,5 @@
+export * from "./bing-china-web-research-adapter.js"
+export * from "./composite-web-research-adapter.js"
 export * from "./duckduckgo-web-research-adapter.js"
+export * from "./web-research-http.js"
 export * from "./web-url-safety.js"

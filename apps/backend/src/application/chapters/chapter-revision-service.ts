@@ -14,8 +14,10 @@ import {
 
 import {
   assembleChapterDocument,
+  DEFAULT_VOLUME_FOLDER_NAME,
   deriveChapterPublishPath,
   digest,
+  extractVolumeFolderNameFromPath,
   normalizeChapterHeading,
   readChapterBody,
 } from "../../core/index.js"
@@ -363,11 +365,12 @@ export class ChapterRevisionService {
     }
     await this.ensureFinalization(withDecision)
     const heading = revision.heading
+    const volumeFolderName = extractVolumeFolderNameFromPath(base.publishPath) ?? DEFAULT_VOLUME_FOLDER_NAME
     await this.commitContent(
       revision,
       input.workspaceRootRef,
       base.publishPath,
-      deriveChapterPublishPath(heading),
+      deriveChapterPublishPath(heading, volumeFolderName),
       heading,
       base.digest,
     )

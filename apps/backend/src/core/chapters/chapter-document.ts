@@ -10,14 +10,6 @@ export function normalizeChapterHeading(value: string): string {
   return normalized
 }
 
-export function deriveChapterPublishPath(heading: string): string {
-  const filename = normalizeChapterHeading(heading)
-    .replace(/[<>:"/\\|?*]/gu, "_")
-    .replace(/[. ]+$/u, "")
-  if (filename.length === 0) throw new Error("Chapter heading does not contain a valid filename")
-  return `章节正文/${filename}.md`
-}
-
 export function assembleChapterDocument(heading: string, content: string): string {
   const normalizedHeading = normalizeChapterHeading(heading)
   const body = content.replaceAll("\r\n", "\n").trim()

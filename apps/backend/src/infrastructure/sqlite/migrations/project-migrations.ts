@@ -1012,4 +1012,48 @@ export const projectMigrations = Object.freeze([
   defineSqlMigration<ProjectDatabase>(37, "037_synopsis_message_hidden", [
     "ALTER TABLE synopsis_conversation_messages ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
   ]),
+  defineSqlMigration<ProjectDatabase>(38, "038_settings_lineage", [
+    `CREATE TABLE settings_blobs (
+      digest TEXT PRIMARY KEY,
+      markdown TEXT NOT NULL,
+      byte_size INTEGER NOT NULL,
+      created_at_ms INTEGER NOT NULL
+    )`,
+    `CREATE TABLE settings_commits (
+      commit_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      commit_seq INTEGER NOT NULL,
+      relative_path TEXT NOT NULL,
+      op TEXT NOT NULL CHECK (op IN ('upsert', 'delete')),
+      blob_digest TEXT REFERENCES settings_blobs(digest),
+      causing_chapter_id TEXT,
+      causing_chapter_sequence INTEGER,
+      story_time TEXT,
+      source_kind TEXT NOT NULL CHECK (source_kind IN (
+        'extraction_approve', 'staging_promote', 'workspace_save', 'migration_seed', 'history_restore'
+      )),
+      source_ref TEXT,
+      summary TEXT,
+      created_at_ms INTEGER NOT NULL,
+      UNIQUE (project_id, commit_seq)
+    )`,
+    "CREATE INDEX settings_commits_path_seq ON settings_commits(project_id, relative_path, commit_seq DESC)",
+    "CREATE INDEX settings_commits_chapter_seq ON settings_commits(project_id, causing_chapter_sequence, commit_seq DESC)",
+    `CREATE TABLE settings_heads (
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      relative_path TEXT NOT NULL,
+      commit_id TEXT NOT NULL REFERENCES settings_commits(commit_id),
+      blob_digest TEXT,
+      commit_seq INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (project_id, relative_path)
+    )`,
+  ]),
+  defineSqlMigration<ProjectDatabase>(39, "039_deduction_goal_taxonomy", [
+    "ALTER TABLE deduction_goals ADD COLUMN narrative_kind TEXT NOT NULL DEFAULT 'general'",
+    "ALTER TABLE deduction_goals ADD COLUMN scale TEXT NOT NULL DEFAULT 'short'",
+    "ALTER TABLE deduction_goals ADD COLUMN plant_chapter_sequence INTEGER",
+    "ALTER TABLE deduction_goals ADD COLUMN payoff_chapter_sequence INTEGER",
+    "CREATE INDEX deduction_goals_project_kind_scale ON deduction_goals(project_id, narrative_kind, scale, lifecycle)",
+  ]),
 ])

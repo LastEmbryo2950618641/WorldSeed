@@ -162,6 +162,7 @@ export class BackendContainer {
       this.promptPackageRoot,
       this.workspace,
     )
+    await this.currentRuntime.ensureSettingsLineageSeeded()
   }
 
   private async resolveWorkspaceDefaults(): Promise<WorkspaceDefaultDocuments> {

@@ -535,7 +535,54 @@ describe("right rail process UI contract", () => {
     expect(html).not.toContain("累计 17")
     expect(html).not.toContain("0 / 10")
     expect(html.split("class=\"phase-list\"")[0]).not.toContain("当前阶段检索轮次")
-    expect(html).toContain("上下文压缩总次数")
+    expect(html).toContain("压缩次数")
+  })
+
+  it("shows task token summary under world-summary", () => {
+    const html = renderToStaticMarkup(React.createElement(RightRail, {
+      graphSlice: undefined,
+      contextWindowTokens: 128_000,
+      task: {
+        handle: { taskId: "task-tokens", status: "completed" },
+        status: "completed",
+        phaseRuns: [
+          {
+            phaseRunId: "pr1",
+            phase: "interpret",
+            status: "completed",
+            startedAtMs: 1,
+            finishedAtMs: 2,
+            usage: {
+              inputTokens: 1_000,
+              outputTokens: 200,
+              cacheHitInputTokens: 700,
+              cacheMissInputTokens: 300,
+              lastRequestInputTokens: 1_000,
+            },
+          },
+          {
+            phaseRunId: "pr2",
+            phase: "draft",
+            status: "completed",
+            startedAtMs: 3,
+            finishedAtMs: 4,
+            usage: {
+              inputTokens: 2_000,
+              outputTokens: 800,
+              cacheHitInputTokens: 1_000,
+              cacheMissInputTokens: 1_000,
+              lastRequestInputTokens: 2_000,
+            },
+          },
+        ],
+      },
+    }))
+    expect(html).toContain("KV 缓存命中率")
+    expect(html).toContain("57%")
+    expect(html).toContain("总 Token 消耗")
+    expect(html).toContain("4.0k")
+    expect(html).toContain("当前上下文 / 最大上下文")
+    expect(html).toContain("2.0k / 128.0k")
   })
 
   it("shows an explicit model-in-flight state before a phase result returns", () => {
@@ -645,7 +692,7 @@ describe("right rail process UI contract", () => {
     expect(html).toContain("KV 缓存平均命中率")
     expect(html).toContain("ui-tooltip-anchor")
     expect(html.split("class=\"phase-list\"")[0]).not.toContain("当前阶段检索轮次")
-    expect(html).toContain("上下文压缩总次数")
+    expect(html).toContain("压缩次数")
     expect(html).toContain("1 活动链累计")
     expect(html).toContain("AI 思考摘要")
     expect(html).toContain("AI 输出")

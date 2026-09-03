@@ -41,6 +41,25 @@ export interface WorkspacePort {
   validate(workspaceRootRef: string): Promise<WorkspaceValidationReport>
   readMarkdown(workspaceRootRef: string, relativePath: string): Promise<string>
   saveUserMarkdown(workspaceRootRef: string, relativePath: string, content: string): Promise<void>
+  createUserDirectory(workspaceRootRef: string, relativePath: string): Promise<void>
+  removeUserMarkdown(workspaceRootRef: string, relativePath: string): Promise<void>
+  /** Delete a volume directory under「章节正文/」when it has no formal chapter bodies. */
+  removeEmptyVolumeDirectory(workspaceRootRef: string, relativePath: string): Promise<void>
+  /**
+   * Delete a volume folder. Removes planning markdown (梗概/细纲) first.
+   * Refuses if any formal chapter body is present.
+   */
+  removeVolumeDirectory(workspaceRootRef: string, relativePath: string): Promise<void>
+  /**
+   * Rename a volume folder in place (`章节正文/{from}` → `章节正文/{to}`).
+   * Same sequence only; target must not already exist.
+   */
+  renameVolumeDirectory(
+    workspaceRootRef: string,
+    fromFolderName: string,
+    toFolderName: string,
+  ): Promise<void>
+  listVolumeFolderNames(workspaceRootRef: string): Promise<readonly string[]>
   saveSynopsisMarkdown(workspaceRootRef: string, relativePath: string, content: string): Promise<void>
   removeSynopsisMarkdown(workspaceRootRef: string, relativePath: string): Promise<void>
   publishChapter(workspaceRootRef: string, relativePath: string, content: string): Promise<void>

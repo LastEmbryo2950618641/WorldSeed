@@ -116,6 +116,26 @@ export class SqliteSynopsisConversationRepository {
     return row === undefined ? undefined : mapMessage(row)
   }
 
+  /** Deletes the last visible user message and every message after it in the session. */
+  public async deleteLastVisibleUserTurn(sessionId: string): Promise<number> {
+    const messages = await this.listMessages(sessionId)
+    let lastUserIndex = -1
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (message !== undefined && message.role === "user" && message.hidden !== true) {
+        lastUserIndex = index
+        break
+      }
+    }
+    if (lastUserIndex < 0) return 0
+    const ids = messages.slice(lastUserIndex).map((message) => message.messageId)
+    if (ids.length === 0) return 0
+    await this.database.deleteFrom("synopsis_conversation_messages")
+      .where("id", "in", ids)
+      .execute()
+    return ids.length
+  }
+
   public async appendMessage(input: Readonly<{
     messageId: string
     projectId: ProjectId

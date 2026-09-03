@@ -84,16 +84,22 @@ describe("Node workspace adapter", () => {
       workspaceRoot,
       "世界推演规则/基础规则/base-rules.md",
       "changed",
-    )).rejects.toThrow("Fixed workspace entry")
+    )).rejects.toThrow("固定工作区条目不可修改")
     await expect(adapter.saveUserMarkdown(workspaceRoot, "参考文件/data.json", "{}"))
-      .rejects.toThrow("Only .md files")
+      .rejects.toThrow("工作区只允许 .md 文件")
 
-    await adapter.publishChapter(workspaceRoot, "章节正文/第一章 开始.md", "# 第一章 开始\n\n正文。\n")
-    expect(readFileSync(join(workspaceRoot, "章节正文", "第一章 开始.md"), "utf8"))
+    await adapter.saveUserMarkdown(workspaceRoot, "设定集/人物/临时.md", "# 临时\n")
+    await adapter.removeUserMarkdown(workspaceRoot, "设定集/人物/临时.md")
+    await expect(adapter.readMarkdown(workspaceRoot, "设定集/人物/临时.md")).rejects.toThrow()
+    await expect(adapter.removeUserMarkdown(workspaceRoot, "设定集/readme.md"))
+      .rejects.toThrow("固定脚手架")
+
+    await adapter.publishChapter(workspaceRoot, "章节正文/第一卷 测试/第一章 开始.md", "# 第一章 开始\n\n正文。\n")
+    expect(readFileSync(join(workspaceRoot, "章节正文", "第一卷 测试", "第一章 开始.md"), "utf8"))
       .toContain("正文")
     await expect(adapter.publishChapter(
       workspaceRoot,
-      "章节正文/第一章 开始.md",
+      "章节正文/第一卷 测试/第一章 开始.md",
       "overwrite",
     )).rejects.toThrow()
   })
@@ -303,7 +309,7 @@ describe("project lifecycle", () => {
     const internalStore = new NodeInternalStoreAdapter(appDataRoot)
     const store = await internalStore.prepareProject(projectId, workspaceRoot)
     const database = await openProjectDatabase(store.projectDatabaseRef)
-    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(36)
+    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(38)
     await database.destroy()
   })
 })

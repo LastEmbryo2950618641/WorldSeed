@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm"
 import { aiPhaseValues, type HistoryOverview, type ProjectSettings, type ResettableRuntimeMetricId } from "@worldseed/contracts"
 
 import type { GraphSlice, OpenProject, PhaseRunSnapshot, TaskSnapshot } from "../../api/client.js"
+import type { SynopsisConversationStreamSnapshot } from "@worldseed/contracts"
 import { UiTooltip, uiTooltipRich } from "../../components/UiTooltip.js"
 import { useWorkbenchStore, type RightTab } from "../../state/workbench-store.js"
 import { WorldGraph } from "./WorldGraph.js"
@@ -19,6 +20,10 @@ type Props = Readonly<{
   historyRetentionLimit?: number | null | undefined
   history?: HistoryOverview | undefined
   historyLoading?: boolean | undefined
+  /** Active model profile context window for 当前上下文/最大上下文. */
+  contextWindowTokens?: number | undefined
+  /** Supplemental token metrics (e.g. synopsis discuss stream usage). */
+  supplementalTokenMetrics?: TaskTokenMetrics | undefined
   onOpenProjectSettings?(): void
   onResumeTask?(mode: "continue" | "retry_phase"): Promise<void>
   onResetTaskMetrics?(metricIds: readonly ResettableRuntimeMetricId[]): Promise<void>
@@ -67,10 +72,33 @@ const visibleTopLevelPhases = aiPhaseValues.filter((phase) => (
   && !stagedGraphPhases.includes(phase as typeof stagedGraphPhases[number])
 ))
 
-export function RightRail({ task, project, graphSlice, graphSettings, historyRetentionLimit = null, history, historyLoading, onOpenProjectSettings, onResumeTask, onResetTaskMetrics, onSaveHistory, onRestoreHistory, onContinueFromHistory, onReturnPreviousRound, onRefreshTask, onRefreshWorkspace }: Props): React.JSX.Element {
+export function RightRail({
+  task,
+  project,
+  graphSlice,
+  graphSettings,
+  historyRetentionLimit = null,
+  history,
+  historyLoading,
+  contextWindowTokens,
+  supplementalTokenMetrics,
+  onOpenProjectSettings,
+  onResumeTask,
+  onResetTaskMetrics,
+  onSaveHistory,
+  onRestoreHistory,
+  onContinueFromHistory,
+  onReturnPreviousRound,
+  onRefreshTask,
+  onRefreshWorkspace,
+}: Props): React.JSX.Element {
   const [checkpointOpen, setCheckpointOpen] = useState(false)
   const tab = useWorkbenchStore((state) => state.rightTab)
   const setTab = useWorkbenchStore((state) => state.setRightTab)
+  const tokenSummary = mergeTokenMetrics(
+    summarizeTaskTokenMetrics(task),
+    supplementalTokenMetrics,
+  )
   useEffect(() => {
     if (task?.status === "awaiting_user_decision" || task?.status === "waiting_for_review") setCheckpointOpen(true)
   }, [task?.status])
@@ -82,7 +110,12 @@ export function RightRail({ task, project, graphSlice, graphSettings, historyRet
       <Tab id="history" tab={tab} onChange={setTab} icon={<History size={15} />} label="历史" />
     </div>
     <div className="right-content">
-      {tab === "process" ? <ProcessPanel task={task} onResetMetrics={onResetTaskMetrics} /> : null}
+      {tab === "process" ? <ProcessPanel
+        task={task}
+        onResetMetrics={onResetTaskMetrics}
+        supplementalTokenMetrics={supplementalTokenMetrics}
+        contextWindowTokens={contextWindowTokens}
+      /> : null}
       {tab === "graph" ? <WorldGraph slice={graphSlice} settings={graphSettings} /> : null}
       {tab === "evolution" ? <EvolutionPanel /> : null}
       {tab === "history" ? <HistoryPanel
@@ -101,7 +134,14 @@ export function RightRail({ task, project, graphSlice, graphSettings, historyRet
         onReturnPreviousRound={onReturnPreviousRound ?? (() => Promise.reject(new Error("返回上一轮接口尚未连接")))}
       /> : null}
     </div>
-    <div className="world-summary"><span>世界时间 <strong>当前章节锚点</strong></span><span>图局部 <strong>{graphSlice === undefined ? "未读取" : `${String(graphSlice.nodes.length)} 节点 / ${String(graphSlice.links.length)} 连接`}</strong></span><span>任务状态 <strong>{task?.status ?? "未运行"}</strong></span></div>
+    <div className="world-summary" data-testid="world-summary">
+      <span>世界时间 <strong>当前章节锚点</strong></span>
+      <span>图局部 <strong>{graphSlice === undefined ? "未读取" : `${String(graphSlice.nodes.length)} 节点 / ${String(graphSlice.links.length)} 连接`}</strong></span>
+      <span>任务状态 <strong>{task?.status ?? "未运行"}</strong></span>
+      <span>KV 缓存命中率 <strong>{tokenSummary.kvRate === undefined ? "—" : `${String(Math.round(tokenSummary.kvRate * 100))}%`}</strong></span>
+      <span>总 Token 消耗 <strong>{tokenSummary.totalTokens === undefined ? "—" : formatCompactMetric(tokenSummary.totalTokens)}</strong></span>
+      <span>当前上下文 / 最大上下文 <strong>{formatContextWindow(tokenSummary.currentContextTokens, contextWindowTokens)}</strong></span>
+    </div>
   </aside>{checkpointOpen && task !== undefined ? <TaskCheckpointDialog
     task={task}
     project={project}
@@ -130,9 +170,24 @@ function Tab({ id, tab, onChange, icon, label }: { id: RightTab; tab: RightTab; 
   </UiTooltip>
 }
 
-function ProcessPanel({ task, onResetMetrics }: { task: TaskSnapshot | undefined; onResetMetrics?: ((metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>) | undefined }): React.JSX.Element {
+function ProcessPanel({
+  task,
+  onResetMetrics,
+  supplementalTokenMetrics,
+  contextWindowTokens,
+}: {
+  task: TaskSnapshot | undefined
+  onResetMetrics?: ((metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>) | undefined
+  supplementalTokenMetrics?: TaskTokenMetrics | undefined
+  contextWindowTokens?: number | undefined
+}): React.JSX.Element {
   return <div className="process-panel">
-    <RuntimeMonitor task={task} onResetMetrics={onResetMetrics} />
+    <RuntimeMonitor
+      task={task}
+      onResetMetrics={onResetMetrics}
+      supplementalTokenMetrics={supplementalTokenMetrics}
+      contextWindowTokens={contextWindowTokens}
+    />
     {task?.finalization === undefined || task.finalization.status === "completed" ? null : <p className="phase-empty">正式章节收尾：{task.finalization.status} · {task.finalization.chapterHeading}</p>}
     <div className="phase-list">{visibleTopLevelPhases.flatMap((phase) => {
       const rows: React.ReactNode[] = []
@@ -272,6 +327,8 @@ function phaseRunRequestsRead(run: PhaseRunSnapshot): boolean {
 type PhaseUsageValues = Readonly<{
   modelCalls?: number
   inputTokens?: number
+  outputTokens?: number
+  lastRequestInputTokens?: number
   latencyMs?: number
   cacheHitInputTokens?: number
   cacheMissInputTokens?: number
@@ -283,10 +340,94 @@ function readPhaseUsage(value: unknown): PhaseUsageValues {
   return {
     ...(isNumber(usage.modelCalls) ? { modelCalls: usage.modelCalls } : {}),
     ...(isNumber(usage.inputTokens) ? { inputTokens: usage.inputTokens } : {}),
+    ...(isNumber(usage.outputTokens) ? { outputTokens: usage.outputTokens } : {}),
+    ...(isNumber(usage.lastRequestInputTokens) ? { lastRequestInputTokens: usage.lastRequestInputTokens } : {}),
     ...(isNumber(usage.latencyMs) ? { latencyMs: usage.latencyMs } : {}),
     ...(isNumber(usage.cacheHitInputTokens) ? { cacheHitInputTokens: usage.cacheHitInputTokens } : {}),
     ...(isNumber(usage.cacheMissInputTokens) ? { cacheMissInputTokens: usage.cacheMissInputTokens } : {}),
   }
+}
+
+export type TaskTokenMetrics = Readonly<{
+  kvRate?: number
+  totalTokens?: number
+  currentContextTokens?: number
+}>
+
+/** Aggregate phase-run usage for the right-rail world summary. */
+export function summarizeTaskTokenMetrics(task: TaskSnapshot | undefined): TaskTokenMetrics {
+  const runs = task?.phaseRuns ?? []
+  if (runs.length === 0) return {}
+  let inputTokens = 0
+  let outputTokens = 0
+  let hitTokens = 0
+  let missTokens = 0
+  let currentContextTokens: number | undefined
+  for (const run of runs) {
+    const usage = readPhaseUsage(run.usage)
+    if (isNumber(usage.inputTokens)) inputTokens += usage.inputTokens
+    if (isNumber(usage.outputTokens)) outputTokens += usage.outputTokens
+    if (isNumber(usage.cacheHitInputTokens)) hitTokens += usage.cacheHitInputTokens
+    if (isNumber(usage.cacheMissInputTokens)) missTokens += usage.cacheMissInputTokens
+    const requestContext = usage.lastRequestInputTokens ?? usage.inputTokens
+    if (isNumber(requestContext)) currentContextTokens = requestContext
+  }
+  const totalTokens = inputTokens + outputTokens
+  return {
+    ...(hitTokens + missTokens === 0 ? {} : { kvRate: hitTokens / (hitTokens + missTokens) }),
+    ...(totalTokens === 0 ? {} : { totalTokens }),
+    ...(currentContextTokens === undefined ? {} : { currentContextTokens }),
+  }
+}
+
+/** Map synopsis discuss stream usage into right-rail token metrics. */
+export function summarizeSynopsisStreamTokenMetrics(
+  stream: SynopsisConversationStreamSnapshot | undefined,
+): TaskTokenMetrics {
+  return summarizeSynopsisUsageTokenMetrics(stream?.usage)
+}
+
+/** Map synopsis usage payload (stream or send result) into token metrics. */
+export function summarizeSynopsisUsageTokenMetrics(
+  usage: SynopsisConversationStreamSnapshot["usage"] | undefined,
+): TaskTokenMetrics {
+  if (usage === undefined) return {}
+  const inputTokens = usage.inputTokens ?? 0
+  const outputTokens = usage.outputTokens ?? 0
+  const hitTokens = usage.cacheHitInputTokens ?? 0
+  const missTokens = usage.cacheMissInputTokens ?? 0
+  const totalTokens = inputTokens + outputTokens
+  const currentContextTokens = usage.lastRequestInputTokens
+    ?? (inputTokens > 0 ? inputTokens : undefined)
+  return {
+    ...(hitTokens + missTokens === 0
+      ? {}
+      : { kvRate: hitTokens / (hitTokens + missTokens) }),
+    ...(totalTokens === 0 ? {} : { totalTokens }),
+    ...(currentContextTokens === undefined ? {} : { currentContextTokens }),
+  }
+}
+
+function mergeTokenMetrics(
+  primary: TaskTokenMetrics,
+  secondary: TaskTokenMetrics | undefined,
+): TaskTokenMetrics {
+  if (secondary === undefined || Object.keys(secondary).length === 0) return primary
+  if (Object.keys(primary).length === 0) return secondary
+  const totalTokens = (primary.totalTokens ?? 0) + (secondary.totalTokens ?? 0)
+  const kvRate = secondary.kvRate ?? primary.kvRate
+  const currentContextTokens = secondary.currentContextTokens ?? primary.currentContextTokens
+  return {
+    ...(kvRate === undefined ? {} : { kvRate }),
+    ...(totalTokens === 0 ? {} : { totalTokens }),
+    ...(currentContextTokens === undefined ? {} : { currentContextTokens }),
+  }
+}
+
+function formatContextWindow(current: number | undefined, maximum: number | undefined): string {
+  const left = current === undefined ? "—" : formatCompactMetric(current)
+  const right = maximum === undefined || maximum <= 0 ? "—" : formatCompactMetric(maximum)
+  return `${left} / ${right}`
 }
 
 function phaseElapsedMs(run: PhaseRunSnapshot): number | undefined {
