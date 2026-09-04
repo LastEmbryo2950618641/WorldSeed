@@ -68,9 +68,10 @@ import {
 import { BackendWaitTimeoutDialog } from "../features/status/BackendWaitTimeoutDialog.js"
 import { RightRail, summarizeSynopsisStreamTokenMetrics, summarizeSynopsisUsageTokenMetrics, type TaskTokenMetrics } from "../features/status/RightRail.js"
 import { RightPanelViewport } from "../features/status/RightPanelViewport.js"
-import { ModelConfigurationDialog, type ModelProfile } from "../features/settings/ModelConfigurationDialog.js"
-import { ProjectSettingsDialog } from "../features/settings/ProjectSettingsDialog.js"
+import { type ModelProfile } from "../features/settings/ModelConfigurationDialog.js"
 import { AppUpdateDialog } from "../features/settings/AppUpdateDialog.js"
+import { AppDialogsHost } from "../features/settings/AppDialogsHost.js"
+import { useWorkbenchStore } from "../state/workbench-store.js"
 import { UiTooltip } from "../components/UiTooltip.js"
 
 type PendingGraphLoad = Readonly<{
@@ -129,9 +130,6 @@ export function App(): React.JSX.Element {
   const [progressReviewOpen, setProgressReviewOpen] = useState(false)
   const [pendingReviewCount, setPendingReviewCount] = useState(0)
   const [pendingGraphLoad, setPendingGraphLoad] = useState<PendingGraphLoad>()
-  const [modelDialogOpen, setModelDialogOpen] = useState(false)
-  const [projectSettingsOpen, setProjectSettingsOpen] = useState(false)
-  const [projectSettingsSection, setProjectSettingsSection] = useState<"execution" | "retrieval" | "graph" | "history" | "model" | "workDirectory" | "about">("execution")
   const appUpdate = useAppUpdate()
   const [workspaceCreatePrompt, setWorkspaceCreatePrompt] = useState<{
     kind: "file" | "directory"
@@ -202,7 +200,10 @@ export function App(): React.JSX.Element {
           kind: item.kind,
           path: item.path,
           present: true,
-          content: result.content,
+          // Preview only — full body lives in the editor when opened.
+          content: result.content.length > 2800
+            ? `${result.content.slice(0, 2800)}\n…`
+            : result.content,
         } satisfies RelatedChapterArtifact
       } catch {
         return {
@@ -429,8 +430,11 @@ export function App(): React.JSX.Element {
       setError("无法打开文件：工作区文件路径为空或无效")
       return
     }
+    // Highlight selection immediately; content fills in after IPC.
+    setSelectedPath(path)
     setLineageMode(false)
     setError(undefined)
+    setRelatedChapterArtifacts([])
     try {
       // Synopsis/outline are planning markdown on disk; they are not committed chapter publish paths.
       if (isChapterPlanningMarkdownPath(path)) {
@@ -439,7 +443,6 @@ export function App(): React.JSX.Element {
           workspaceRootRef: project.workspaceRootRef,
           relativePath: path,
         })
-        setSelectedPath(path)
         setOpenedDocumentPath(path)
         setSelectedChapter(undefined)
         setChapterRevision(undefined)
@@ -450,7 +453,7 @@ export function App(): React.JSX.Element {
         setContent(result.content)
         setChapterBody("")
         setSavedContent(result.content)
-        await loadRelatedChapterArtifacts(path)
+        void loadRelatedChapterArtifacts(path)
         return
       }
       if (path.startsWith("章节正文/")) {
@@ -459,7 +462,6 @@ export function App(): React.JSX.Element {
           workspaceRootRef: project.workspaceRootRef,
           publishPath: path,
         })
-        setSelectedPath(path)
         setOpenedDocumentPath(path)
         setSelectedChapter(resolved.committed)
         setChapterRevision(resolved.activeRevision)
@@ -467,23 +469,21 @@ export function App(): React.JSX.Element {
         setContent(resolved.committed.content)
         setChapterBody(resolved.committed.body)
         setSavedContent(resolved.committed.content)
+        setSynopsisPanelOpen(false)
         if (resolved.activeRevision !== undefined && shouldMonitorChapterRevision(resolved.activeRevision.graphSyncStatus)) {
           void monitorChapterRevision(resolved.activeRevision.revisionTaskId)
         }
-        await refreshChapterConversation(resolved.committed.chapterId)
-        await refreshChapterSynopsis(resolved.committed.chapterId)
-        await loadRelatedChapterArtifacts(path)
-        setSynopsisPanelOpen(false)
+        void refreshChapterConversation(resolved.committed.chapterId)
+        void refreshChapterSynopsis(resolved.committed.chapterId)
+        void loadRelatedChapterArtifacts(path)
         return
       }
       setChapterConversation({ messages: [] })
-      setRelatedChapterArtifacts([])
       const result = await invokeBackend<{ content: string }>("workspace.read", {
         projectId: project.projectId,
         workspaceRootRef: project.workspaceRootRef,
         relativePath: path,
       })
-      setSelectedPath(path)
       setOpenedDocumentPath(path)
       setSelectedChapter(undefined)
       setChapterRevision(undefined)
@@ -1497,7 +1497,7 @@ export function App(): React.JSX.Element {
     })
     setModelProfiles(saved.profiles)
     setActiveModelProfileId(saved.activeProfileId)
-    setModelDialogOpen(false)
+    useWorkbenchStore.getState().closeModelDialog()
   }
 
   const applyModelProfiles = async (
@@ -1556,7 +1556,7 @@ export function App(): React.JSX.Element {
     })
     setProjectSettings(saved)
     await refreshHistory()
-    setProjectSettingsOpen(false)
+    useWorkbenchStore.getState().closeProjectSettings()
   }
 
   const descriptionRules = useMemo(() => report.inventory.filter((entry) => entry.kind === "file" && entry.path.startsWith("表现输出/描写规则/")).map((entry) => entry.path), [report])
@@ -1609,7 +1609,7 @@ export function App(): React.JSX.Element {
     setProgressReviewOpen(false)
     setPendingReviewCount(0)
     setPendingGraphLoad(undefined)
-    setProjectSettingsOpen(false)
+    useWorkbenchStore.getState().closeAllDialogs()
     setProjectSettings(undefined)
     setHistory(undefined)
     setDiffFocusMessageId(undefined)
@@ -1704,10 +1704,10 @@ export function App(): React.JSX.Element {
           }}
         />
         <UiTooltip label="配置与切换模型">
-          <button className="model-config-trigger" data-testid="model-config-trigger" aria-label="配置与切换模型" onClick={() => { setModelDialogOpen(true); }}><Cpu size={14} /><span>{activeModelProfile?.name ?? "未配置模型"}</span><ChevronDown size={13} /></button>
+          <button className="model-config-trigger" data-testid="model-config-trigger" aria-label="配置与切换模型" onClick={() => { useWorkbenchStore.getState().openModelDialog(); }}><Cpu size={14} /><span>{activeModelProfile?.name ?? "未配置模型"}</span><ChevronDown size={13} /></button>
         </UiTooltip>
         <UiTooltip label="项目设置">
-          <button className="project-settings-trigger" data-testid="project-settings-trigger" aria-label="项目设置" disabled={projectSettings === undefined} onClick={() => { setProjectSettingsSection("execution"); setProjectSettingsOpen(true); }}><Settings2 size={15} /></button>
+          <button className="project-settings-trigger" data-testid="project-settings-trigger" aria-label="项目设置" disabled={projectSettings === undefined} onClick={() => { useWorkbenchStore.getState().openProjectSettings("execution"); }}><Settings2 size={15} /></button>
         </UiTooltip>
       </>
     }
@@ -1936,7 +1936,7 @@ export function App(): React.JSX.Element {
           history={history}
           historyLoading={historyLoading}
                   contextWindowTokens={activeModelProfile?.contextWindowTokens}
-          onOpenProjectSettings={() => { setProjectSettingsOpen(true); }}
+          onOpenProjectSettings={() => { useWorkbenchStore.getState().openProjectSettings(); }}
           onResumeTask={resumeTask}
           onResetTaskMetrics={resetTaskMetrics}
           onSaveHistory={saveHistory}
@@ -1961,18 +1961,17 @@ export function App(): React.JSX.Element {
       <span className="status-path"><FolderOpen size={13} />{selectedPath === undefined ? project.workspaceRootRef : `${project.workspaceRootRef}\\${selectedPath.replaceAll("/", "\\")}`}</span>
       <span>继承环境：本轮 RuleSnapshot</span><span>归档：空闲</span>
     </footer>
-    {modelDialogOpen ? <ModelConfigurationDialog profiles={modelProfiles} activeProfileId={activeModelProfileId} onClose={() => { setModelDialogOpen(false); }} onSave={saveModelProfiles} /> : null}
-    {projectSettingsOpen && projectSettings !== undefined ? <ProjectSettingsDialog
+    <AppDialogsHost
       projectName={project.displayName}
-      settings={projectSettings}
-      activeModelName={activeModelProfile?.name ?? "未配置模型"}
+      projectSettings={projectSettings}
       historyEntryCount={history?.entries.length ?? 0}
-      initialSection={projectSettingsSection}
+      modelProfiles={modelProfiles}
+      activeModelProfileId={activeModelProfileId}
+      activeModelName={activeModelProfile?.name ?? "未配置模型"}
       appUpdate={appUpdate}
-      onClose={() => { setProjectSettingsOpen(false); }}
-      onSave={saveProjectSettings}
-      onOpenModelSettings={() => { setProjectSettingsOpen(false); setModelDialogOpen(true); }}
-    /> : null}
+      onSaveModelProfiles={saveModelProfiles}
+      onSaveProjectSettings={saveProjectSettings}
+    />
     {appUpdate.dialog !== null
       ? <AppUpdateDialog
           state={appUpdate.dialog}

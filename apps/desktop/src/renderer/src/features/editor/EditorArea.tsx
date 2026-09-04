@@ -32,11 +32,14 @@ const CHAPTER_EDITOR_SCROLLBAR_WIDTH = 6
 function syncChapterEditorWrap(
   editorInstance: editor.IStandaloneCodeEditor,
   monaco: Monaco,
+  lastColumnsRef?: { current: number },
 ): void {
   const layout = editorInstance.getLayoutInfo()
   const fontInfo = editorInstance.getOption(monaco.editor.EditorOption.fontInfo)
   const usableWidth = layout.contentWidth - CHAPTER_EDITOR_TOOLBAR_LANE
   const columns = Math.max(24, Math.floor(usableWidth / fontInfo.typicalHalfwidthCharacterWidth))
+  if (lastColumnsRef !== undefined && lastColumnsRef.current === columns) return
+  if (lastColumnsRef !== undefined) lastColumnsRef.current = columns
   editorInstance.updateOptions({
     wordWrap: "bounded",
     wordWrapColumn: columns,
@@ -324,6 +327,7 @@ function ChapterRevisionEditor(props: {
   const chapterEditorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<Monaco | null>(null)
   const chapterEditorLayoutCleanupRef = useRef<(() => void) | null>(null)
+  const chapterEditorWrapColumnsRef = useRef(-1)
   const agentProposalCountRef = useRef(0)
   const autosaveSnapshotRef = useRef<{ heading: string; body: string }>({ heading: committedHeading, body: initialDraft })
   const draftVersions = draftVersionChain
@@ -340,7 +344,8 @@ function ChapterRevisionEditor(props: {
 
   useEffect(() => {
     if (!props.dockToolbar || chapterEditorRef.current === null || monacoRef.current === null) return
-    syncChapterEditorWrap(chapterEditorRef.current, monacoRef.current)
+    chapterEditorWrapColumnsRef.current = -1
+    syncChapterEditorWrap(chapterEditorRef.current, monacoRef.current, chapterEditorWrapColumnsRef)
   }, [props.dockToolbar, readingPreferences.fontSize])
 
   useEffect(() => {
@@ -869,11 +874,21 @@ function ChapterRevisionEditor(props: {
                       chapterEditorRef.current = editorInstance
                       monacoRef.current = monaco
                       if (!props.dockToolbar) return
+                      let raf = 0
                       const apply = (): void => {
-                        syncChapterEditorWrap(editorInstance, monaco)
+                        if (raf !== 0) return
+                        raf = window.requestAnimationFrame(() => {
+                          raf = 0
+                          syncChapterEditorWrap(editorInstance, monaco, chapterEditorWrapColumnsRef)
+                        })
                       }
+                      chapterEditorWrapColumnsRef.current = -1
                       apply()
-                      chapterEditorLayoutCleanupRef.current = editorInstance.onDidLayoutChange(apply).dispose
+                      const disposeLayout = editorInstance.onDidLayoutChange(apply).dispose
+                      chapterEditorLayoutCleanupRef.current = () => {
+                        if (raf !== 0) window.cancelAnimationFrame(raf)
+                        disposeLayout()
+                      }
                     }}
                     options={{
                       readOnly: displayMode === "view",

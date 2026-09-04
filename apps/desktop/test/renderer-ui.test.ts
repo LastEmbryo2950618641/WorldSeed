@@ -338,7 +338,7 @@ describe("renderer workbench UI contract", () => {
     expect(html).toContain("Agent 对话")
   })
 
-  it("slides chapter rail over the default right panel when chapter mode is active", () => {
+  it("mounts only the active right panel layer", () => {
     const html = renderToStaticMarkup(React.createElement(RightPanelViewport, {
       chapterMode: true,
       chapterPanel: React.createElement("div", { "data-testid": "chapter-panel" }, "chapter"),
@@ -348,8 +348,8 @@ describe("renderer workbench UI contract", () => {
     expect(html).toContain("data-testid=\"right-panel-viewport\"")
     expect(html).toContain("right-panel-layer active")
     expect(html).toContain("data-testid=\"chapter-panel\"")
-    expect(html).toContain("right-panel-layer inactive")
-    expect(html).toContain("data-testid=\"default-panel\"")
+    expect(html).not.toContain("right-panel-layer inactive")
+    expect(html).not.toContain("data-testid=\"default-panel\"")
   })
 
   it("renders draft workspace with unified revision actions", () => {

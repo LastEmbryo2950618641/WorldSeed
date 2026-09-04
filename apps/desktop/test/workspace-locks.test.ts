@@ -52,10 +52,14 @@ describe("workspace locks", () => {
     expect(html).toContain('aria-label="新建 Markdown"')
     expect(html).toContain('aria-label="新建文件夹"')
     expect(html).not.toContain("上传")
-    expect(html).toContain('aria-label="在 笔风规则 下新建 Markdown"')
-    expect(html).toContain('aria-label="在 笔风规则 下新建文件夹"')
+    // Selection path expands ancestors; unrelated folders stay collapsed by default.
+    expect(html).toContain('aria-label="设定集"')
+    expect(html).toContain('aria-expanded="true"')
+    expect(html).toContain('aria-label="在 设定集 下新建 Markdown"')
     expect(html).toContain('aria-label="删除 人物.md"')
-    expect(html).toContain("平台只读")
+    expect(html).toContain('aria-label="表现输出"')
+    expect(html).not.toContain('aria-label="在 笔风规则 下新建 Markdown"')
+    // Collapsed platform-rules folder: no nested lock badge rendered, and no top-level "只读".
     expect(html).not.toContain("只读</span>")
   })
 

@@ -6,13 +6,13 @@ type Props = Readonly<{
   defaultPanel: ReactNode
 }>
 
+/** Mount only the visible rail — inactive panel stays unmounted to cut DOM/CPU. */
 export function RightPanelViewport({ chapterMode, chapterPanel, defaultPanel }: Props): React.JSX.Element {
-  return <div className="right-panel-viewport" data-testid="right-panel-viewport">
-    <div className={`right-panel-layer${chapterMode ? " active" : " inactive"}`} aria-hidden={!chapterMode}>
-      {chapterPanel}
+  return (
+    <div className="right-panel-viewport" data-testid="right-panel-viewport">
+      <div className="right-panel-layer active" aria-hidden={false}>
+        {chapterMode ? chapterPanel : defaultPanel}
+      </div>
     </div>
-    <div className={`right-panel-layer${chapterMode ? " inactive" : " active"}`} aria-hidden={chapterMode}>
-      {defaultPanel}
-    </div>
-  </div>
+  )
 }

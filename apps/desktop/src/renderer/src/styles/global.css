@@ -2127,8 +2127,6 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
 .right-panel-viewport { position: relative; height: 100%; min-height: 0; overflow: hidden; background: var(--panel); }
 .right-panel-layer {
   position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden;
-  transition: transform 220ms cubic-bezier(.4, 0, .2, 1), opacity 180ms ease;
-  will-change: transform, opacity;
 }
 .right-panel-layer.inactive { transform: translateX(14px); opacity: 0; pointer-events: none; visibility: hidden; }
 .right-panel-layer.active { transform: translateX(0); opacity: 1; pointer-events: auto; visibility: visible; }
@@ -2626,7 +2624,7 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
 .history-simulation-checks span.passed { color: #2e715b; }
 .history-simulation-checks span.failed { color: #a0473d; }
 
-.dialog-backdrop { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; padding: 28px; background: var(--bg-overlay); backdrop-filter: blur(1px); }
+.dialog-backdrop { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; padding: 28px; background: var(--bg-overlay); }
 .checkpoint-backdrop { z-index: 120; }
 .checkpoint-backdrop--locked { pointer-events: auto; }
 .checkpoint-dialog {
@@ -5292,7 +5290,7 @@ input::placeholder, textarea::placeholder { color: #ffffff; opacity: 1; }
   color: var(--text-on-accent);
 }
 
-.dialog-backdrop { background: var(--bg-overlay); backdrop-filter: blur(2px); }
+.dialog-backdrop { background: var(--bg-overlay); }
 .project-settings-dialog,
 .model-dialog,
 .checkpoint-dialog,

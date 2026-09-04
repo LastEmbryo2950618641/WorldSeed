@@ -125,7 +125,7 @@ function TreeRow({
   onDeletePath?: (path: string) => void
   depth: number
 }): React.JSX.Element {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(() => expandedBySelection.has(node.path))
   const lockKind = resolveWorkspaceLockKind(node.path)
   const selected = node.kind === "file" && !lineageActive && selectedPath === node.path
   const virtualSelected = node.kind === "virtual" && lineageActive
