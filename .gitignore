@@ -1,6 +1,8 @@
 node_modules/
 dist/
 **/out/
+**/release/
+**/release-local/
 coverage/
 **/.worldseed-data/
 *.tsbuildinfo

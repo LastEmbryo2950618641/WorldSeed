@@ -1,0 +1,39 @@
+appId: com.worldseed.desktop
+productName: WorldSeed
+copyright: Copyright © WorldSeed
+directories:
+  output: release
+  buildResources: resources
+files:
+  - out/**/*
+  - package.json
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/better-sqlite3/**/*"
+extraResources:
+  - from: ../../packages/prompt-contracts/resources
+    to: prompt-contracts/resources
+  - from: ../../packages/prompt-contracts/package.json
+    to: prompt-contracts/package.json
+win:
+  executableName: WorldSeed
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: WorldSeed
+  uninstallDisplayName: WorldSeed
+  artifactName: WorldSeed-${version}-Setup.${ext}
+portable:
+  artifactName: WorldSeed-${version}-Portable.${ext}
+npmRebuild: true

@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "package:win": "corepack pnpm --filter @worldseed/contracts build && corepack pnpm --filter @worldseed/config build && corepack pnpm --filter @worldseed/prompt-contracts build && corepack pnpm --filter @worldseed/backend build && corepack pnpm --filter @worldseed/desktop package:win",
     "verify:baseline": "pnpm test && pnpm typecheck && pnpm build",
     "verify:electron": "node scripts/acceptance/electron-smoke.mjs",
     "verify:deduction-goals-dom": "node scripts/acceptance/run-deduction-goals-dom-e2e.mjs",

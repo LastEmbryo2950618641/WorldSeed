@@ -69,7 +69,10 @@ void app.whenReady().then(async () => {
   )
   configureRuntimeDiagnostics(diagnostics)
   const promptPackageRoot = resolve(
-    process.env.WORLDSEED_PROMPT_ROOT ?? join(app.getAppPath(), "..", "..", "packages", "prompt-contracts"),
+    process.env.WORLDSEED_PROMPT_ROOT
+      ?? (app.isPackaged
+        ? join(process.resourcesPath, "prompt-contracts")
+        : join(app.getAppPath(), "..", "..", "packages", "prompt-contracts")),
   )
   const credentials = new FileCredentialVault(join(applicationDataRoot, "credentials.json"), {
     encrypt: (value) => {
