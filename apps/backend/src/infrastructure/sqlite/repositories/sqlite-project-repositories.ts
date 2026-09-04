@@ -151,14 +151,27 @@ export class SqliteProjectRepository implements ProjectRepository {
     }
   }
 
-  public async updateName(projectId: ProjectId, name: string, updatedAtMs: number): Promise<void> {
-    const result = await this.database.updateTable("projects")
-      .set({ name, updated_at: updatedAtMs })
-      .where("id", "=", projectId)
-      .executeTakeFirst()
-    if (result.numUpdatedRows !== 1n) {
-      throw new Error(`Project does not exist: ${projectId}`)
-    }
+  public async updateName(
+    projectId: ProjectId,
+    name: string,
+    updatedAtMs: number,
+    manifestDigest?: string,
+  ): Promise<void> {
+    await this.database.transaction().execute(async (transaction) => {
+      const result = await transaction.updateTable("projects")
+        .set({ name, updated_at: updatedAtMs })
+        .where("id", "=", projectId)
+        .executeTakeFirst()
+      if (result.numUpdatedRows !== 1n) {
+        throw new Error(`Project does not exist: ${projectId}`)
+      }
+      if (manifestDigest !== undefined) {
+        await transaction.updateTable("project_manifests")
+          .set({ digest: manifestDigest, updated_at: updatedAtMs })
+          .where("project_id", "=", projectId)
+          .executeTakeFirstOrThrow()
+      }
+    })
   }
 
   public async reconcileManifest(manifest: ProjectManifest, updatedAtMs: number): Promise<void> {

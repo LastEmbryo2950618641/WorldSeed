@@ -672,6 +672,8 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
       return { taskId: "61111111-1111-4111-8111-111111111111", status: "created" }
     case "turn.recoverable.list":
       return []
+    case "turn.latest.get":
+      return null
     case "turn.status": {
       demoTurnStatusPollCount = Math.min(demoTurnStatusPollCount + 1, demoPhaseUsage.length)
       const phaseRuns = demoPhaseUsage.slice(0, demoTurnStatusPollCount).map((usage, index) => ({

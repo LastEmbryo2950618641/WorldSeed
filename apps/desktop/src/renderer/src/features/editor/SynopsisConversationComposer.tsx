@@ -20,6 +20,18 @@ import {
 import { toolbarBadgeCount } from "./creation-desk-goals.js"
 import { CreationDeskGoalsPopover } from "./CreationDeskGoalsPopover.js"
 import { CreationDeskToolbar } from "./CreationDeskToolbar.js"
+import {
+  discussBusyPhaseLabel,
+  discussFinalOutputHeader,
+  resolveDiscussBusyPhase,
+  type DiscussBusyPhase,
+} from "./discuss-busy-phase.js"
+import {
+  timelineFromMessage,
+  toAgentTimeline,
+  type AgentTimelineSegment,
+} from "./agent-timeline.js"
+import { isOutlineMarkdownPath } from "./synopsis-path.js"
 import { useDeductionGoals } from "./use-deduction-goals.js"
 
 type PresentationProps = Readonly<{
@@ -101,10 +113,16 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
   const stickToLatestRef = useRef(true)
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const visibleMessages = props.messages.filter((message) => message.hidden !== true)
+  const streamPreview = extractAssistantPreview(props.stream?.content)
   // Stream can be "completed" while send() still persists; don't keep showing Stop.
-  const replyFinalizing = props.busy
-    && (props.stream?.status === "completed" || props.stream?.status === "failed")
-  const showStop = props.busy && !replyFinalizing
+  const discussPhase = resolveDiscussBusyPhase({
+    busy: props.busy,
+    streamStatus: props.stream?.status,
+    hasPreviewContent: (streamPreview?.trim().length ?? 0) > 0,
+  })
+  const replyFinalizing = discussPhase === "finalizing"
+  const showStop = discussPhase === "generating" || discussPhase === "previewing"
+  const discussStatusLabel = discussBusyPhaseLabel(discussPhase)
 
   const scrollThreadToLatest = (): void => {
     const thread = threadRef.current
@@ -136,7 +154,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
     const thread = threadRef.current
     if (thread === null) return
     thread.scrollTop = thread.scrollHeight
-  }, [props.messages.length, props.busy, props.stream?.thinking, props.stream?.content, props.stream?.searching])
+  }, [props.messages.length, props.busy, props.stream?.thinking, props.stream?.thinkingRounds, props.stream?.content, props.stream?.searching, props.stream?.editing])
 
   useEffect(() => {
     if (!advancedMenuOpen) return
@@ -255,25 +273,30 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
                   busy={props.busy}
                   choicesRefreshing={choicesRefreshing}
                   isLatestChoiceMessage={message.messageId === latestChoiceMessageId}
-                  pendingStagingPromotes={props.pendingStagingPromotes}
                   onSend={sendMessage}
                   onPromoteStaging={props.onPromoteStaging}
-                  onRejectStagingPromote={props.onRejectStagingPromote}
                   onStartTurn={props.onStartTurn}
                   onRefreshChoices={refreshChoices}
-                  onOpenSettingsLineage={props.onOpenSettingsLineage}
+                  {...(props.pendingStagingPromotes === undefined
+                    ? {}
+                    : { pendingStagingPromotes: props.pendingStagingPromotes })}
+                  {...(props.onRejectStagingPromote === undefined
+                    ? {}
+                    : { onRejectStagingPromote: props.onRejectStagingPromote })}
+                  {...(props.onOpenSettingsLineage === undefined
+                    ? {}
+                    : { onOpenSettingsLineage: props.onOpenSettingsLineage })}
                 />)}
                 {props.busy
                   ? <article className="creation-desk-message assistant pending" aria-live="polite">
                       <div className="creation-desk-message-avatar" aria-hidden="true"><Bot size={16} /></div>
                       <div className="creation-desk-message-body">
-                        <header>Agent</header>
+                        <header>Agent{discussPhase === "finalizing" ? " · 收尾中" : " · 进行中"}</header>
                         <AgentStructuredBody
-                          thinking={resolveThinkingDisplay(props.stream?.thinking, props.stream?.content)}
-                          searching={props.stream?.searching}
-                          content={extractAssistantPreview(props.stream?.content)}
-                          defaultThinkingOpen
+                          segments={buildLiveTimeline(props.stream, streamPreview)}
+                          mode="live"
                           streaming
+                          discussPhase={discussPhase}
                           {...(props.onOpenSettingsLineage === undefined
                             ? {}
                             : { onOpenSettingsLineage: props.onOpenSettingsLineage })}
@@ -305,7 +328,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
               {props.onOpenSynopsisFile === undefined
                 ? null
                 : <button type="button" className="synopsis-open-file" onClick={() => { props.onOpenSynopsisFile?.(props.session!.synopsisPath); }}>
-                    打开梗概文件
+                    {isOutlineMarkdownPath(props.session.synopsisPath) ? "打开纲要文件" : "打开梗概文件"}
                   </button>}
             </div>
           : null}
@@ -369,13 +392,17 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
             </select>
           </label>
         </div>
+        {discussStatusLabel === undefined
+          ? null
+          : <p className="creation-desk-discuss-status" data-testid="creation-desk-discuss-status" aria-live="polite">
+              {discussStatusLabel}
+              <span className="creation-desk-discuss-status-hint">右侧「运行监控」仅反映正式推演</span>
+            </p>}
         <CreationDeskComposerInput
           busy={props.busy}
           running={props.running}
           showStop={showStop}
           replyFinalizing={replyFinalizing}
-          tokenMetrics={props.tokenMetrics}
-          draftRestore={props.draftRestore}
           advancedMenuOpen={advancedMenuOpen}
           advancedMenuRef={advancedMenuRef}
           modelProfiles={props.modelProfiles}
@@ -385,8 +412,10 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
           onToggleAdvancedMenu={() => { setAdvancedMenuOpen((open) => !open); }}
           onCloseAdvancedMenu={() => { setAdvancedMenuOpen(false); }}
           onSend={sendMessage}
-          onStop={props.onStop}
           onStartTurn={props.onStartTurn}
+          {...(props.tokenMetrics === undefined ? {} : { tokenMetrics: props.tokenMetrics })}
+          {...(props.draftRestore === undefined ? {} : { draftRestore: props.draftRestore })}
+          {...(props.onStop === undefined ? {} : { onStop: props.onStop })}
         />
       </footer>
     </div>
@@ -576,6 +605,7 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
             type="button"
             className="creation-desk-stop"
             data-testid="creation-desk-stop"
+            title="讨论仍在进行，停止将丢弃本轮未完成回复"
             disabled={props.onStop === undefined}
             onClick={() => { void props.onStop?.(); }}
           >
@@ -584,8 +614,9 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
         : props.replyFinalizing
           ? <button
               type="button"
-              className="creation-desk-send"
+              className="creation-desk-send is-finalizing"
               data-testid="creation-desk-finalizing"
+              title="可见回复已就绪，正在写入梗概/细纲与消息"
               disabled
             >
               收尾中…
@@ -660,10 +691,15 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
       <header>{message.role === "user" ? "你" : "Agent"}</header>
       {message.role === "assistant"
         ? <AgentStructuredBody
-            thinking={resolveThinkingDisplay(message.reasoningContent)}
-            searching={message.searching}
-            content={message.content}
-            defaultThinkingOpen={false}
+            segments={timelineFromMessage({
+              ...message,
+              reasoningContent: resolveThinkingDisplay(message.reasoningContent),
+              thinkingRounds: message.thinkingRounds?.map((round) => ({
+                round: round.round,
+                text: resolveThinkingDisplay(round.text) ?? round.text,
+              })),
+            })}
+            mode="persisted"
             {...(props.onOpenSettingsLineage === undefined
               ? {}
               : { onOpenSettingsLineage: props.onOpenSettingsLineage })}
@@ -683,6 +719,10 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
                 }
                 if (choice.action === "promote_staging") {
                   void props.onPromoteStaging()
+                  return
+                }
+                if (choice.action === "confirm_synopsis") {
+                  void props.onSend("用这份梗概写细纲")
                   return
                 }
                 if (
@@ -721,48 +761,61 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
 })
 
 const AgentStructuredBody = memo(function AgentStructuredBody({
-  thinking,
-  searching,
-  content,
-  defaultThinkingOpen,
+  segments,
+  mode,
   streaming = false,
+  discussPhase = "idle",
   onOpenSettingsLineage,
 }: Readonly<{
-  thinking?: string | undefined
-  searching?: SynopsisConversationStreamSnapshot["searching"] | SynopsisConversationMessage["searching"]
-  content?: string | undefined
-  defaultThinkingOpen: boolean
+  segments: readonly AgentTimelineSegment[]
+  mode: "live" | "persisted"
   streaming?: boolean
+  discussPhase?: DiscussBusyPhase
   onOpenSettingsLineage?(): void
 }>): React.JSX.Element {
-  const hasThinking = (thinking?.trim().length ?? 0) > 0
-  const hasSearching = (searching?.length ?? 0) > 0
-  const hasContent = (content?.trim().length ?? 0) > 0
+  const hasAny = segments.length > 0
+  const lastThinkingIndex = (() => {
+    let index = -1
+    for (let i = 0; i < segments.length; i += 1) {
+      if (segments[i]?.kind === "thinking") index = i
+    }
+    return index
+  })()
   return <div className="agent-structured-body">
-    {hasThinking
-      ? <details className="agent-stream-block thinking" open={defaultThinkingOpen}>
+    {segments.map((segment, index) => {
+      if (segment.kind === "thinking") {
+        const open = mode === "live" && index === lastThinkingIndex
+        return <details
+          key={`thinking-${String(segment.round)}-${String(index)}`}
+          className="agent-stream-block thinking"
+          open={open}
+        >
           <summary>
             <ChevronDown size={14} aria-hidden="true" />
             thinking
-            {streaming ? <em>流式</em> : null}
+            {streaming && index === lastThinkingIndex ? <em>流式</em> : null}
           </summary>
           <div className="agent-stream-thinking-markdown">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{thinking ?? ""}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{segment.text}</ReactMarkdown>
           </div>
         </details>
-      : streaming
-        ? <div className="agent-stream-block thinking muted"><span>thinking</span><p className="creation-desk-pending">深度思考中…</p></div>
-        : null}
-    {hasSearching
-      ? <details className="agent-stream-block searching">
+      }
+      if (segment.kind === "searching") {
+        const active = segment.items.some((item) => item.status === "running")
+        const noun = streaming && active ? "searching" : "searched"
+        return <details
+          key={`searching-${String(segment.round)}-${String(index)}`}
+          className="agent-stream-block searching"
+        >
           <summary>
             <ChevronDown size={14} aria-hidden="true" />
             <Globe size={13} aria-hidden="true" />
-            searching
-            {streaming ? <em>{(searching ?? []).some((item) => item.status === "running") ? "查询中" : "完成"}</em> : null}
+            {noun}
+            <span className="agent-stream-count">{segment.items.length}</span>
+            {streaming ? <em>{active ? "查询中" : "完成"}</em> : null}
           </summary>
           <ul>
-            {(searching ?? []).map((item) => <li key={item.query}>
+            {segment.items.map((item) => <li key={`${String(item.round ?? "x")}:${item.query}`}>
               <strong>{item.query}</strong>
               {item.asOfChapterSequence !== undefined && item.temporalRole === "as_of"
                 ? onOpenSettingsLineage === undefined
@@ -780,17 +833,93 @@ const AgentStructuredBody = memo(function AgentStructuredBody({
             </li>)}
           </ul>
         </details>
+      }
+      if (segment.kind === "editing") {
+        const active = segment.items.some((item) => item.status === "running")
+        const noun = streaming && active ? "editing" : "edited"
+        return <details
+          key={`editing-${String(index)}`}
+          className="agent-stream-block editing"
+          open
+        >
+          <summary>
+            <ChevronDown size={14} aria-hidden="true" />
+            <FileText size={13} aria-hidden="true" />
+            {noun}
+            <span className="agent-stream-count">{segment.items.length}</span>
+            {streaming ? <em>{active ? "写入中" : "已写入"}</em> : null}
+          </summary>
+          <ul>
+            {segment.items.map((item) => <li key={item.path}>
+              <strong>{item.path}</strong>
+              <small>{item.status === "running"
+                ? "写入中"
+                : item.status === "failed"
+                  ? "未落盘"
+                  : "已写入"}</small>
+              {item.summary === undefined ? null : <pre>{item.summary}</pre>}
+              {item.opsAttempted === undefined
+                ? null
+                : <small>{`${String(item.opsApplied ?? 0)}/${String(item.opsAttempted)} 处`}</small>}
+            </li>)}
+          </ul>
+        </details>
+      }
+      const finalHeader = discussFinalOutputHeader(discussPhase, streaming)
+      return <div
+        key={`final-${String(index)}`}
+        className={`agent-stream-block final${streaming && discussPhase !== "idle" ? " is-live" : ""}`}
+      >
+        <header>{finalHeader}</header>
+        <p>{segment.content}</p>
+        {streaming && discussPhase === "previewing"
+          ? <p className="creation-desk-pending creation-desk-preview-note">预览来自流式解析，本轮尚未结束</p>
+          : null}
+        {streaming && discussPhase === "finalizing"
+          ? <p className="creation-desk-pending creation-desk-preview-note">正在写入工作区与对话记录…</p>
+          : null}
+      </div>
+    })}
+    {!hasAny && streaming
+      ? <>
+          <div className="agent-stream-block thinking muted"><span>thinking</span><p className="creation-desk-pending">深度思考中…</p></div>
+          <p className="creation-desk-pending">正在生成正式回复…</p>
+        </>
       : null}
-    {hasContent
-      ? <div className="agent-stream-block final">
-          <header>正式输出</header>
-          <p>{content}</p>
-        </div>
-      : streaming
-        ? <p className="creation-desk-pending">{hasThinking ? "正在整理正式回复…" : "正在生成正式回复…"}</p>
-        : null}
+    {hasAny && streaming && !segments.some((item) => item.kind === "final") && discussPhase !== "finalizing"
+      ? <p className="creation-desk-pending">
+          {segments.some((item) => item.kind === "thinking") ? "正在整理正式回复…" : "正在生成正式回复…"}
+        </p>
+      : null}
   </div>
 })
+
+function buildLiveTimeline(
+  stream: SynopsisConversationStreamSnapshot | undefined,
+  contentPreview: string | undefined,
+): AgentTimelineSegment[] {
+  if (stream === undefined) return []
+  const thinkingRounds = stream.thinkingRounds
+    .map((round) => ({
+      round: round.round,
+      text: resolveThinkingDisplay(round.text) ?? round.text,
+    }))
+    .filter((round) => round.text.trim().length > 0)
+  const liveThinking = resolveThinkingDisplay(stream.thinking, stream.content)
+  return toAgentTimeline({
+    thinking: liveThinking,
+    thinkingRounds: thinkingRounds.length > 0
+      ? thinkingRounds
+      : liveThinking === undefined
+        ? undefined
+        : [{ round: Math.max(1, stream.thinkingRounds.at(-1)?.round ?? 1), text: liveThinking }],
+    searching: stream.searching,
+    editing: stream.editing,
+    content: contentPreview ?? extractAssistantPreview(stream.content) ?? (stream.content.trimStart().startsWith("{")
+      ? undefined
+      : stream.content),
+  })
+}
 
 function resolveThinkingDisplay(thinking: string | undefined, phaseJson?: string): string | undefined {
   return normalizeThinkingDisplayText(thinking) ?? normalizeThinkingDisplayText(phaseJson)

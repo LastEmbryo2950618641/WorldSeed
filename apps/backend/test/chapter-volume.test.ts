@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   assertUniqueVolumeSequence,
   listVolumeFoldersFromInventory,
+  pickPreferredVolumeFolderName,
   remapPathVolumeFolder,
   validateVolumeFolderName,
 } from "../src/index.js"
@@ -59,5 +60,17 @@ describe("volume sequence uniqueness", () => {
       "第一卷 待命名",
       "第一卷 潮水退去时",
     )).toBe("章节正文/第一卷 潮水退去时/第一章 开端 [剧情梗概].md")
+  })
+
+  it("prefers an existing named volume over the placeholder default", () => {
+    expect(pickPreferredVolumeFolderName([
+      "第一卷 待命名",
+      "第一卷 王旗未立",
+    ])).toBe("第一卷 王旗未立")
+    expect(pickPreferredVolumeFolderName([
+      "第一卷 王旗未立",
+      "第二卷 远行",
+    ])).toBe("第二卷 远行")
+    expect(pickPreferredVolumeFolderName([])).toBeUndefined()
   })
 })

@@ -35,6 +35,7 @@ export const phaseTransitions: Record<AIPhase, PhaseTransition> = {
   revision_review: { next: [], returnsTo: [] },
   revision_assist: { next: [], returnsTo: [] },
   synopsis_discuss: { next: [], returnsTo: [] },
+  work_naming: { next: [], returnsTo: [] },
 }
 
 export function isAllowedPhaseTransition(from: AIPhase, to: AIPhase): boolean {

@@ -22,8 +22,6 @@ type Props = Readonly<{
   historyLoading?: boolean | undefined
   /** Active model profile context window for 当前上下文/最大上下文. */
   contextWindowTokens?: number | undefined
-  /** Supplemental token metrics (e.g. synopsis discuss stream usage). */
-  supplementalTokenMetrics?: TaskTokenMetrics | undefined
   onOpenProjectSettings?(): void
   onResumeTask?(mode: "continue" | "retry_phase"): Promise<void>
   onResetTaskMetrics?(metricIds: readonly ResettableRuntimeMetricId[]): Promise<void>
@@ -81,7 +79,6 @@ export function RightRail({
   history,
   historyLoading,
   contextWindowTokens,
-  supplementalTokenMetrics,
   onOpenProjectSettings,
   onResumeTask,
   onResetTaskMetrics,
@@ -95,10 +92,7 @@ export function RightRail({
   const [checkpointOpen, setCheckpointOpen] = useState(false)
   const tab = useWorkbenchStore((state) => state.rightTab)
   const setTab = useWorkbenchStore((state) => state.setRightTab)
-  const tokenSummary = mergeTokenMetrics(
-    summarizeTaskTokenMetrics(task),
-    supplementalTokenMetrics,
-  )
+  const tokenSummary = summarizeTaskTokenMetrics(task)
   useEffect(() => {
     if (task?.status === "awaiting_user_decision" || task?.status === "waiting_for_review") setCheckpointOpen(true)
   }, [task?.status])
@@ -113,8 +107,6 @@ export function RightRail({
       {tab === "process" ? <ProcessPanel
         task={task}
         onResetMetrics={onResetTaskMetrics}
-        supplementalTokenMetrics={supplementalTokenMetrics}
-        contextWindowTokens={contextWindowTokens}
       /> : null}
       {tab === "graph" ? <WorldGraph slice={graphSlice} settings={graphSettings} /> : null}
       {tab === "evolution" ? <EvolutionPanel /> : null}
@@ -138,9 +130,9 @@ export function RightRail({
       <span>世界时间 <strong>当前章节锚点</strong></span>
       <span>图局部 <strong>{graphSlice === undefined ? "未读取" : `${String(graphSlice.nodes.length)} 节点 / ${String(graphSlice.links.length)} 连接`}</strong></span>
       <span>任务状态 <strong>{task?.status ?? "未运行"}</strong></span>
-      <span>KV 缓存命中率 <strong>{tokenSummary.kvRate === undefined ? "—" : `${String(Math.round(tokenSummary.kvRate * 100))}%`}</strong></span>
-      <span>总 Token 消耗 <strong>{tokenSummary.totalTokens === undefined ? "—" : formatCompactMetric(tokenSummary.totalTokens)}</strong></span>
-      <span>当前上下文 / 最大上下文 <strong>{formatContextWindow(tokenSummary.currentContextTokens, contextWindowTokens)}</strong></span>
+      <span>推演 KV 命中率 <strong>{tokenSummary.kvRate === undefined ? "—" : `${String(Math.round(tokenSummary.kvRate * 100))}%`}</strong></span>
+      <span>推演总 Token <strong>{tokenSummary.totalTokens === undefined ? "—" : formatCompactMetric(tokenSummary.totalTokens)}</strong></span>
+      <span>推演上下文 / 最大上下文 <strong>{formatContextWindow(tokenSummary.currentContextTokens, contextWindowTokens)}</strong></span>
     </div>
   </aside>{checkpointOpen && task !== undefined ? <TaskCheckpointDialog
     task={task}
@@ -173,20 +165,14 @@ function Tab({ id, tab, onChange, icon, label }: { id: RightTab; tab: RightTab; 
 function ProcessPanel({
   task,
   onResetMetrics,
-  supplementalTokenMetrics,
-  contextWindowTokens,
 }: {
   task: TaskSnapshot | undefined
   onResetMetrics?: ((metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>) | undefined
-  supplementalTokenMetrics?: TaskTokenMetrics | undefined
-  contextWindowTokens?: number | undefined
 }): React.JSX.Element {
   return <div className="process-panel">
     <RuntimeMonitor
       task={task}
       onResetMetrics={onResetMetrics}
-      supplementalTokenMetrics={supplementalTokenMetrics}
-      contextWindowTokens={contextWindowTokens}
     />
     {task?.finalization === undefined || task.finalization.status === "completed" ? null : <p className="phase-empty">正式章节收尾：{task.finalization.status} · {task.finalization.chapterHeading}</p>}
     <div className="phase-list">{visibleTopLevelPhases.flatMap((phase) => {
@@ -403,22 +389,6 @@ export function summarizeSynopsisUsageTokenMetrics(
     ...(hitTokens + missTokens === 0
       ? {}
       : { kvRate: hitTokens / (hitTokens + missTokens) }),
-    ...(totalTokens === 0 ? {} : { totalTokens }),
-    ...(currentContextTokens === undefined ? {} : { currentContextTokens }),
-  }
-}
-
-function mergeTokenMetrics(
-  primary: TaskTokenMetrics,
-  secondary: TaskTokenMetrics | undefined,
-): TaskTokenMetrics {
-  if (secondary === undefined || Object.keys(secondary).length === 0) return primary
-  if (Object.keys(primary).length === 0) return secondary
-  const totalTokens = (primary.totalTokens ?? 0) + (secondary.totalTokens ?? 0)
-  const kvRate = secondary.kvRate ?? primary.kvRate
-  const currentContextTokens = secondary.currentContextTokens ?? primary.currentContextTokens
-  return {
-    ...(kvRate === undefined ? {} : { kvRate }),
     ...(totalTokens === 0 ? {} : { totalTokens }),
     ...(currentContextTokens === undefined ? {} : { currentContextTokens }),
   }

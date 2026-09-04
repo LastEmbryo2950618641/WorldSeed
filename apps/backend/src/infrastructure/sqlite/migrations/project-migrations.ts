@@ -1056,4 +1056,27 @@ export const projectMigrations = Object.freeze([
     "ALTER TABLE deduction_goals ADD COLUMN payoff_chapter_sequence INTEGER",
     "CREATE INDEX deduction_goals_project_kind_scale ON deduction_goals(project_id, narrative_kind, scale, lifecycle)",
   ]),
+  defineSqlMigration<ProjectDatabase>(40, "040_synopsis_confirmed_at", [
+    "ALTER TABLE synopsis_conversation_sessions ADD COLUMN synopsis_confirmed_at_ms INTEGER",
+  ]),
+  defineSqlMigration<ProjectDatabase>(41, "041_outline_agent_digest", [
+    "ALTER TABLE synopsis_conversation_sessions ADD COLUMN last_outline_agent_digest TEXT",
+  ]),
+  defineSqlMigration<ProjectDatabase>(42, "042_synopsis_discuss_usage", [
+    `CREATE TABLE IF NOT EXISTS synopsis_discuss_usage (
+      project_id TEXT PRIMARY KEY NOT NULL,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_hit_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_miss_input_tokens INTEGER NOT NULL DEFAULT 0,
+      last_request_input_tokens INTEGER,
+      updated_at_ms INTEGER NOT NULL
+    )`,
+  ]),
+  defineSqlMigration<ProjectDatabase>(43, "043_synopsis_message_editing", [
+    "ALTER TABLE synopsis_conversation_messages ADD COLUMN editing_json TEXT",
+  ]),
+  defineSqlMigration<ProjectDatabase>(44, "044_synopsis_message_thinking_rounds", [
+    "ALTER TABLE synopsis_conversation_messages ADD COLUMN thinking_rounds_json TEXT",
+  ]),
 ])

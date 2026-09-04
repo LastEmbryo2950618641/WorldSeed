@@ -276,6 +276,8 @@ export type SynopsisConversationSessionRow = {
   title: string
   last_agent_digest: string | null
   turn_bootstrap_input: string | null
+  synopsis_confirmed_at_ms: number | null
+  last_outline_agent_digest: string | null
   status: "active" | "completed"
   created_at_ms: Timestamp
   updated_at_ms: Timestamp
@@ -289,9 +291,21 @@ export type SynopsisConversationMessageRow = {
   content_text: string
   reasoning_content: string | null
   searching_json: string | null
+  editing_json: string | null
+  thinking_rounds_json: string | null
   choices_json: string | null
   hidden: number
   created_at_ms: Timestamp
+}
+
+export type SynopsisDiscussUsageRow = {
+  project_id: string
+  input_tokens: number
+  output_tokens: number
+  cache_hit_input_tokens: number
+  cache_miss_input_tokens: number
+  last_request_input_tokens: number | null
+  updated_at_ms: Timestamp
 }
 
 export type ChapterSynopsisRow = {
@@ -868,6 +882,7 @@ export type ProjectDatabase = {
   revision_conversation_messages: RevisionConversationMessageRow
   synopsis_conversation_sessions: SynopsisConversationSessionRow
   synopsis_conversation_messages: SynopsisConversationMessageRow
+  synopsis_discuss_usage: SynopsisDiscussUsageRow
   chapter_synopsis: ChapterSynopsisRow
   deduction_goals: DeductionGoalRow
   deduction_goal_progress: DeductionGoalProgressRow

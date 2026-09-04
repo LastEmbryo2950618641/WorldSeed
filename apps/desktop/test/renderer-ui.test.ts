@@ -577,11 +577,11 @@ describe("right rail process UI contract", () => {
         ],
       },
     }))
-    expect(html).toContain("KV 缓存命中率")
+    expect(html).toContain("推演 KV 命中率")
     expect(html).toContain("57%")
-    expect(html).toContain("总 Token 消耗")
+    expect(html).toContain("推演总 Token")
     expect(html).toContain("4.0k")
-    expect(html).toContain("当前上下文 / 最大上下文")
+    expect(html).toContain("推演上下文 / 最大上下文")
     expect(html).toContain("2.0k / 128.0k")
   })
 

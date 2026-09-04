@@ -25,6 +25,7 @@ import {
   projectCreatePayloadSchema,
   projectListPayloadSchema,
   projectRenamePayloadSchema,
+  projectSuggestDisplayNamePayloadSchema,
   graphNeighborhoodPayloadSchema,
   historyBranchesPayloadSchema,
   historyEntryOperationPayloadSchema,
@@ -84,6 +85,7 @@ import {
   projectWorkspacePayloadSchema,
   taskPayloadSchema,
   turnRecoverableTasksPayloadSchema,
+  turnLatestGetPayloadSchema,
   turnMetricsResetPayloadSchema,
   turnResumePayloadSchema,
   turnStartPayloadSchema,
@@ -245,6 +247,16 @@ export class BackendFacade {
           displayName,
           workspaceRootRef: payload.workspaceRootRef,
         }
+      }
+      case "project.suggestDisplayName": {
+        const payload = projectSuggestDisplayNamePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createWorkNameSuggestService().suggest({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          model: this.resolveModel(payload.model),
+          ...(payload.historyNames === undefined ? {} : { historyNames: payload.historyNames }),
+        })
       }
       case "project.validate": {
         const payload = projectWorkspacePayloadSchema.parse(request.payload)
@@ -960,6 +972,13 @@ export class BackendFacade {
           latestStatus: tasks[0]?.status,
         })
         return Promise.all(tasks.map(async (task) => this.readTask(task.taskId)))
+      }
+      case "turn.latest.get": {
+        const payload = turnLatestGetPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        const latest = await runtime.findLatestTask()
+        if (latest === undefined) return null
+        return this.readTask(latest.taskId)
       }
       case "turn.pause": {
         const payload = taskPayloadSchema.parse(request.payload)

@@ -20,12 +20,6 @@ import { UiTooltip, uiTooltipRich } from "../../components/UiTooltip.js"
 
 type ResetMetrics = (metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>
 
-type DiscussTokenMetrics = Readonly<{
-  kvRate?: number
-  totalTokens?: number
-  currentContextTokens?: number
-}>
-
 type RingMetric = Readonly<{
   metricId: string
   unit: "count" | "tokens" | "milliseconds" | "ratio" | "generation"
@@ -34,23 +28,17 @@ type RingMetric = Readonly<{
   state: "normal" | "warning" | "exhausted" | "ok" | "resetting" | "fixed"
 }>
 
-export function RuntimeMonitor({ task, onResetMetrics, supplementalTokenMetrics, contextWindowTokens }: {
+export function RuntimeMonitor({ task, onResetMetrics }: {
   task: TaskSnapshot | undefined
   onResetMetrics?: ResetMetrics | undefined
-  supplementalTokenMetrics?: DiscussTokenMetrics | undefined
-  contextWindowTokens?: number | undefined
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(true)
   const [pendingMetricIds, setPendingMetricIds] = useState<ReadonlySet<string>>(new Set())
   const [resetError, setResetError] = useState<string>()
-  const taskMetrics = task?.runtimeMetrics?.metrics ?? []
-  const metrics: readonly RingMetric[] = taskMetrics.length > 0
-    ? taskMetrics
-    : synthesizeDiscussMetrics(supplementalTokenMetrics, contextWindowTokens)
+  const metrics = task?.runtimeMetrics?.metrics ?? []
   const warningCount = metrics.filter((metric) => metric.state === "warning" || metric.state === "exhausted").length
-  const resettableMetrics = taskMetrics.filter((metric): metric is RuntimeMetric & { metricId: ResettableRuntimeMetricId } => metric.resettable)
+  const resettableMetrics = metrics.filter((metric): metric is RuntimeMetric & { metricId: ResettableRuntimeMetricId } => metric.resettable)
   const canReset = task?.status === "paused" || task?.status === "awaiting_user_decision"
-  const discussOnly = taskMetrics.length === 0 && metrics.length > 0
 
   const reset = async (metricIds: readonly ResettableRuntimeMetricId[]): Promise<void> => {
     if (onResetMetrics === undefined || metricIds.length === 0) return
@@ -71,9 +59,7 @@ export function RuntimeMonitor({ task, onResetMetrics, supplementalTokenMetrics,
       <span><strong>运行监控</strong></span>
       <em>{metrics.length === 0
         ? "等待本轮数据"
-        : discussOnly
-          ? "梗概讨论用量"
-          : warningCount === 0 ? "指标正常" : `${String(warningCount)} 项需关注`}</em>
+        : warningCount === 0 ? "指标正常" : `${String(warningCount)} 项需关注`}</em>
       <ChevronDown size={14} />
     </button>
     {expanded ? <>
@@ -86,44 +72,11 @@ export function RuntimeMonitor({ task, onResetMetrics, supplementalTokenMetrics,
         </div>
       </div>
       <div className="runtime-monitor-footer">
-        <span>{resetError ?? (discussOnly
-          ? "创作台累计（非正式推演）"
-          : `快照 ${task?.runtimeMetrics === undefined ? "-" : formatTimestamp(task.runtimeMetrics.capturedAtMs)}`)}</span>
+        <span>{resetError ?? `快照 ${task?.runtimeMetrics === undefined ? "-" : formatTimestamp(task.runtimeMetrics.capturedAtMs)}`}</span>
         <button type="button" disabled={!canReset || resettableMetrics.length === 0 || pendingMetricIds.size > 0} onClick={() => { void reset(resettableMetrics.map((metric) => metric.metricId)); }}><RefreshCcw size={12} />全部重置</button>
       </div>
     </> : null}
   </section>
-}
-
-function synthesizeDiscussMetrics(
-  tokenMetrics: DiscussTokenMetrics | undefined,
-  contextWindowTokens: number | undefined,
-): RingMetric[] {
-  if (tokenMetrics === undefined) return []
-  const hasAny = tokenMetrics.totalTokens !== undefined
-    || tokenMetrics.kvRate !== undefined
-    || tokenMetrics.currentContextTokens !== undefined
-  if (!hasAny) return []
-  const metrics: RingMetric[] = []
-  if (tokenMetrics.currentContextTokens !== undefined || (contextWindowTokens !== undefined && contextWindowTokens > 0)) {
-    metrics.push({
-      metricId: "context_tokens",
-      unit: "tokens",
-      current: tokenMetrics.currentContextTokens ?? 0,
-      limit: contextWindowTokens ?? null,
-      state: "normal",
-    })
-  }
-  if (tokenMetrics.kvRate !== undefined) {
-    metrics.push({
-      metricId: "kv_cache_hit_rate",
-      unit: "ratio",
-      current: tokenMetrics.kvRate,
-      limit: 1,
-      state: "normal",
-    })
-  }
-  return metrics
 }
 
 function RuntimeRing({ metric, label }: { metric: RingMetric | undefined; label: string }): React.JSX.Element {

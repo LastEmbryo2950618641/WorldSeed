@@ -103,6 +103,33 @@ function registerRequestReferences(request: PhaseRequestEnvelope, registry: Refe
       }
     }
   }
+  registerSynopsisDiscussReferences(request.input.synopsisDiscuss, registry)
+  registerDeductionGoalBundleReferences(request.input.deductionGoalBundle, registry)
+}
+
+function registerSynopsisDiscussReferences(value: unknown, registry: ReferenceRegistry): void {
+  registerGoalCollections(value, registry)
+}
+
+function registerDeductionGoalBundleReferences(value: unknown, registry: ReferenceRegistry): void {
+  registerGoalCollections(value, registry)
+}
+
+function registerGoalCollections(value: unknown, registry: ReferenceRegistry): void {
+  if (!isRecord(value)) return
+  if (Array.isArray(value.activeGoals)) {
+    for (const goal of value.activeGoals) {
+      if (!isRecord(goal)) continue
+      registerIfUuid(goal.goalId, "goal", registry)
+    }
+  }
+  if (Array.isArray(value.chapterProgress)) {
+    for (const item of value.chapterProgress) {
+      if (!isRecord(item)) continue
+      registerIfUuid(item.goalId, "goal", registry)
+      registerIfUuid(item.chapterId, "chapter", registry)
+    }
+  }
 }
 
 function readGraphReferencePairs(request: PhaseRequestEnvelope, registry: ReferenceRegistry): string[] {
@@ -145,6 +172,8 @@ function createModelInput(value: unknown): unknown {
     verificationProbeExecutions,
     validationArtifacts: ignoredValidationArtifacts,
     stageProjection,
+    synopsisDiscuss,
+    deductionGoalBundle,
     ...semanticInput
   } = value
   void ignoredSourceId
@@ -153,6 +182,12 @@ function createModelInput(value: unknown): unknown {
   void ignoredValidationArtifacts
   return {
     ...semanticInput,
+    ...(synopsisDiscuss === undefined
+      ? {}
+      : { synopsisDiscuss: createModelSynopsisDiscuss(synopsisDiscuss) }),
+    ...(deductionGoalBundle === undefined
+      ? {}
+      : { deductionGoalBundle: createModelDeductionGoalBundle(deductionGoalBundle) }),
     ...(stageProjection === undefined ? {} : { stageProjection: createModelStageProjection(stageProjection) }),
     ...(Array.isArray(readEvidence)
       ? { readEvidence: readEvidence.map(createModelReadEvidence) }
@@ -166,6 +201,81 @@ function createModelInput(value: unknown): unknown {
     ...(isRecord(workspaceCatalog)
       ? { workspaceCatalog: { entries: workspaceCatalog.entries } }
       : workspaceCatalog === undefined ? {} : { workspaceCatalog }),
+  }
+}
+
+/** Keep goal IDs (aliased later); drop turn taskId which is application-only. */
+function createModelSynopsisDiscuss(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  const { turnMonitor, activeGoals, chapterProgress, ...rest } = value
+  const next: Record<string, unknown> = {
+    ...rest,
+    ...(activeGoals === undefined
+      ? {}
+      : {
+          activeGoals: Array.isArray(activeGoals)
+            ? activeGoals.map(createModelDeductionGoal)
+            : activeGoals,
+        }),
+    ...(chapterProgress === undefined
+      ? {}
+      : {
+          chapterProgress: Array.isArray(chapterProgress)
+            ? chapterProgress.map(createModelDeductionGoalProgress)
+            : chapterProgress,
+        }),
+  }
+  if (turnMonitor === undefined) return next
+  if (!isRecord(turnMonitor)) return { ...next, turnMonitor }
+  const { taskId: ignoredTaskId, ...monitorRest } = turnMonitor
+  void ignoredTaskId
+  return {
+    ...next,
+    turnMonitor: monitorRest,
+  }
+}
+
+/** Model-facing goal bundle: aliasable goalId only; strip project/progress technical IDs. */
+function createModelDeductionGoalBundle(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  return {
+    chapterSequence: value.chapterSequence,
+    activeGoals: Array.isArray(value.activeGoals)
+      ? value.activeGoals.map(createModelDeductionGoal)
+      : value.activeGoals,
+    chapterProgress: Array.isArray(value.chapterProgress)
+      ? value.chapterProgress.map(createModelDeductionGoalProgress)
+      : value.chapterProgress,
+  }
+}
+
+function createModelDeductionGoal(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  return {
+    goalId: value.goalId,
+    content: value.content,
+    source: value.source,
+    lifecycle: value.lifecycle,
+    narrativeKind: value.narrativeKind,
+    scale: value.scale,
+    ...(value.plantChapterSequence === undefined
+      ? {}
+      : { plantChapterSequence: value.plantChapterSequence }),
+    ...(value.payoffChapterSequence === undefined
+      ? {}
+      : { payoffChapterSequence: value.payoffChapterSequence }),
+  }
+}
+
+function createModelDeductionGoalProgress(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  return {
+    goalId: value.goalId,
+    chapterSequence: value.chapterSequence,
+    summary: value.summary,
+    status: value.status,
+    source: value.source,
+    ...(value.lockedAtMs === undefined ? {} : { lockedAtMs: value.lockedAtMs }),
   }
 }
 

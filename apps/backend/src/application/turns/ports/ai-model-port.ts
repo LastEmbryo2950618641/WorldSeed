@@ -155,7 +155,12 @@ export type TurnPhaseInput = Readonly<{
     heading: string
     chapterSequence: number
     synopsisMarkdown: string
+    outlineMarkdown?: string
+    outlineDigest?: string
     userEditedSinceAgent: boolean
+    userEditedOutlineSinceAgent?: boolean
+    currentWorkDisplayName?: string
+    synopsisConfirmed?: boolean
     conversationHistory: readonly Readonly<{ role: "user" | "assistant"; content: string }>[]
     activeGoals?: readonly Readonly<{
       goalId: string
@@ -183,6 +188,14 @@ export type TurnPhaseInput = Readonly<{
       }>[]
     }>
     discussTrigger?: "user" | "turn_handoff"
+  }>
+  workNaming?: Readonly<{
+    currentDisplayName: string
+    avoidNames: readonly string[]
+    volumeNames: readonly string[]
+    chapterHeadings: readonly string[]
+    synopsisExcerpts: readonly string[]
+    recentDiscussion: readonly string[]
   }>
 }>
 

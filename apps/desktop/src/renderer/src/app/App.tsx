@@ -18,6 +18,7 @@ import type {
   SynopsisConversationListResult,
   SynopsisConversationMessage,
   SynopsisConversationSendResult,
+  SynopsisConversationStartResult,
   SynopsisConversationStreamSnapshot,
   SynopsisConversationBudgetAdvisory,
   SynopsisConversationStreamUsage,
@@ -51,10 +52,15 @@ import { EditorArea } from "../features/editor/EditorArea.js"
 import { useCreationDeskPresentationPreferences } from "../features/editor/creation-desk-presentation-preferences.js"
 import { SettingsLineagePanel } from "../features/settings/SettingsLineagePanel.js"
 import { ChapterWorkspaceRail } from "../features/editor/ChapterWorkspaceRail.js"
+import {
+  ChapterArtifactRelatedRail,
+  type RelatedChapterArtifact,
+} from "../features/editor/ChapterArtifactRelatedRail.js"
 import { CreationDeskProgressReviewDialog } from "../features/editor/CreationDeskProgressReviewDialog.js"
 import { countPendingReviews } from "../features/editor/creation-desk-goals.js"
 import {
   isChapterPlanningMarkdownPath,
+  resolveChapterArtifactRelations,
   resolveChapterMarkdownKind,
   resolveChapterSurfacePath,
 } from "../features/editor/synopsis-path.js"
@@ -101,6 +107,7 @@ export function App(): React.JSX.Element {
   const synopsisSendInFlightRef = useRef(false)
   const [chapterSynopsis, setChapterSynopsis] = useState<ChapterSynopsis>()
   const [synopsisPanelOpen, setSynopsisPanelOpen] = useState(false)
+  const [relatedChapterArtifacts, setRelatedChapterArtifacts] = useState<readonly RelatedChapterArtifact[]>([])
   const [prompt, setPrompt] = useState("")
   const [presentation, updatePresentation] = useCreationDeskPresentationPreferences(project?.projectId)
   const {
@@ -147,6 +154,7 @@ export function App(): React.JSX.Element {
       workspaceRootRef: project.workspaceRootRef,
     })
     setSynopsisConversation(result)
+    setSynopsisUsage(result.usage)
   }, [project])
 
   const refreshChapterSynopsis = useCallback(async (chapterId: string): Promise<void> => {
@@ -157,6 +165,49 @@ export function App(): React.JSX.Element {
       chapterId,
     })
     setChapterSynopsis(result)
+  }, [project])
+
+  const loadRelatedChapterArtifacts = useCallback(async (path: string): Promise<void> => {
+    if (project === undefined) {
+      setRelatedChapterArtifacts([])
+      return
+    }
+    const relations = resolveChapterArtifactRelations(path)
+    if (relations === undefined) {
+      setRelatedChapterArtifacts([])
+      return
+    }
+    const candidates: Array<{ kind: RelatedChapterArtifact["kind"]; path: string }> = [
+      { kind: "plot_synopsis", path: relations.synopsisPath },
+      { kind: "plot_outline", path: relations.outlinePath },
+      { kind: "chapter_body", path: relations.bodyPath },
+    ]
+    const visible = relations.kind === "chapter_body"
+      ? candidates.filter((item) => item.kind !== "chapter_body")
+      : candidates.filter((item) => item.path !== relations.currentPath)
+
+    const loaded = await Promise.all(visible.map(async (item) => {
+      try {
+        const result = await invokeBackend<{ content: string }>("workspace.read", {
+          projectId: project.projectId,
+          workspaceRootRef: project.workspaceRootRef,
+          relativePath: item.path,
+        })
+        return {
+          kind: item.kind,
+          path: item.path,
+          present: true,
+          content: result.content,
+        } satisfies RelatedChapterArtifact
+      } catch {
+        return {
+          kind: item.kind,
+          path: item.path,
+          present: false,
+        } satisfies RelatedChapterArtifact
+      }
+    }))
+    setRelatedChapterArtifacts(loaded)
   }, [project])
 
   const refreshChapterConversation = useCallback(async (chapterId: string): Promise<void> => {
@@ -303,12 +354,21 @@ export function App(): React.JSX.Element {
         workspaceRootRef: project.workspaceRootRef,
       })
       if (!active) return
-      const latest = tasks[0]
-      setTask(latest)
-      if (latest?.status === "awaiting_user_decision") {
-        setPostCommitNotice("已恢复最近一次暂停的推演任务；请在弹出的检查点面板中决定重试、继续或回退本轮。")
-      } else if (latest?.status === "waiting_for_review") {
-        setPostCommitNotice("正文已生成，请在弹出的检查点面板中确认设定抽取提案后再继续图治理。")
+      const recoverable = tasks[0]
+      if (recoverable !== undefined) {
+        setTask(recoverable)
+        if (recoverable.status === "awaiting_user_decision") {
+          setPostCommitNotice("已恢复最近一次暂停的推演任务；请在弹出的检查点面板中决定重试、继续或回退本轮。")
+        } else if (recoverable.status === "waiting_for_review") {
+          setPostCommitNotice("正文已生成，请在弹出的检查点面板中确认设定抽取提案后再继续图治理。")
+        }
+      } else {
+        const latest = await invokeBackend<TaskSnapshot | null>("turn.latest.get", {
+          projectId: project.projectId,
+          workspaceRootRef: project.workspaceRootRef,
+        })
+        if (!active) return
+        setTask(latest ?? undefined)
       }
     }).catch((cause: unknown) => {
       if (active) setError(cause instanceof Error ? cause.message : String(cause))
@@ -362,7 +422,8 @@ export function App(): React.JSX.Element {
     setLineageMode(false)
     setError(undefined)
     try {
-      if (resolveChapterMarkdownKind(path) === "plot_synopsis") {
+      // Synopsis/outline are planning markdown on disk; they are not committed chapter publish paths.
+      if (isChapterPlanningMarkdownPath(path)) {
         const result = await invokeBackend<{ content: string }>("workspace.read", {
           projectId: project.projectId,
           workspaceRootRef: project.workspaceRootRef,
@@ -374,9 +435,12 @@ export function App(): React.JSX.Element {
         setChapterRevision(undefined)
         setChapterRevisionContent(undefined)
         setChapterConversation({ messages: [] })
+        setChapterSynopsis(undefined)
+        setSynopsisPanelOpen(false)
         setContent(result.content)
         setChapterBody("")
         setSavedContent(result.content)
+        await loadRelatedChapterArtifacts(path)
         return
       }
       if (path.startsWith("章节正文/")) {
@@ -398,10 +462,12 @@ export function App(): React.JSX.Element {
         }
         await refreshChapterConversation(resolved.committed.chapterId)
         await refreshChapterSynopsis(resolved.committed.chapterId)
+        await loadRelatedChapterArtifacts(path)
         setSynopsisPanelOpen(false)
         return
       }
       setChapterConversation({ messages: [] })
+      setRelatedChapterArtifacts([])
       const result = await invokeBackend<{ content: string }>("workspace.read", {
         projectId: project.projectId,
         workspaceRootRef: project.workspaceRootRef,
@@ -854,8 +920,10 @@ export function App(): React.JSX.Element {
     setSynopsisStream({
       status: "running",
       thinking: "",
+      thinkingRounds: [],
       content: "",
       searching: [],
+      editing: [],
       updatedAtMs: Date.now(),
     })
     setError(undefined)
@@ -865,8 +933,8 @@ export function App(): React.JSX.Element {
       while (!pollStopped) {
         try {
           const peek = await invokeBackend<SynopsisConversationStreamSnapshot>("synopsis.conversation.streamPeek", {
-            projectId: project.projectId,
-            workspaceRootRef: project.workspaceRootRef,
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
             ...(synopsisConversation.session?.sessionId === undefined
               ? {}
               : { sessionId: synopsisConversation.session.sessionId }),
@@ -915,15 +983,17 @@ export function App(): React.JSX.Element {
     const pollTask = pollStream()
     try {
       if (synopsisConversation.session === undefined) {
-        const started = await invokeBackend<{ session: { sessionId: string } }>("synopsis.conversation.start", {
+        const started = await invokeBackend<SynopsisConversationStartResult>("synopsis.conversation.start", {
           projectId: project.projectId,
           workspaceRootRef: project.workspaceRootRef,
         })
         setSynopsisConversation((current) => ({
           ...current,
-          session: started.session as SynopsisConversationListResult["session"],
+          session: started.session,
           messages: [...current.messages],
+          ...(started.usage === undefined ? {} : { usage: started.usage }),
         }))
+        if (started.usage !== undefined) setSynopsisUsage(started.usage)
       }
       const sent = await invokeBackend<SynopsisConversationSendResult>("synopsis.conversation.send", {
         projectId: project.projectId,
@@ -965,6 +1035,12 @@ export function App(): React.JSX.Element {
       pollStopped = true
       setSynopsisConversation(sent)
       setPendingStagingPromotes(sent.pendingStagingPromotes ?? [])
+      if (sent.workDisplayName !== undefined) {
+        setProject((current) => current === undefined
+          ? current
+          : { ...current, displayName: sent.workDisplayName! })
+        rememberWorkName(project.projectId, sent.workDisplayName)
+      }
       if (sent.budgetAdvisory !== undefined) {
         setSynopsisBudgetWarning(sent.budgetAdvisory)
       }
@@ -1106,6 +1182,7 @@ export function App(): React.JSX.Element {
         },
       })
       setSynopsisConversation(refreshed)
+      if (refreshed.usage !== undefined) setSynopsisUsage(refreshed.usage)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
@@ -1351,8 +1428,8 @@ export function App(): React.JSX.Element {
       await invokeBackend<OpenProject>("project.open", { workspaceRootRef: project.workspaceRootRef })
       result = await invokeBackend<HistoryCheckoutResult>("history.returnPreviousRound", {
         ...payload,
-        operationId: crypto.randomUUID(),
-      })
+      operationId: crypto.randomUUID(),
+    })
     }
     if (task?.handle?.taskId !== undefined) {
       try {
@@ -1534,10 +1611,19 @@ export function App(): React.JSX.Element {
   const dirty = content !== savedContent
   const inGraphSyncRecovery = chapterRevision?.decision === "submit"
     && chapterRevision.graphSyncStatus !== "completed"
+  const selectedChapterKind = selectedPath === undefined
+    ? undefined
+    : resolveChapterMarkdownKind(selectedPath)
+  const showPlanningRelatedRail = selectedChapterKind === "plot_synopsis"
+    || selectedChapterKind === "plot_outline"
   const showChapterConversation = selectedPath?.startsWith("章节正文/") === true
     && !isChapterPlanningMarkdownPath(selectedPath ?? "")
     && !inGraphSyncRecovery
-  const showRightPanel = !lineageMode && (selectedPath === undefined || showChapterConversation)
+  const showRightPanel = !lineageMode && (
+    selectedPath === undefined
+    || showChapterConversation
+    || showPlanningRelatedRail
+  )
 
   return <AppChrome
     rail={
@@ -1552,6 +1638,7 @@ export function App(): React.JSX.Element {
           project={project}
           running={task?.status === "running"}
           statusLabel={task?.status === "running" ? "推演中" : "就绪"}
+          {...(activeModelProfile === undefined ? {} : { model: activeModelProfile })}
           onRenamed={(displayName) => {
             setProject((current) => current === undefined ? current : { ...current, displayName })
             rememberWorkName(project.projectId, displayName)
@@ -1748,37 +1835,55 @@ export function App(): React.JSX.Element {
       </Panel>
       {showRightPanel
         ? <>
-            <PanelResizeHandle className="resize-handle"><PanelRightClose size={12} /></PanelResizeHandle>
+      <PanelResizeHandle className="resize-handle"><PanelRightClose size={12} /></PanelResizeHandle>
             <Panel defaultSize={25} minSize={20} maxSize={38} collapsible className="workbench-right-panel">
               <RightPanelViewport
-                chapterMode={showChapterConversation}
-                chapterPanel={<ChapterWorkspaceRail
-                  messages={chapterConversation.messages}
-                  revisionTaskId={chapterConversation.revisionTaskId}
-                  busy={chapterConversationBusy}
-                  chapterSynopsis={chapterSynopsis}
-                  synopsisPanelOpen={synopsisPanelOpen}
-                  onToggleSynopsisPanel={() => { setSynopsisPanelOpen((current) => !current); }}
-                  onSend={sendChapterConversation}
-                  onInspectDiff={(messageId) => { setDiffFocusMessageId(messageId); }}
-                />}
+                chapterMode={showChapterConversation || showPlanningRelatedRail}
+                chapterPanel={showPlanningRelatedRail && selectedChapterKind !== undefined && selectedPath !== undefined
+                  ? <ChapterArtifactRelatedRail
+                      currentKind={selectedChapterKind}
+                      currentPath={selectedPath}
+                      related={[
+                        {
+                          kind: selectedChapterKind,
+                          path: selectedPath,
+                          present: true,
+                          content,
+                        },
+                        ...relatedChapterArtifacts,
+                      ]}
+                      onOpen={(path) => { void openFile(path); }}
+                    />
+                  : <ChapterWorkspaceRail
+                      messages={chapterConversation.messages}
+                      revisionTaskId={chapterConversation.revisionTaskId}
+                      busy={chapterConversationBusy}
+                      chapterSynopsis={chapterSynopsis}
+                      synopsisPanelOpen={synopsisPanelOpen}
+                      relatedArtifacts={relatedChapterArtifacts}
+                      {...(selectedChapterKind === undefined ? {} : { currentKind: selectedChapterKind })}
+                      {...(selectedPath === undefined ? {} : { currentPath: selectedPath })}
+                      onToggleSynopsisPanel={() => { setSynopsisPanelOpen((current) => !current); }}
+                      onSend={sendChapterConversation}
+                      onInspectDiff={(messageId) => { setDiffFocusMessageId(messageId); }}
+                      onOpenRelated={(path) => { void openFile(path); }}
+                    />}
                 defaultPanel={<RightRail
-                  task={task}
+          task={task}
                   project={project}
-                  graphSlice={graphSlice}
-                  graphSettings={projectSettings?.graph}
-                  historyRetentionLimit={projectSettings?.history.retentionLimit}
-                  history={history}
-                  historyLoading={historyLoading}
+          graphSlice={graphSlice}
+          graphSettings={projectSettings?.graph}
+          historyRetentionLimit={projectSettings?.history.retentionLimit}
+          history={history}
+          historyLoading={historyLoading}
                   contextWindowTokens={activeModelProfile?.contextWindowTokens}
-                  supplementalTokenMetrics={synopsisTokenMetrics}
-                  onOpenProjectSettings={() => { setProjectSettingsOpen(true); }}
-                  onResumeTask={resumeTask}
-                  onResetTaskMetrics={resetTaskMetrics}
-                  onSaveHistory={saveHistory}
-                  onRestoreHistory={(entryId) => applyHistoryCheckout("history.restore", entryId)}
-                  onContinueFromHistory={(entryId) => applyHistoryCheckout("history.continueFrom", entryId)}
-                  onReturnPreviousRound={returnPreviousRound}
+          onOpenProjectSettings={() => { setProjectSettingsOpen(true); }}
+          onResumeTask={resumeTask}
+          onResetTaskMetrics={resetTaskMetrics}
+          onSaveHistory={saveHistory}
+          onRestoreHistory={(entryId) => applyHistoryCheckout("history.restore", entryId)}
+          onContinueFromHistory={(entryId) => applyHistoryCheckout("history.continueFrom", entryId)}
+          onReturnPreviousRound={returnPreviousRound}
                   onRefreshTask={async () => {
                     const taskId = task?.handle?.taskId
                     if (taskId === undefined) return
@@ -1787,8 +1892,8 @@ export function App(): React.JSX.Element {
                   }}
                   onRefreshWorkspace={refreshWorkspace}
                 />}
-              />
-            </Panel>
+        />
+      </Panel>
           </>
         : null}
     </PanelGroup>

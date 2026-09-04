@@ -322,7 +322,7 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     }
     const path = resolveInside(root, normalized)
     await assertParentChainContainsNoLinks(root, path)
-    await mkdir(resolve(path, ".."), { recursive: true })
+    await this.ensureVolumeParentDirectory(root, normalized)
     await writeFile(path, content, { encoding: "utf8" })
   }
 
@@ -448,6 +448,33 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       await copyFile(copy.source, copy.target, constants.COPYFILE_EXCL)
     }
     return copies.length
+  }
+
+  /**
+   * Creating planning/chapter files must not silently mkdir a second folder for an
+   * already-used volume sequence (the explicit createVolume gate alone is not enough).
+   */
+  private async ensureVolumeParentDirectory(root: string, relativeFilePath: string): Promise<void> {
+    const normalized = relativeFilePath.replaceAll("\\", "/")
+    const slash = normalized.lastIndexOf("/")
+    if (slash <= 0) {
+      throw new Error(`Invalid planning path without volume parent: ${normalized}`)
+    }
+    const parentRelative = normalized.slice(0, slash)
+    const parentAbsolute = resolveInside(root, parentRelative)
+    let parentExists = false
+    try {
+      await lstat(parentAbsolute)
+      parentExists = true
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error
+    }
+    if (!parentExists && isVolumeDirectoryPath(parentRelative)) {
+      const folderName = parentRelative.slice("章节正文/".length)
+      const existing = await this.listVolumeFolderNames(root)
+      assertVolumeSequenceAvailable(folderName, existing)
+    }
+    await mkdir(parentAbsolute, { recursive: true })
   }
 }
 

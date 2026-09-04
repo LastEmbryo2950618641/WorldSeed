@@ -219,6 +219,7 @@ const phaseInternalArtifactDependencies = {
   revision_review: [],
   revision_assist: [],
   synopsis_discuss: [],
+  work_naming: [],
 } as const satisfies Record<AIPhase, readonly AIPhase[]>
 
 const phaseModelArtifactDependencies = {

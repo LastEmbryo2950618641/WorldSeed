@@ -248,6 +248,13 @@ function MarkdownEditor(props: {
           scrollBeyondLastLine: false,
           renderLineHighlight: "gutter",
           overviewRulerBorder: false,
+          // Novel Markdown uses fullwidth indent (U+3000) and CJK punctuation; Monaco's
+          // unicodeHighlight draws yellow boxes that look like editor bugs.
+          unicodeHighlight: {
+            ambiguousCharacters: false,
+            invisibleCharacters: false,
+            nonBasicASCII: false,
+          },
         }}
       />
 }
@@ -879,6 +886,11 @@ function ChapterRevisionEditor(props: {
                       scrollBeyondLastLine: false,
                       renderLineHighlight: "gutter",
                       overviewRulerBorder: false,
+                      unicodeHighlight: {
+                        ambiguousCharacters: false,
+                        invisibleCharacters: false,
+                        nonBasicASCII: false,
+                      },
                       ...(props.dockToolbar
                         ? {
                             scrollbar: {

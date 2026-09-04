@@ -8,6 +8,7 @@ import type {
   RuntimeMetricsSnapshot,
   TaskStatus,
 } from "@worldseed/contracts"
+import { PROTOCOL_VERSION } from "@worldseed/contracts"
 
 import {
   TurnOrchestrator,
@@ -20,6 +21,7 @@ import {
   SettingsLineageService,
   StagingPromoteService,
   SynopsisConversationService,
+  WorkNameSuggestService,
   ChapterTemporalSourceResolver,
   buildSourceUnitExactKeys,
   HistoryManifestBuilder,
@@ -30,6 +32,7 @@ import {
   type PromptResourcePort,
 } from "../application/index.js"
 import type { InternalProjectStore, WorkspacePort, InternalStorePort } from "../application/workspace/index.js"
+import { PROJECT_MANIFEST_VERSION, digest } from "../core/index.js"
 import { NodeWorkspaceAdapter, NodeWorkspaceCatalogAdapter, NodeWorkspaceSnapshotAdapter } from "../infrastructure/filesystem/index.js"
 import { IsomorphicGitHistoryAdapter } from "../infrastructure/history-git/index.js"
 import {
@@ -144,6 +147,10 @@ export class ProjectRuntime {
     return this.taskScopes.listRecoverableTasks(this.projectId)
   }
 
+  public findLatestTask(): Promise<StoredTask | undefined> {
+    return this.taskScopes.findLatestTask(this.projectId)
+  }
+
   public recoverStaleRunningTasks(
     activeTaskIds: readonly string[],
     updatedAtMs: number,
@@ -165,8 +172,41 @@ export class ProjectRuntime {
     const name = displayName.trim()
     if (name.length === 0) throw new Error("作品名不能为空")
     const repository = new SqliteProjectRepository(this.database, this.workspaceRootRef, this.internalStore.internalStoreRef)
-    await repository.updateName(this.projectId, name, updatedAtMs)
+    const manifest = await repository.readManifest(this.projectId)
+    if (manifest === undefined) {
+      throw new Error(`Project does not exist: ${this.projectId}`)
+    }
+    const workspaceReport = await this.workspace.validate(this.workspaceRootRef)
+    const manifestDigest = digest({
+      protocolVersion: PROTOCOL_VERSION,
+      manifestVersion: PROJECT_MANIFEST_VERSION,
+      fixedEntries: manifest.fixedEntries,
+      projectId: this.projectId,
+      displayName: name,
+      workspaceRootRef: this.workspaceRootRef,
+      internalStoreRef: this.internalStore.internalStoreRef,
+      baseRulesDigest: workspaceReport.baseRulesDigest,
+    })
+    await repository.updateName(this.projectId, name, updatedAtMs, manifestDigest)
     return name
+  }
+
+  public async readDisplayName(): Promise<string> {
+    const repository = new SqliteProjectRepository(this.database, this.workspaceRootRef, this.internalStore.internalStoreRef)
+    const manifest = await repository.readManifest(this.projectId)
+    return manifest?.displayName.trim() || "新建作品"
+  }
+
+  public createWorkNameSuggestService(): WorkNameSuggestService {
+    return new WorkNameSuggestService({
+      workspace: this.workspace,
+      chapters: this.createChapterRevisionService(),
+      conversation: new SqliteSynopsisConversationRepository(this.database),
+      prompts: this.createPromptResourcePort(),
+      readDisplayName: () => this.readDisplayName(),
+      createId: randomUUID,
+      now: Date.now,
+    })
   }
 
   public async saveSettings(settings: ProjectSettings): Promise<ProjectSettings> {
@@ -505,6 +545,8 @@ export class ProjectRuntime {
       prompts: this.createPromptResourcePort(),
       webResearch: createDefaultWebResearchPort(),
       readProjectSettings: () => this.readSettings(),
+      readDisplayName: () => this.readDisplayName(),
+      renameDisplayName: (displayName) => this.renameDisplayName(displayName),
       readTurnMonitor: async () => {
         const row = await this.database.selectFrom("tasks")
           .select(["id", "status", "last_phase"])

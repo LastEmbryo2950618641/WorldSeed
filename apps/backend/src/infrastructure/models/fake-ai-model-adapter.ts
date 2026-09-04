@@ -167,6 +167,27 @@ export class FakeAiModelAdapter implements AIModelPort {
           volumeFolderName: "第一卷 世界种子",
           continuityEvidenceRefs: [],
         }
+      case "work_naming": {
+        const current = typeof input.workNaming?.currentDisplayName === "string"
+          ? input.workNaming.currentDisplayName.trim()
+          : "新建作品"
+        const avoid = new Set((input.workNaming?.avoidNames ?? []).map((entry) => entry.trim()))
+        const seed = input.workNaming?.volumeNames?.[0]
+          ?? input.workNaming?.chapterHeadings?.[0]
+          ?? "潮声纪"
+        let displayName = seed.slice(0, 200)
+        if (displayName === current || avoid.has(displayName) || displayName.length === 0) {
+          displayName = `${seed}录`.slice(0, 200)
+        }
+        if (displayName === current || avoid.has(displayName)) {
+          displayName = `新${seed}`.slice(0, 200)
+        }
+        return {
+          displayName,
+          alternatives: [`${displayName}外传`, `${displayName}前传`].filter((entry) => entry !== displayName).slice(0, 5),
+          finalSelfReview: "The deterministic fixture returns a fresh work title distinct from the current name.",
+        }
+      }
       case "dependency_audit":
         return {
           missingDependencies: [],
@@ -629,9 +650,19 @@ export class FakeAiModelAdapter implements AIModelPort {
   private createSynopsisDiscussArtifact(input: TurnPhaseInput): {
     assistantMessage: string
     chapterTitle?: string
+    workDisplayName?: string
     synopsisBody?: string
-    choices?: Array<{ label: string; action: "start_turn" | "continue_discuss" | "promote_staging" | "confirm_arc_plan" }>
+    choices?: Array<{
+      label: string
+      action: "start_turn" | "continue_discuss" | "promote_staging" | "confirm_arc_plan" | "confirm_synopsis"
+    }>
     goalProposals?: Array<{ payload: { kind: string; [key: string]: unknown }; reason?: string }>
+    outlineBody?: string
+    bodyEdits?: {
+      target: "outline"
+      baseDigest?: string
+      ops: Array<{ oldText: string; newText: string }>
+    }
     stagingDelta?: {
       notes?: Array<{
         entryId?: string
@@ -669,7 +700,7 @@ export class FakeAiModelAdapter implements AIModelPort {
     const discuss = input.synopsisDiscuss
     const userMessage = input.userInput.trim()
     const wantsRefreshChoices = /换一批决策选项|静默刷新/u.test(userMessage)
-    const wantsPromote = !wantsRefreshChoices && /确认落盘|落盘到设定集/u.test(userMessage)
+    const wantsPromote = !wantsRefreshChoices && /确认落盘|落盘到设定集|把草案写入设定集/u.test(userMessage)
     const wantsArcPlan = !wantsRefreshChoices && /先落大纲|弧线规划|分几章|多章/u.test(userMessage)
     const isHandoff = discuss?.discussTrigger === "turn_handoff"
     const chapterSequence = discuss?.chapterSequence ?? 1
@@ -703,23 +734,95 @@ export class FakeAiModelAdapter implements AIModelPort {
           },
           reason: "根据讨论建议本章 planned 进展",
         }))
+    const wantsRename = /作品名|书名|改名|起名|换个(?:作品)?名/u.test(userMessage)
+    const currentWorkName = discuss?.currentWorkDisplayName?.trim() || "新建作品"
+    const shouldNameWork = wantsRename || currentWorkName === "新建作品"
+    const workDisplayName = shouldNameWork
+      ? (chapterTitle === "世界种子" ? "潮声纪" : chapterTitle.slice(0, 200))
+      : undefined
+    const synopsisConfirmed = discuss?.synopsisConfirmed === true
+      || /用这份梗概写细纲|确认(?:本章)?梗概|开始写细纲/u.test(userMessage)
+    const existingOutline = discuss?.outlineMarkdown?.trim() ?? ""
+    const hasExistingOutline = existingOutline.length > 0
+    const wantsFullOutlineRewrite = /整篇重写细纲|重写整份细纲|全量重写细纲/u.test(userMessage)
+    const useBodyEdits = synopsisConfirmed
+      && hasExistingOutline
+      && !wantsFullOutlineRewrite
+      && !wantsPromote
+      && !isHandoff
+      && !wantsArcPlan
+    const outlineAnchor = "### 场 2 推进"
+    const outlineBody = [
+      `# ${synopsisHeading}（剧情细纲）`,
+      "",
+      "## 章定位",
+      "承接上一章余波；本章必须改变主角对局势的判断；结束时留下可推进的行动线索。推演从本章落点写起，不重述梗概场景链。",
+      "",
+      "## 人物与关系",
+      `- 主角：沿用既有性格；围绕「${userMessage.slice(0, 40)}」的选择须体现其动机与恐惧，台词不可与配角互换。`,
+      "",
+      "## 格局",
+      "本节：无外部势力；当场力量=谁掌握关键信息/承诺即可推进。",
+      "",
+      "## 分场节拍",
+      "### 场 1 开场",
+      "地点：关键场景；在场：主角；张力：处境压力；信息进出：只揭示必要边界；场末：被迫表态。",
+      "### 场 2 推进",
+      "地点：冲突升级处；在场：对立方；张力：利益碰撞；信息进出：放出一条可控情报；场末：代价显现。",
+      "### 场 3 落点",
+      "地点：收束场；在场：核心人物；张力：选择落地；信息进出：守住未可揭示部分；场末：通向下一章。",
+      "",
+      "## 信息边界",
+      "可揭示：局面压力与人物选择；不可揭示：最终真相与远期伏笔答案。",
+      "",
+      "## 与推演目标",
+      "本章无已登记目标则不新造高潮/伏笔账；有 activeGoals 时仅引用其 goalId。",
+      "",
+      "## 风险与待决",
+      "若用户未确认设定写入，人物档案仍以暂存为准。",
+    ].join("\n")
+    const bodyEdits = useBodyEdits
+      ? {
+          target: "outline" as const,
+          ...(discuss?.outlineDigest === undefined ? {} : { baseDigest: discuss.outlineDigest }),
+          ops: [{
+            oldText: existingOutline.includes(outlineAnchor)
+              ? `${outlineAnchor}\n地点：冲突升级处；在场：对立方；张力：利益碰撞；信息进出：放出一条可控情报；场末：代价显现。`
+              : existingOutline.slice(0, Math.min(80, existingOutline.length)),
+            newText: existingOutline.includes(outlineAnchor)
+              ? `${outlineAnchor}\n地点：冲突升级处；在场：对立方；张力：利益碰撞（按用户要求收紧）；信息进出：放出一条可控情报；场末：代价显现且立场更清晰。`
+              : `${existingOutline.slice(0, Math.min(80, existingOutline.length))}（局部修订）`,
+          }],
+        }
+      : undefined
     const stagingEntryId = "staging-note-1"
     return {
       assistantMessage: isHandoff
         ? "已收到推演交接。我已对照正文摘要更新弧大纲与下一章建议，不会自动开始正式推演。"
         : wantsPromote
-        ? "我已整理待落盘设定草案。请点击「确认落盘到设定集与目标」完成写入；推演目标仍会以提案形式等待你二次采纳。"
+        ? "我已整理待写入设定草案。请点击「把草案写入设定集」完成写入；推演目标仍会以提案形式等待你二次采纳。"
         : wantsArcPlan
           ? "这段更适合先落弧大纲。我已写入弧线规划，并给出本章目的；完整梗概仍按当前下一章处理。"
+        : useBodyEdits
+          ? `已按讨论局部更新「${synopsisHeading}」的剧情细纲（未整篇重写）。`
+        : synopsisConfirmed
+          ? `梗概已确认。我已写入「${synopsisHeading}」的剧情细纲（分场节拍与信息边界），可继续改细纲或开始推演。`
         : discuss?.userEditedSinceAgent === true
           ? "我看到你手工调整过梗概，本轮我只在对话里回应，没有覆盖文件。若需要我重写梗概，请明确说明。"
           : settingsIndexEvidence === undefined
-            ? `我已更新「${synopsisHeading}」的剧情梗概。你可以继续修改，或在满意后点击「开始推演」。`
-            : `我已对照设定集索引整理「${synopsisHeading}」的剧情梗概。你可以继续修改，或在满意后点击「开始推演」。`,
-      ...(discuss?.userEditedSinceAgent === true || wantsPromote || isHandoff ? {} : { chapterTitle, synopsisBody }),
+            ? `我已更新「${synopsisHeading}」的剧情梗概。这是定本章方向，不是写入设定集；可选用这份梗概写细纲，或跳过细纲按梗概开推。`
+            : `我已对照设定集索引整理「${synopsisHeading}」的剧情梗概。这是定本章方向，不是写入设定集；可选用这份梗概写细纲，或跳过细纲按梗概开推。`,
+      ...(discuss?.userEditedSinceAgent === true || wantsPromote || isHandoff || synopsisConfirmed
+        ? {}
+        : { chapterTitle, synopsisBody }),
+      ...(synopsisConfirmed && !wantsPromote && !isHandoff && !wantsArcPlan && !useBodyEdits
+        ? { outlineBody }
+        : {}),
+      ...(bodyEdits === undefined ? {} : { bodyEdits }),
+      ...(workDisplayName === undefined || workDisplayName === currentWorkName ? {} : { workDisplayName }),
       choices: wantsPromote
         ? [
-            { label: "确认落盘到设定集与目标", action: "promote_staging" as const },
+            { label: "把草案写入设定集", action: "promote_staging" as const },
             { label: "再修改梗概", action: "continue_discuss" as const },
           ]
         : wantsArcPlan
@@ -735,11 +838,16 @@ export class FakeAiModelAdapter implements AIModelPort {
               { label: "命运偶遇：陌生人递来一把钥匙", action: "continue_discuss" as const },
               { label: "先落一个三章大纲再定基调", action: "confirm_arc_plan" as const },
             ]
-          : [
-            { label: "按当前梗概开始正式推演", action: "start_turn" as const },
-            { label: "再修改梗概", action: "continue_discuss" as const },
-            { label: "确认落盘到设定集与目标", action: "promote_staging" as const },
-          ],
+          : synopsisConfirmed
+            ? [
+              { label: "按当前细纲开始正式推演", action: "start_turn" as const },
+              { label: "再修改细纲", action: "continue_discuss" as const },
+            ]
+            : [
+              { label: "用这份梗概写细纲", action: "confirm_synopsis" as const },
+              { label: "跳过细纲，按梗概开推", action: "start_turn" as const },
+              { label: "再修改梗概", action: "continue_discuss" as const },
+            ],
       ...(wantsPromote || isHandoff ? {} : { goalProposals }),
       ...(wantsArcPlan || isHandoff
         ? {
@@ -796,11 +904,15 @@ export class FakeAiModelAdapter implements AIModelPort {
             },
           }
         : {}),
-      finalSelfReview: wantsPromote
+      finalSelfReview: useBodyEdits
+        ? "Applied local bodyEdits against the existing outline instead of rewriting outlineBody."
+        : synopsisConfirmed
+        ? "Confirmed synopsis gate passed; returned a structured outlineBody."
+        : wantsPromote
         ? "Prepared staging promote proposal for user confirmation; did not write settings yet."
         : isHandoff
           ? "Completed turn handoff analysis without beginTurn."
-        : "Discussed synopsis without auto-starting a turn; emitted goal proposals for user approval.",
+        : "Returned synopsis-level draft and confirm_synopsis choice without outlineBody.",
     }
   }
 }

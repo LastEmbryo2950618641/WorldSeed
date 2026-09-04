@@ -44,6 +44,111 @@ describe("model reference view", () => {
     expect(modelInput.validationArtifacts).toBeUndefined()
     expect(stageProjection.pendingScope).toEqual({ candidateDigest: "candidate-digest" })
   })
+
+  it("aliases synopsisDiscuss goalIds and strips turnMonitor.taskId", () => {
+    const goalId = "0b85e5ca-8976-4f22-af48-397d1d2a69cf"
+    const taskId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    const request = createRequest({ readId: "evidence_1" })
+    const input = request.input as Record<string, unknown>
+    input.workflow = "synopsis"
+    input.synopsisDiscuss = {
+      heading: "第1章",
+      chapterSequence: 1,
+      synopsisMarkdown: "草稿",
+      userEditedSinceAgent: false,
+      conversationHistory: [],
+      activeGoals: [{
+        goalId,
+        content: "王旗未立前先稳住欧几里得",
+        lifecycle: "active",
+        narrativeKind: "climax",
+        scale: "short",
+      }],
+      chapterProgress: [{
+        goalId,
+        chapterSequence: 1,
+        summary: "本章推向对峙",
+        status: "planned",
+      }],
+      turnMonitor: {
+        taskId,
+        status: "running",
+        phases: [{ phase: "interpret", status: "completed", summary: "已理解" }],
+      },
+    }
+
+    const view = createModelReferenceView(request)
+    const modelInput = (view.request as { input: Record<string, unknown> }).input
+    const discuss = modelInput.synopsisDiscuss as {
+      activeGoals: Array<{ goalId: string }>
+      chapterProgress: Array<{ goalId: string }>
+      turnMonitor: { status: string; taskId?: string }
+    }
+
+    expect(discuss.activeGoals[0]?.goalId).toBe("goal-1")
+    expect(discuss.chapterProgress[0]?.goalId).toBe("goal-1")
+    expect(discuss.turnMonitor.status).toBe("running")
+    expect(discuss.turnMonitor.taskId).toBeUndefined()
+    expect(view.restore({ goalId: "goal-1" })).toEqual({ goalId })
+  })
+
+  it("aliases deductionGoalBundle goalIds and strips project/progress technical ids", () => {
+    const goalId = "0b85e5ca-8976-4f22-af48-397d1d2a69cf"
+    const projectId = "11111111-1111-4111-8111-111111111111"
+    const progressId = "22222222-2222-4222-8222-222222222222"
+    const request = createRequest({ readId: "evidence_1" })
+    const input = request.input as Record<string, unknown>
+    input.deductionGoalBundle = {
+      chapterSequence: 1,
+      activeGoals: [{
+        goalId,
+        projectId,
+        content: "稳住欧几里得",
+        source: "agent",
+        lifecycle: "active",
+        narrativeKind: "climax",
+        scale: "short",
+        createdAtMs: 1,
+        updatedAtMs: 1,
+      }],
+      chapterProgress: [{
+        progressId,
+        projectId,
+        goalId,
+        chapterSequence: 1,
+        summary: "推向对峙",
+        status: "planned",
+        source: "synopsis_discuss",
+        recordedAtMs: 1,
+        lockedAtMs: 10,
+      }],
+    }
+
+    const view = createModelReferenceView(request)
+    const modelInput = (view.request as { input: Record<string, unknown> }).input
+    const bundle = modelInput.deductionGoalBundle as {
+      activeGoals: Array<Record<string, unknown>>
+      chapterProgress: Array<Record<string, unknown>>
+    }
+
+    expect(bundle.activeGoals[0]).toEqual({
+      goalId: "goal-1",
+      content: "稳住欧几里得",
+      source: "agent",
+      lifecycle: "active",
+      narrativeKind: "climax",
+      scale: "short",
+    })
+    expect(bundle.chapterProgress[0]).toEqual({
+      goalId: "goal-1",
+      chapterSequence: 1,
+      summary: "推向对峙",
+      status: "planned",
+      source: "synopsis_discuss",
+      lockedAtMs: 10,
+    })
+    expect(view.restore({ goalId: "goal-1" })).toEqual({ goalId })
+  })
 })
 
 function createRequest(evidence: Record<string, unknown>): PhaseRequestEnvelope {

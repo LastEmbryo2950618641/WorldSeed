@@ -49,6 +49,7 @@ export interface TaskScopeRepository {
   assertCurrentGeneration(scopeId: ScopeId): Promise<void>
   findTask(taskId: string): Promise<StoredTask | undefined>
   listRecoverableTasks(projectId: ProjectId): Promise<readonly StoredTask[]>
+  findLatestTask(projectId: ProjectId): Promise<StoredTask | undefined>
   recoverStaleRunningTasks(input: RecoverStaleRunningTasksInput): Promise<readonly StoredTask[]>
 }
 

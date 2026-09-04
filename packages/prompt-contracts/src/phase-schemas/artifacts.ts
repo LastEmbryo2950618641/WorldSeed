@@ -624,12 +624,35 @@ export const synopsisDiscussArtifactSchema = z.object({
       message: "volumeFolderName 必须为「第N卷 标题」形式（例如「第一卷 潮水退去时」）",
     },
   ).optional(),
+  /**
+   * Project/work display name (作品名), not chapter or volume title.
+   * Applied via project.rename when present.
+   */
+  workDisplayName: z.string().trim().min(1).max(200).optional(),
   synopsisBody: z.string().min(1).optional(),
   /** Full chapter outline markdown (`…[剧情细纲].md`); preferred turn bootstrap when present. */
   outlineBody: z.string().min(1).optional(),
+  /**
+   * Exact unique search/replace ops against the current outline file (v1: outline only).
+   * Mutually exclusive with `outlineBody` in the same artifact.
+   */
+  bodyEdits: z.object({
+    target: z.literal("outline"),
+    baseDigest: z.string().min(1).optional(),
+    ops: z.array(z.object({
+      oldText: z.string().min(1).max(20_000),
+      newText: z.string().max(40_000),
+    })).min(1).max(20),
+  }).optional(),
   choices: z.array(z.object({
     label: z.string().min(1),
-    action: z.enum(["start_turn", "continue_discuss", "promote_staging", "confirm_arc_plan"]),
+    action: z.enum([
+      "start_turn",
+      "continue_discuss",
+      "promote_staging",
+      "confirm_arc_plan",
+      "confirm_synopsis",
+    ]),
   })).optional(),
   goalProposals: z.array(synopsisDiscussGoalProposalSchema).optional(),
   stagingDelta: synopsisStagingDeltaSchema.optional(),
@@ -645,6 +668,21 @@ export const synopsisDiscussArtifactSchema = z.object({
       purpose: z.string().min(1).max(500),
     })).max(30).optional(),
   }).optional(),
+  finalSelfReview: z.string().min(1),
+}).superRefine((value, ctx) => {
+  if (value.outlineBody !== undefined && value.bodyEdits !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "outlineBody 与 bodyEdits 不可同回并存；局部改用 bodyEdits，整篇重写用 outlineBody",
+      path: ["bodyEdits"],
+    })
+  }
+})
+
+/** One-shot book/work title suggestion for the title bar refresh control. */
+export const workNamingArtifactSchema = z.object({
+  displayName: z.string().trim().min(1).max(200),
+  alternatives: z.array(z.string().trim().min(1).max(200)).max(5).optional(),
   finalSelfReview: z.string().min(1),
 })
 
@@ -700,6 +738,7 @@ export const phaseArtifactSchemas: Record<AIPhase, z.ZodType> = {
   revision_review: revisionReviewArtifactSchema,
   revision_assist: revisionAssistArtifactSchema,
   synopsis_discuss: synopsisDiscussArtifactSchema,
+  work_naming: workNamingArtifactSchema,
 }
 
 export function phaseArtifactJsonSchema(phase: AIPhase): unknown {

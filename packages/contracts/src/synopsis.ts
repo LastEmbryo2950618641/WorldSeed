@@ -18,7 +18,13 @@ export type ChapterSynopsisSource = z.infer<typeof chapterSynopsisSourceSchema>
 
 export const synopsisConversationChoiceSchema = z.object({
   label: z.string().min(1),
-  action: z.enum(["start_turn", "continue_discuss", "promote_staging", "confirm_arc_plan"]),
+  action: z.enum([
+    "start_turn",
+    "continue_discuss",
+    "promote_staging",
+    "confirm_arc_plan",
+    "confirm_synopsis",
+  ]),
 })
 export type SynopsisConversationChoice = z.infer<typeof synopsisConversationChoiceSchema>
 
@@ -85,12 +91,52 @@ export const synopsisConversationSessionSchema = z.object({
   synopsisPath: z.string().min(1),
   title: z.string().min(1),
   lastAgentDigest: z.string().min(1).optional(),
+  /** Digest of last Agent-written outline markdown; used to detect user hand-edits. */
+  lastOutlineAgentDigest: z.string().min(1).optional(),
   turnBootstrapInput: z.string().optional(),
+  synopsisConfirmedAtMs: z.number().int().nonnegative().optional(),
   status: z.enum(["active", "completed"]),
   createdAtMs: z.number().int().nonnegative(),
   updatedAtMs: z.number().int().nonnegative(),
 })
 export type SynopsisConversationSession = z.infer<typeof synopsisConversationSessionSchema>
+
+export const synopsisConversationStreamSearchSchema = z.object({
+  query: z.string().min(1),
+  status: z.enum(["running", "completed", "failed"]),
+  resultSummary: z.string().optional(),
+  asOfChapterSequence: z.number().int().positive().optional(),
+  temporalRole: z.enum(["as_of", "current"]).optional(),
+  /** 0=bootstrap；1..=各次 request_read 批。缺省=旧消息扁平列表。 */
+  round: z.number().int().nonnegative().optional(),
+})
+export type SynopsisConversationStreamSearch = z.infer<typeof synopsisConversationStreamSearchSchema>
+
+export const synopsisConversationThinkingRoundSchema = z.object({
+  round: z.number().int().nonnegative(),
+  text: z.string(),
+})
+export type SynopsisConversationThinkingRound = z.infer<typeof synopsisConversationThinkingRoundSchema>
+
+export const synopsisConversationStreamEditKindSchema = z.enum([
+  "synopsis",
+  "outline",
+  "body_edits",
+  "staging",
+  "arc_plan",
+  "presentation",
+])
+export type SynopsisConversationStreamEditKind = z.infer<typeof synopsisConversationStreamEditKindSchema>
+
+export const synopsisConversationStreamEditSchema = z.object({
+  path: z.string().min(1),
+  kind: synopsisConversationStreamEditKindSchema,
+  status: z.enum(["running", "completed", "failed"]),
+  summary: z.string().max(500).optional(),
+  opsApplied: z.number().int().nonnegative().optional(),
+  opsAttempted: z.number().int().nonnegative().optional(),
+})
+export type SynopsisConversationStreamEdit = z.infer<typeof synopsisConversationStreamEditSchema>
 
 export const synopsisConversationMessageSchema = z.object({
   messageId: idSchema,
@@ -99,27 +145,14 @@ export const synopsisConversationMessageSchema = z.object({
   role: z.enum(["user", "assistant", "system"]),
   content: z.string(),
   reasoningContent: z.string().optional(),
-  searching: z.array(z.object({
-    query: z.string().min(1),
-    status: z.enum(["running", "completed", "failed"]),
-    resultSummary: z.string().optional(),
-    asOfChapterSequence: z.number().int().positive().optional(),
-    temporalRole: z.enum(["as_of", "current"]).optional(),
-  })).optional(),
+  thinkingRounds: z.array(synopsisConversationThinkingRoundSchema).optional(),
+  searching: z.array(synopsisConversationStreamSearchSchema).optional(),
+  editing: z.array(synopsisConversationStreamEditSchema).optional(),
   choices: z.array(synopsisConversationChoiceSchema).optional(),
   hidden: z.boolean().optional(),
   createdAtMs: z.number().int().nonnegative(),
 })
 export type SynopsisConversationMessage = z.infer<typeof synopsisConversationMessageSchema>
-
-export const synopsisConversationStreamSearchSchema = z.object({
-  query: z.string().min(1),
-  status: z.enum(["running", "completed", "failed"]),
-  resultSummary: z.string().optional(),
-  asOfChapterSequence: z.number().int().positive().optional(),
-  temporalRole: z.enum(["as_of", "current"]).optional(),
-})
-export type SynopsisConversationStreamSearch = z.infer<typeof synopsisConversationStreamSearchSchema>
 
 export const synopsisConversationStreamUsageSchema = z.object({
   inputTokens: z.number().int().nonnegative().optional(),
@@ -141,8 +174,10 @@ export const synopsisConversationStreamSnapshotSchema = z.object({
   sessionId: idSchema.optional(),
   status: z.enum(["idle", "running", "completed", "failed"]),
   thinking: z.string().default(""),
+  thinkingRounds: z.array(synopsisConversationThinkingRoundSchema).default([]),
   content: z.string().default(""),
   searching: z.array(synopsisConversationStreamSearchSchema).default([]),
+  editing: z.array(synopsisConversationStreamEditSchema).default([]),
   usage: synopsisConversationStreamUsageSchema.optional(),
   budgetAdvisory: synopsisConversationBudgetAdvisorySchema.optional(),
   error: z.string().optional(),
@@ -153,12 +188,14 @@ export type SynopsisConversationStreamSnapshot = z.infer<typeof synopsisConversa
 export const synopsisConversationListResultSchema = z.object({
   session: synopsisConversationSessionSchema.optional(),
   messages: z.array(synopsisConversationMessageSchema),
+  usage: synopsisConversationStreamUsageSchema.optional(),
 })
 export type SynopsisConversationListResult = z.infer<typeof synopsisConversationListResultSchema>
 
 export const synopsisConversationStartResultSchema = z.object({
   session: synopsisConversationSessionSchema,
   messages: z.array(synopsisConversationMessageSchema),
+  usage: synopsisConversationStreamUsageSchema.optional(),
 })
 export type SynopsisConversationStartResult = z.infer<typeof synopsisConversationStartResultSchema>
 
@@ -169,6 +206,8 @@ export const synopsisConversationSendResultSchema = z.object({
   pendingStagingPromotes: z.array(synopsisStagingPromoteProposalSchema).optional(),
   budgetAdvisory: synopsisConversationBudgetAdvisorySchema.optional(),
   usage: synopsisConversationStreamUsageSchema.optional(),
+  /** Set when the discuss agent renamed the project/work display name. */
+  workDisplayName: z.string().trim().min(1).max(200).optional(),
 })
 export type SynopsisConversationSendResult = z.infer<typeof synopsisConversationSendResultSchema>
 

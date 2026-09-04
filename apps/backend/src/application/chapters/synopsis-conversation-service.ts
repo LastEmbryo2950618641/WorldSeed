@@ -10,7 +10,9 @@ import {
   type SynopsisConversationMessage,
   type SynopsisConversationSendResult,
   type SynopsisConversationStartResult,
+  type SynopsisConversationStreamEdit,
   type SynopsisConversationStreamSnapshot,
+  type SynopsisConversationStreamUsage,
   type SynopsisConversationBudgetAdvisory,
   type SynopsisConversationChoice,
   type SynopsisResolveTurnInputResult,
@@ -34,6 +36,7 @@ import {
   extractVolumeFolderNameFromPath,
   formatChapterSequenceLabel,
   digest,
+  pickPreferredVolumeFolderName,
   remapPathVolumeFolder,
   siblingPlanningMarkdownPath,
   validateSynopsisMarkdownPath,
@@ -67,6 +70,7 @@ import {
   recordSynopsisModelCall,
 } from "./synopsis-model-budget-tracker.js"
 import { normalizeThinkingDisplayText } from "./synopsis-thinking-text.js"
+import { applySearchReplace } from "./markdown-search-replace.js"
 import {
   executeSynopsisWebReads,
 } from "./synopsis-web-reads.js"
@@ -115,6 +119,8 @@ export type SynopsisConversationServiceDependencies = Readonly<{
   prompts: PromptResourcePort
   webResearch?: WebResearchPort
   readProjectSettings?: () => Promise<ProjectSettings>
+  readDisplayName?: () => Promise<string>
+  renameDisplayName?: (displayName: string) => Promise<string>
   readTurnMonitor?: () => Promise<Readonly<{
     taskId: string
     status: string
@@ -131,11 +137,21 @@ export class SynopsisConversationService {
     projectId: ProjectId
     workspaceRootRef: string
   }>): Promise<SynopsisConversationListResult> {
+    const usage = await this.hydrateDiscussUsage(input.projectId)
     const session = await this.dependencies.conversation.findActiveSession(input.projectId)
     const messages = await this.dependencies.conversation.listMessagesForProject(input.projectId)
-    if (session === undefined) return { messages: [...messages] }
+    if (session === undefined) {
+      return {
+        messages: [...messages],
+        ...(usage === undefined ? {} : { usage }),
+      }
+    }
     const reconciled = await this.reconcileSessionSynopsisPath(input.workspaceRootRef, session)
-    return { session: reconciled, messages: [...messages] }
+    return {
+      session: reconciled,
+      messages: [...messages],
+      ...(usage === undefined ? {} : { usage }),
+    }
   }
 
   public async start(input: Readonly<{
@@ -143,11 +159,16 @@ export class SynopsisConversationService {
     workspaceRootRef: string
     title?: string
   }>): Promise<SynopsisConversationStartResult> {
+    const usage = await this.hydrateDiscussUsage(input.projectId)
     const existing = await this.dependencies.conversation.findActiveSession(input.projectId)
     if (existing !== undefined) {
       const messages = await this.dependencies.conversation.listMessagesForProject(input.projectId)
       const reconciled = await this.reconcileSessionSynopsisPath(input.workspaceRootRef, existing)
-      return { session: reconciled, messages: [...messages] }
+      return {
+        session: reconciled,
+        messages: [...messages],
+        ...(usage === undefined ? {} : { usage }),
+      }
     }
     const fromIndex = await this.dependencies.chapters.nextChapterSequence(input.projectId)
     const maxSessionSequence = await this.dependencies.conversation.maxChapterSequence(input.projectId)
@@ -156,7 +177,10 @@ export class SynopsisConversationService {
     const title = input.title?.trim()
       || claimed?.title
       || ""
-    const synopsisPath = claimed?.path ?? deriveSynopsisMarkdownPath(chapterSequence, title)
+    const existingVolumes = await this.dependencies.workspace.listVolumeFolderNames(input.workspaceRootRef)
+    const preferredVolume = pickPreferredVolumeFolderName(existingVolumes) ?? DEFAULT_VOLUME_FOLDER_NAME
+    const synopsisPath = claimed?.path
+      ?? deriveSynopsisMarkdownPath(chapterSequence, title, preferredVolume)
     if (claimed === undefined) {
       const placeholder = assembleSynopsisPlaceholderDocument(chapterSequence, title)
       await this.dependencies.workspace.saveSynopsisMarkdown(input.workspaceRootRef, synopsisPath, placeholder)
@@ -179,7 +203,11 @@ export class SynopsisConversationService {
       claimed: claimed !== undefined,
     })
     const messages = await this.dependencies.conversation.listMessagesForProject(input.projectId)
-    return { session, messages: [...messages] }
+    return {
+      session,
+      messages: [...messages],
+      ...(usage === undefined ? {} : { usage }),
+    }
   }
 
   public peekStream(projectId: ProjectId, sessionId?: string): SynopsisConversationStreamSnapshot {
@@ -215,6 +243,7 @@ export class SynopsisConversationService {
   }>): Promise<SynopsisConversationSendResult> {
     const session = await this.ensureActiveSession(input.projectId, input.workspaceRootRef)
     clearSynopsisSendCancellation(input.projectId)
+    await this.hydrateDiscussUsage(input.projectId)
     // Reset stream hub before any further awaits so concurrent streamPeek cannot
     // resurface the previous turn's completed thinking/content.
     const streamStartedAtMs = this.dependencies.now()
@@ -224,7 +253,37 @@ export class SynopsisConversationService {
       const synopsisMarkdown = await this.readSynopsisFile(input.workspaceRootRef, session.synopsisPath)
       const synopsisDigest = digest(synopsisMarkdown)
       const userEditedSinceAgent = session.lastAgentDigest !== undefined && session.lastAgentDigest !== synopsisDigest
+      const outlinePathForRead = siblingPlanningMarkdownPath(session.synopsisPath, "outline")
+        ?? deriveOutlineMarkdownPath(
+          session.chapterSequence,
+          session.title,
+          extractVolumeFolderNameFromPath(session.synopsisPath) ?? DEFAULT_VOLUME_FOLDER_NAME,
+        )
+      const outlineMarkdown = await this.readSynopsisFile(input.workspaceRootRef, outlinePathForRead)
+      const outlineDigest = outlineMarkdown.trim().length === 0 ? undefined : digest(outlineMarkdown)
+      const userEditedOutlineSinceAgent = session.lastOutlineAgentDigest !== undefined
+        && outlineDigest !== undefined
+        && session.lastOutlineAgentDigest !== outlineDigest
+      const confirmingSynopsis = isConfirmSynopsisUserMessage(input.message)
       const nowMs = this.dependencies.now()
+      let synopsisConfirmedAtMs = session.synopsisConfirmedAtMs
+      if (userEditedSinceAgent && !confirmingSynopsis && synopsisConfirmedAtMs !== undefined) {
+        synopsisConfirmedAtMs = undefined
+        await this.dependencies.conversation.updateSession({
+          sessionId: session.sessionId,
+          synopsisConfirmedAtMs: null,
+          updatedAtMs: nowMs,
+        })
+      }
+      if (confirmingSynopsis && synopsisConfirmedAtMs === undefined) {
+        synopsisConfirmedAtMs = nowMs
+        await this.dependencies.conversation.updateSession({
+          sessionId: session.sessionId,
+          synopsisConfirmedAtMs: nowMs,
+          updatedAtMs: nowMs,
+        })
+      }
+      const synopsisConfirmed = synopsisConfirmedAtMs !== undefined
       const goalsSnapshot = await this.dependencies.goals.list(input.projectId)
       const activeGoals = selectGoalsForChapterContext(goalsSnapshot.goals, session.chapterSequence)
       const chapterProgress = goalsSnapshot.progress.filter(
@@ -238,6 +297,9 @@ export class SynopsisConversationService {
         content: input.message,
         createdAtMs: nowMs,
       })
+      const currentWorkDisplayName = this.dependencies.readDisplayName === undefined
+        ? undefined
+        : await this.dependencies.readDisplayName()
       const assist = await this.runSynopsisDiscuss({
         projectId: input.projectId,
         workspaceRootRef: input.workspaceRootRef,
@@ -246,7 +308,12 @@ export class SynopsisConversationService {
         heading: session.title,
         chapterSequence: session.chapterSequence,
         synopsisMarkdown,
+        outlineMarkdown,
+        ...(outlineDigest === undefined ? {} : { outlineDigest }),
         userEditedSinceAgent,
+        userEditedOutlineSinceAgent,
+        synopsisConfirmed,
+        ...(currentWorkDisplayName === undefined ? {} : { currentWorkDisplayName }),
         conversationHistory: priorMessages.map((message) => ({
           role: message.role === "assistant" ? "assistant" as const : "user" as const,
           content: message.content,
@@ -271,6 +338,10 @@ export class SynopsisConversationService {
       let synopsisPath = session.synopsisPath
       let sessionTitle = session.title
       let lastAgentDigest = session.lastAgentDigest
+      let lastOutlineAgentDigest = session.lastOutlineAgentDigest
+      let wroteSynopsisBody = false
+      let nextSynopsisConfirmedAtMs = synopsisConfirmedAtMs
+      const writeNotices: string[] = []
       const currentVolume = extractVolumeFolderNameFromPath(synopsisPath) ?? DEFAULT_VOLUME_FOLDER_NAME
       const volumeFromAssist = assist.volumeFolderName === undefined
         ? undefined
@@ -293,10 +364,17 @@ export class SynopsisConversationService {
         volumeCleanupFolder = volumeChange.cleanupEmptyFolderName
       }
       if (assist.synopsisBody !== undefined && !userEditedSinceAgent) {
+        wroteSynopsisBody = true
         const resolvedTitle = assist.chapterTitle?.trim()
           ?? extractSynopsisTitleFromDocument(assist.synopsisBody)
         if (resolvedTitle !== undefined && resolvedTitle.length > 0) {
           const nextPath = deriveSynopsisMarkdownPath(session.chapterSequence, resolvedTitle, nextVolume)
+          this.emitDiscussEdit(input.projectId, {
+            path: nextPath,
+            kind: "synopsis",
+            status: "running",
+            summary: "正在写入剧情梗概",
+          })
           if (nextPath !== synopsisPath) {
             await this.dependencies.workspace.saveSynopsisMarkdown(
               input.workspaceRootRef,
@@ -319,12 +397,24 @@ export class SynopsisConversationService {
             )
             sessionTitle = resolvedTitle
           }
+          this.emitDiscussEdit(input.projectId, {
+            path: synopsisPath,
+            kind: "synopsis",
+            status: "completed",
+            summary: "已写入剧情梗概",
+          })
         } else {
           const nextPath = deriveSynopsisMarkdownPath(
             session.chapterSequence,
             sessionTitle,
             nextVolume,
           )
+          this.emitDiscussEdit(input.projectId, {
+            path: nextPath,
+            kind: "synopsis",
+            status: "running",
+            summary: "正在写入剧情梗概",
+          })
           if (nextPath !== synopsisPath) {
             await this.dependencies.workspace.saveSynopsisMarkdown(
               input.workspaceRootRef,
@@ -345,9 +435,22 @@ export class SynopsisConversationService {
               assist.synopsisBody,
             )
           }
+          this.emitDiscussEdit(input.projectId, {
+            path: synopsisPath,
+            kind: "synopsis",
+            status: "completed",
+            summary: "已写入剧情梗概",
+          })
         }
         lastAgentDigest = digest(assist.synopsisBody)
       } else if (assist.synopsisBody !== undefined && userEditedSinceAgent) {
+        writeNotices.push("你刚改过梗概文件，本轮未覆盖梗概。若要以我这版为准，请明确说「用我这版覆盖你的手改」。")
+        this.emitDiscussEdit(input.projectId, {
+          path: synopsisPath,
+          kind: "synopsis",
+          status: "failed",
+          summary: "未落盘：你刚改过梗概文件",
+        })
         runtimeLog("debug", "synopsis-conversation", "skipped-agent-overwrite", {
           projectId: input.projectId,
           sessionId: session.sessionId,
@@ -375,64 +478,227 @@ export class SynopsisConversationService {
         }
       }
 
-      if (assist.outlineBody !== undefined) {
-        const outlinePath = siblingPlanningMarkdownPath(synopsisPath, "outline")
-          ?? deriveOutlineMarkdownPath(
-            session.chapterSequence,
-            sessionTitle,
-            extractVolumeFolderNameFromPath(synopsisPath) ?? DEFAULT_VOLUME_FOLDER_NAME,
-          )
-        await this.dependencies.workspace.saveSynopsisMarkdown(
-          input.workspaceRootRef,
-          outlinePath,
-          assist.outlineBody,
+      const outlineWriteAllowed = synopsisConfirmed || confirmingSynopsis
+      const outlinePath = siblingPlanningMarkdownPath(synopsisPath, "outline")
+        ?? deriveOutlineMarkdownPath(
+          session.chapterSequence,
+          sessionTitle,
+          extractVolumeFolderNameFromPath(synopsisPath) ?? DEFAULT_VOLUME_FOLDER_NAME,
         )
+      if (assist.bodyEdits !== undefined) {
+        this.emitDiscussEdit(input.projectId, {
+          path: outlinePath,
+          kind: "body_edits",
+          status: "running",
+          summary: "正在局部更新细纲",
+          opsAttempted: assist.bodyEdits.ops.length,
+        })
+        if (!outlineWriteAllowed) {
+          writeNotices.push("细纲尚未确认可写：本轮 bodyEdits 未落盘。请先点「用这份梗概写细纲」。")
+          this.emitDiscussEdit(input.projectId, {
+            path: outlinePath,
+            kind: "body_edits",
+            status: "failed",
+            summary: "未落盘：细纲尚未确认可写",
+            opsAttempted: assist.bodyEdits.ops.length,
+            opsApplied: 0,
+          })
+          runtimeLog("debug", "synopsis-conversation", "outline-edits-blocked-until-synopsis-confirmed", {
+            projectId: input.projectId,
+            sessionId: session.sessionId,
+          })
+        } else if (userEditedOutlineSinceAgent) {
+          writeNotices.push("你刚改过细纲文件，本轮未应用局部编辑。若要以我这版为准，请明确说「用我这版覆盖你的手改」。")
+          this.emitDiscussEdit(input.projectId, {
+            path: outlinePath,
+            kind: "body_edits",
+            status: "failed",
+            summary: "未落盘：你刚改过细纲文件",
+            opsAttempted: assist.bodyEdits.ops.length,
+            opsApplied: 0,
+          })
+        } else {
+          const currentOutline = await this.readSynopsisFile(input.workspaceRootRef, outlinePath)
+          if (currentOutline.trim().length === 0) {
+            writeNotices.push("细纲文件尚不存在或为空，无法局部编辑；请先输出完整 outlineBody。")
+            this.emitDiscussEdit(input.projectId, {
+              path: outlinePath,
+              kind: "body_edits",
+              status: "failed",
+              summary: "未落盘：细纲为空或不存在",
+              opsAttempted: assist.bodyEdits.ops.length,
+              opsApplied: 0,
+            })
+          } else if (
+            assist.bodyEdits.baseDigest !== undefined
+            && digest(currentOutline) !== assist.bodyEdits.baseDigest
+          ) {
+            writeNotices.push("细纲已变化（baseDigest 不匹配），本轮 bodyEdits 未落盘。请基于最新细纲重抄 oldText，或改吐全量 outlineBody。")
+            this.emitDiscussEdit(input.projectId, {
+              path: outlinePath,
+              kind: "body_edits",
+              status: "failed",
+              summary: "未落盘：baseDigest 不匹配",
+              opsAttempted: assist.bodyEdits.ops.length,
+              opsApplied: 0,
+            })
+          } else {
+            const applied = applySearchReplace(currentOutline, assist.bodyEdits.ops)
+            if (!applied.ok) {
+              writeNotices.push(`${applied.reason}；细纲未改盘。请重贴锚点或改吐全量 outlineBody。`)
+              this.emitDiscussEdit(input.projectId, {
+                path: outlinePath,
+                kind: "body_edits",
+                status: "failed",
+                summary: applied.reason,
+                opsAttempted: assist.bodyEdits.ops.length,
+                opsApplied: 0,
+              })
+            } else {
+              await this.dependencies.workspace.saveSynopsisMarkdown(
+                input.workspaceRootRef,
+                outlinePath,
+                applied.content,
+              )
+              lastOutlineAgentDigest = digest(applied.content)
+              writeNotices.push(`已局部更新细纲（${String(applied.appliedCount)} 处）。`)
+              this.emitDiscussEdit(input.projectId, {
+                path: outlinePath,
+                kind: "body_edits",
+                status: "completed",
+                summary: `已局部更新细纲（${String(applied.appliedCount)} 处）`,
+                opsAttempted: assist.bodyEdits.ops.length,
+                opsApplied: applied.appliedCount,
+              })
+            }
+          }
+        }
+      } else if (assist.outlineBody !== undefined && outlineWriteAllowed) {
+        this.emitDiscussEdit(input.projectId, {
+          path: outlinePath,
+          kind: "outline",
+          status: "running",
+          summary: "正在写入剧情细纲",
+        })
+        if (userEditedOutlineSinceAgent) {
+          writeNotices.push("你刚改过细纲文件，本轮未覆盖细纲。若要以我这版为准，请明确说「用我这版覆盖你的手改」。")
+          this.emitDiscussEdit(input.projectId, {
+            path: outlinePath,
+            kind: "outline",
+            status: "failed",
+            summary: "未落盘：你刚改过细纲文件",
+          })
+        } else {
+          await this.dependencies.workspace.saveSynopsisMarkdown(
+            input.workspaceRootRef,
+            outlinePath,
+            assist.outlineBody,
+          )
+          lastOutlineAgentDigest = digest(assist.outlineBody)
+          this.emitDiscussEdit(input.projectId, {
+            path: outlinePath,
+            kind: "outline",
+            status: "completed",
+            summary: "已写入剧情细纲",
+          })
+        }
+      } else if (assist.outlineBody !== undefined) {
+        writeNotices.push("细纲尚未确认可写：本轮 outlineBody 未落盘。请先点「用这份梗概写细纲」。")
+        this.emitDiscussEdit(input.projectId, {
+          path: outlinePath,
+          kind: "outline",
+          status: "failed",
+          summary: "未落盘：细纲尚未确认可写",
+        })
+        runtimeLog("debug", "synopsis-conversation", "outline-blocked-until-synopsis-confirmed", {
+          projectId: input.projectId,
+          sessionId: session.sessionId,
+        })
+      }
+
+      if (wroteSynopsisBody && !confirmingSynopsis) {
+        nextSynopsisConfirmedAtMs = undefined
+      }
+      if (confirmingSynopsis) {
+        nextSynopsisConfirmedAtMs = nextSynopsisConfirmedAtMs ?? nowMs
       }
 
       if (volumeCleanupFolder !== undefined) {
         await this.tryRemoveEmptyVolumeDirectory(input.workspaceRootRef, volumeCleanupFolder)
       }
 
+      const assistantContent = writeNotices.length === 0
+        ? assist.content
+        : `${assist.content}\n\n——\n${writeNotices.join("\n")}`
       const assistantMessageId = this.dependencies.createId()
       if (isSynopsisSendCancelled(input.projectId)) {
         throw new SynopsisSendCancelledError()
       }
       if (assist.stagingDelta !== undefined) {
-        await this.applyStagingDelta({
+        const stagingPaths = await this.applyStagingDelta({
           workspaceRootRef: input.workspaceRootRef,
           delta: assist.stagingDelta,
           sourceMessageId: assistantMessageId,
         })
-        synopsisConversationStreamHub.upsertSearch(input.projectId, {
-          query: "staging: 暂存区",
-          status: "completed",
-          resultSummary: "已更新暂存区草稿",
-        }, this.dependencies.now())
+        for (const path of stagingPaths) {
+          this.emitDiscussEdit(input.projectId, {
+            path,
+            kind: "staging",
+            status: "completed",
+            summary: "已更新暂存区草稿",
+          })
+        }
       }
       if (assist.arcPlanMarkdown !== undefined) {
+        this.emitDiscussEdit(input.projectId, {
+          path: ARC_PLAN_STAGING_PATH,
+          kind: "arc_plan",
+          status: "running",
+          summary: "正在写入弧线规划",
+        })
         await this.dependencies.workspace.saveUserMarkdown(
           input.workspaceRootRef,
           ARC_PLAN_STAGING_PATH,
           assist.arcPlanMarkdown,
         )
-        synopsisConversationStreamHub.upsertSearch(input.projectId, {
-          query: `staging: ${ARC_PLAN_STAGING_PATH}`,
+        this.emitDiscussEdit(input.projectId, {
+          path: ARC_PLAN_STAGING_PATH,
+          kind: "arc_plan",
           status: "completed",
-          resultSummary: "已写入弧线规划",
-        }, this.dependencies.now())
+          summary: "已写入弧线规划",
+        })
       }
       if (assist.presentationWrites !== undefined && assist.presentationWrites.length > 0) {
+        for (const write of assist.presentationWrites) {
+          this.emitDiscussEdit(input.projectId, {
+            path: write.relativePath,
+            kind: "presentation",
+            status: "running",
+            summary: `${write.mode === "create" ? "正在新建" : "正在更新"}表现规则`,
+          })
+        }
         await this.applyPresentationWrites({
           workspaceRootRef: input.workspaceRootRef,
           writes: assist.presentationWrites,
         })
-        synopsisConversationStreamHub.upsertSearch(input.projectId, {
-          query: "presentation: 描写/笔风规则",
-          status: "completed",
-          resultSummary: assist.presentationWrites
-            .map((write) => `${write.mode} ${write.relativePath}`)
-            .join("\n"),
-        }, this.dependencies.now())
+        for (const write of assist.presentationWrites) {
+          this.emitDiscussEdit(input.projectId, {
+            path: write.relativePath,
+            kind: "presentation",
+            status: "completed",
+            summary: `${write.mode} ${write.relativePath}`,
+          })
+        }
+      }
+      let workDisplayName: string | undefined
+      if (
+        assist.workDisplayName !== undefined
+        && this.dependencies.renameDisplayName !== undefined
+      ) {
+        const nextName = assist.workDisplayName.trim()
+        if (nextName.length > 0) {
+          workDisplayName = await this.dependencies.renameDisplayName(nextName)
+        }
       }
       const streamPeek = synopsisConversationStreamHub.peek(input.projectId, session.sessionId)
       const persistedThinking = normalizeThinkingDisplayText(
@@ -443,9 +709,11 @@ export class SynopsisConversationService {
         projectId: input.projectId,
         sessionId: session.sessionId,
         role: "assistant",
-        content: assist.content,
+        content: assistantContent,
         ...(persistedThinking === undefined ? {} : { reasoningContent: persistedThinking }),
+        ...(streamPeek.thinkingRounds.length === 0 ? {} : { thinkingRounds: streamPeek.thinkingRounds }),
         ...(streamPeek.searching.length === 0 ? {} : { searching: streamPeek.searching }),
+        ...(streamPeek.editing.length === 0 ? {} : { editing: streamPeek.editing }),
         ...(assist.choices === undefined ? {} : { choices: assist.choices }),
         createdAtMs: nowMs + 1,
       })
@@ -485,18 +753,27 @@ export class SynopsisConversationService {
         synopsisPath,
         title: sessionTitle,
         ...(lastAgentDigest === undefined ? {} : { lastAgentDigest }),
+        ...(lastOutlineAgentDigest === undefined ? {} : { lastOutlineAgentDigest }),
+        synopsisConfirmedAtMs: nextSynopsisConfirmedAtMs === undefined ? null : nextSynopsisConfirmedAtMs,
         updatedAtMs: nowMs + 1,
       })
       const updatedSession = (await this.dependencies.conversation.findSession(session.sessionId)) as NonNullable<Awaited<ReturnType<SqliteSynopsisConversationRepository["findSession"]>>>
       const messages = await this.dependencies.conversation.listMessagesForProject(input.projectId)
       synopsisConversationStreamHub.complete(input.projectId, this.dependencies.now(), {
         thinking: assist.reasoningContent ?? streamPeek.thinking,
-        content: assist.content,
+        content: assistantContent,
       })
       // Drop completed thinking/content so the next send cannot briefly re-show this turn.
-      // Cumulative usage is retained for right-rail / composer metrics.
+      // Cumulative usage is retained for composer metrics (and persisted below).
       const usage = synopsisConversationStreamHub.readCumulativeUsage(input.projectId)
       synopsisConversationStreamHub.clear(input.projectId)
+      if (usage !== undefined) {
+        await this.dependencies.conversation.saveDiscussUsage({
+          projectId: input.projectId,
+          usage,
+          updatedAtMs: this.dependencies.now(),
+        })
+      }
       const budgetAdvisory = assist.budgetAdvisory ?? peekSynopsisModelBudgetAdvisory(input.projectId)
       return {
         session: updatedSession,
@@ -507,6 +784,7 @@ export class SynopsisConversationService {
           : { pendingStagingPromotes: [...pendingStagingPromotes] }),
         ...(budgetAdvisory === undefined ? {} : { budgetAdvisory }),
         ...(usage === undefined ? {} : { usage }),
+        ...(workDisplayName === undefined ? {} : { workDisplayName }),
       }
     } catch (error) {
       if (error instanceof SynopsisSendCancelledError || isSynopsisSendCancelled(input.projectId)) {
@@ -567,6 +845,7 @@ export class SynopsisConversationService {
     deadlineMs?: number
   }>): Promise<SynopsisConversationSendResult> {
     const session = await this.ensureActiveSession(input.projectId, input.workspaceRootRef)
+    await this.hydrateDiscussUsage(input.projectId)
     const priorMessages = await this.dependencies.conversation.listMessages(session.sessionId)
     const target = resolveRefreshTargetMessage(priorMessages, input.messageId)
     if (target === undefined) {
@@ -592,6 +871,17 @@ export class SynopsisConversationService {
       hidden: true,
       createdAtMs: nowMs,
     })
+    const outlinePathForRefresh = siblingPlanningMarkdownPath(session.synopsisPath, "outline")
+      ?? deriveOutlineMarkdownPath(
+        session.chapterSequence,
+        session.title,
+        extractVolumeFolderNameFromPath(session.synopsisPath) ?? DEFAULT_VOLUME_FOLDER_NAME,
+      )
+    const outlineMarkdown = await this.readSynopsisFile(input.workspaceRootRef, outlinePathForRefresh)
+    const outlineDigest = outlineMarkdown.trim().length === 0 ? undefined : digest(outlineMarkdown)
+    const userEditedOutlineSinceAgent = session.lastOutlineAgentDigest !== undefined
+      && outlineDigest !== undefined
+      && session.lastOutlineAgentDigest !== outlineDigest
     const assist = await this.runSynopsisDiscuss({
       projectId: input.projectId,
       workspaceRootRef: input.workspaceRootRef,
@@ -600,7 +890,11 @@ export class SynopsisConversationService {
       heading: session.title,
       chapterSequence: session.chapterSequence,
       synopsisMarkdown,
+      outlineMarkdown,
+      ...(outlineDigest === undefined ? {} : { outlineDigest }),
       userEditedSinceAgent,
+      userEditedOutlineSinceAgent,
+      synopsisConfirmed: session.synopsisConfirmedAtMs !== undefined,
       conversationHistory: priorMessages.map((message) => ({
         role: message.role === "assistant" ? "assistant" as const : "user" as const,
         content: message.content,
@@ -641,9 +935,18 @@ export class SynopsisConversationService {
       Awaited<ReturnType<SqliteSynopsisConversationRepository["findSession"]>>
     >
     const messages = await this.dependencies.conversation.listMessagesForProject(input.projectId)
+    const usage = synopsisConversationStreamHub.readCumulativeUsage(input.projectId)
+    if (usage !== undefined) {
+      await this.dependencies.conversation.saveDiscussUsage({
+        projectId: input.projectId,
+        usage,
+        updatedAtMs: this.dependencies.now(),
+      })
+    }
     return {
       session: updatedSession,
       messages: [...messages],
+      ...(usage === undefined ? {} : { usage }),
     }
   }
 
@@ -713,6 +1016,23 @@ export class SynopsisConversationService {
     }
   }
 
+  private async hydrateDiscussUsage(projectId: ProjectId): Promise<SynopsisConversationStreamUsage | undefined> {
+    const inMemory = synopsisConversationStreamHub.readCumulativeUsage(projectId)
+    if (inMemory !== undefined) return inMemory
+    const stored = await this.dependencies.conversation.loadDiscussUsage(projectId)
+    if (stored === undefined) return undefined
+    synopsisConversationStreamHub.hydrateCumulativeUsage(projectId, {
+      ...(stored.inputTokens === undefined ? {} : { inputTokens: stored.inputTokens }),
+      ...(stored.outputTokens === undefined ? {} : { outputTokens: stored.outputTokens }),
+      ...(stored.cacheHitInputTokens === undefined ? {} : { cacheHitInputTokens: stored.cacheHitInputTokens }),
+      ...(stored.cacheMissInputTokens === undefined ? {} : { cacheMissInputTokens: stored.cacheMissInputTokens }),
+      ...(stored.lastRequestInputTokens === undefined
+        ? {}
+        : { lastRequestInputTokens: stored.lastRequestInputTokens }),
+    })
+    return stored
+  }
+
   private async ensureActiveSession(projectId: ProjectId, workspaceRootRef: string) {
     const active = await this.dependencies.conversation.findActiveSession(projectId)
     if (active !== undefined) {
@@ -738,7 +1058,9 @@ export class SynopsisConversationService {
       ?? (pathStillValid ? session.synopsisPath : undefined)
     if (nextPath === undefined) {
       // Recreate placeholder when the session points at a missing file and no claim exists.
-      const placeholderPath = deriveSynopsisMarkdownPath(session.chapterSequence, session.title)
+      const existingVolumes = await this.dependencies.workspace.listVolumeFolderNames(workspaceRootRef)
+      const preferredVolume = pickPreferredVolumeFolderName(existingVolumes) ?? DEFAULT_VOLUME_FOLDER_NAME
+      const placeholderPath = deriveSynopsisMarkdownPath(session.chapterSequence, session.title, preferredVolume)
       const placeholder = assembleSynopsisPlaceholderDocument(session.chapterSequence, session.title)
       await this.dependencies.workspace.saveSynopsisMarkdown(workspaceRootRef, placeholderPath, placeholder)
       await this.dependencies.conversation.updateSession({
@@ -822,7 +1144,12 @@ export class SynopsisConversationService {
     heading: string
     chapterSequence: number
     synopsisMarkdown: string
+    outlineMarkdown: string
+    outlineDigest?: string
     userEditedSinceAgent: boolean
+    userEditedOutlineSinceAgent: boolean
+    currentWorkDisplayName?: string
+    synopsisConfirmed?: boolean
     conversationHistory: readonly Readonly<{ role: "user" | "assistant"; content: string }>[]
     activeGoals: readonly DeductionGoal[]
     chapterProgress: readonly Readonly<{ goalId: string; chapterSequence: number; summary: string; status: "planned" | "achieved" | "partial" | "missed" | "superseded" }>[]
@@ -842,8 +1169,14 @@ export class SynopsisConversationService {
     reasoningContent?: string
     chapterTitle?: string
     volumeFolderName?: string
+    workDisplayName?: string
     synopsisBody?: string
     outlineBody?: string
+    bodyEdits?: Readonly<{
+      target: "outline"
+      baseDigest?: string
+      ops: readonly Readonly<{ oldText: string; newText: string }>[]
+    }>
     choices?: SynopsisConversationSendResult["messages"][number]["choices"]
     goalProposals?: readonly Readonly<{ payload: GoalProposalPayload; reason?: string }>[]
     stagingDelta?: Readonly<{
@@ -917,6 +1250,15 @@ export class SynopsisConversationService {
     let attempt = 0
     let missingArtifactRetries = 0
     const repairHints: string[] = []
+    if (input.synopsisConfirmed !== true) {
+      repairHints.push(
+        "当前梗概尚未经用户确认：禁止输出 outlineBody；戏核收窄后须同屏给出「用这份梗概写细纲」(confirm_synopsis)、「再改梗概」、可选「跳过细纲，按梗概开推」(start_turn)。",
+      )
+    } else if (isConfirmSynopsisUserMessage(input.userMessage)) {
+      repairHints.push(
+        "用户已选择用这份梗概写细纲：本轮应输出合格 outlineBody（引导 §4.1：必填章定位/分场/信息边界/风险待决；不适用节写「本节：无」；须含相对梗概的增量，禁止同构扩写），不要只改梗概；本轮不要再给 start_turn。",
+      )
+    }
     let latestBudgetAdvisory: SynopsisConversationBudgetAdvisory | undefined
 
     for (;;) {
@@ -982,7 +1324,14 @@ export class SynopsisConversationService {
             heading: input.heading,
             chapterSequence: input.chapterSequence,
             synopsisMarkdown: input.synopsisMarkdown,
+            outlineMarkdown: input.outlineMarkdown,
+            ...(input.outlineDigest === undefined ? {} : { outlineDigest: input.outlineDigest }),
             userEditedSinceAgent: input.userEditedSinceAgent,
+            userEditedOutlineSinceAgent: input.userEditedOutlineSinceAgent,
+            synopsisConfirmed: input.synopsisConfirmed === true,
+            ...(input.currentWorkDisplayName === undefined
+              ? {}
+              : { currentWorkDisplayName: input.currentWorkDisplayName }),
             conversationHistory: input.conversationHistory,
             activeGoals: input.activeGoals.map((goal) => ({
               goalId: goal.goalId,
@@ -1034,6 +1383,8 @@ export class SynopsisConversationService {
       ]
       let streamedReasoning = ""
       let streamedContent = ""
+      const thinkingRound = attempt + 1
+      synopsisConversationStreamHub.beginThinkingRound(input.projectId, thinkingRound, this.dependencies.now())
       let execution
       try {
         execution = await input.model.execute(request, {
@@ -1146,8 +1497,22 @@ export class SynopsisConversationService {
           ...(artifact.data.volumeFolderName === undefined
             ? {}
             : { volumeFolderName: artifact.data.volumeFolderName }),
+          ...(artifact.data.workDisplayName === undefined
+            ? {}
+            : { workDisplayName: artifact.data.workDisplayName }),
           ...(artifact.data.synopsisBody === undefined ? {} : { synopsisBody: artifact.data.synopsisBody }),
           ...(artifact.data.outlineBody === undefined ? {} : { outlineBody: artifact.data.outlineBody }),
+          ...(artifact.data.bodyEdits === undefined
+            ? {}
+            : {
+                bodyEdits: {
+                  target: artifact.data.bodyEdits.target,
+                  ...(artifact.data.bodyEdits.baseDigest === undefined
+                    ? {}
+                    : { baseDigest: artifact.data.bodyEdits.baseDigest }),
+                  ops: artifact.data.bodyEdits.ops,
+                },
+              }),
           ...(artifact.data.choices === undefined ? {} : { choices: artifact.data.choices }),
           ...(artifact.data.stagingDelta === undefined
             ? {}
@@ -1193,8 +1558,22 @@ export class SynopsisConversationService {
             ...(artifact.data.volumeFolderName === undefined
               ? {}
               : { volumeFolderName: artifact.data.volumeFolderName }),
+            ...(artifact.data.workDisplayName === undefined
+              ? {}
+              : { workDisplayName: artifact.data.workDisplayName }),
             ...(artifact.data.synopsisBody === undefined ? {} : { synopsisBody: artifact.data.synopsisBody }),
             ...(artifact.data.outlineBody === undefined ? {} : { outlineBody: artifact.data.outlineBody }),
+            ...(artifact.data.bodyEdits === undefined
+              ? {}
+              : {
+                  bodyEdits: {
+                    target: artifact.data.bodyEdits.target,
+                    ...(artifact.data.bodyEdits.baseDigest === undefined
+                      ? {}
+                      : { baseDigest: artifact.data.bodyEdits.baseDigest }),
+                    ops: artifact.data.bodyEdits.ops,
+                  },
+                }),
             ...(artifact.data.choices === undefined ? {} : { choices: artifact.data.choices }),
             ...(artifact.data.stagingDelta === undefined
               ? {}
@@ -1234,11 +1613,13 @@ export class SynopsisConversationService {
         return fallback
       }
 
+      const searchRound = attempt + 1
       for (const read of requestedReads) {
         const label = synopsisSearchLabel(read)
         synopsisConversationStreamHub.upsertSearch(input.projectId, {
           query: label,
           status: "running",
+          round: searchRound,
           ...temporalSearchMeta(read),
         }, this.dependencies.now())
       }
@@ -1262,6 +1643,7 @@ export class SynopsisConversationService {
             query: `web: ${query}`,
             status: "failed",
             resultSummary: "联网检索端口未配置",
+            round: searchRound,
           }, this.dependencies.now())
         }
       }
@@ -1326,6 +1708,7 @@ export class SynopsisConversationService {
           query: label,
           status: matched.length === 0 && !isWeb ? "failed" : "completed",
           resultSummary: summary,
+          round: searchRound,
           ...temporalSearchMeta(read),
         }, this.dependencies.now())
       }
@@ -1398,6 +1781,7 @@ export class SynopsisConversationService {
     synopsisConversationStreamHub.upsertSearch(input.projectId, {
       query: label,
       status: "running",
+      round: 0,
     }, this.dependencies.now())
     try {
       const evidence = await executeSynopsisWorkspaceReads({
@@ -1414,6 +1798,7 @@ export class SynopsisConversationService {
       synopsisConversationStreamHub.upsertSearch(input.projectId, {
         query: label,
         status: evidence.length === 0 ? "failed" : "completed",
+        round: 0,
         resultSummary: evidence.length === 0
           ? "未找到设定集/参考索引"
           : evidence.map((item) => `${item.ownerId}（${item.semanticText.length} 字）`).join("\n"),
@@ -1423,10 +1808,15 @@ export class SynopsisConversationService {
       synopsisConversationStreamHub.upsertSearch(input.projectId, {
         query: label,
         status: "failed",
+        round: 0,
         resultSummary: error instanceof Error ? error.message : String(error),
       }, this.dependencies.now())
       return []
     }
+  }
+
+  private emitDiscussEdit(projectId: ProjectId, edit: SynopsisConversationStreamEdit): void {
+    synopsisConversationStreamHub.upsertEdit(projectId, edit, this.dependencies.now())
   }
 
   private async applyPresentationWrites(input: Readonly<{
@@ -1462,7 +1852,7 @@ export class SynopsisConversationService {
       worldRules?: readonly StagingEntryPatch[]
       promoteHints?: readonly StagingEntryPatch[]
     }>
-  }>): Promise<void> {
+  }>): Promise<readonly string[]> {
     const settings = this.dependencies.readProjectSettings === undefined
       ? undefined
       : await this.dependencies.readProjectSettings()
@@ -1514,13 +1904,16 @@ export class SynopsisConversationService {
       })
       evicted.files[notesPath] = notes
     }
+    const writtenPaths: string[] = []
     for (const [relativePath, entries] of Object.entries(evicted.files)) {
       await this.dependencies.workspace.saveUserMarkdown(
         input.workspaceRootRef,
         relativePath,
         serializeStagingEntries(stagingFileTitle(relativePath), entries),
       )
+      writtenPaths.push(relativePath)
     }
+    return writtenPaths
   }
 
   private async findExistingSynopsisForSequence(
@@ -1568,6 +1961,17 @@ export class SynopsisConversationService {
 
     const priorMessages = await this.dependencies.conversation.listMessagesForProject(input.projectId)
     const synopsisMarkdown = await this.readSynopsisFile(input.workspaceRootRef, session.synopsisPath)
+    const outlinePathForHandoff = siblingPlanningMarkdownPath(session.synopsisPath, "outline")
+      ?? deriveOutlineMarkdownPath(
+        session.chapterSequence,
+        session.title,
+        extractVolumeFolderNameFromPath(session.synopsisPath) ?? DEFAULT_VOLUME_FOLDER_NAME,
+      )
+    const outlineMarkdown = await this.readSynopsisFile(input.workspaceRootRef, outlinePathForHandoff)
+    const outlineDigest = outlineMarkdown.trim().length === 0 ? undefined : digest(outlineMarkdown)
+    const userEditedOutlineSinceAgent = session.lastOutlineAgentDigest !== undefined
+      && outlineDigest !== undefined
+      && session.lastOutlineAgentDigest !== outlineDigest
     const goalsSnapshot = await this.dependencies.goals.list(input.projectId)
     const activeGoals = selectGoalsForChapterContext(goalsSnapshot.goals, session.chapterSequence)
     const chapterProgress = goalsSnapshot.progress.filter(
@@ -1586,7 +1990,11 @@ export class SynopsisConversationService {
       heading: session.title,
       chapterSequence: session.chapterSequence,
       synopsisMarkdown,
+      outlineMarkdown,
+      ...(outlineDigest === undefined ? {} : { outlineDigest }),
       userEditedSinceAgent: false,
+      userEditedOutlineSinceAgent,
+      synopsisConfirmed: session.synopsisConfirmedAtMs !== undefined,
       conversationHistory: priorMessages.map((message) => ({
         role: message.role === "assistant" ? "assistant" as const : "user" as const,
         content: message.content,
@@ -1952,7 +2360,7 @@ export function buildRefreshChoicesPrompt(choices: readonly SynopsisConversation
     "要求：",
     "1. 新选项的含义不得与下列已有选项重复，也避免同义改写：",
     labels,
-    "2. 仍用 choices 返回可点选按钮；方向类用 continue_discuss，结构性动作（如 confirm_arc_plan / start_turn / promote_staging）仅在仍适用时保留。",
+    "2. 仍用 choices 返回可点选按钮；方向类用 continue_discuss，结构性动作（如 confirm_synopsis / confirm_arc_plan / start_turn / promote_staging）仅在仍适用时保留。",
     "3. assistantMessage 一两句说明换了什么方向即可，不要长篇铺垫，也不要改写梗概文件，除非为支撑新选项所必需。",
     "4. 这是静默刷新：只产出新 choices，不要假设用户会看到完整对话气泡。",
   ].join("\n")
@@ -1997,8 +2405,14 @@ function finalizeDiscussReturn(
     reasoningContent?: string
     chapterTitle?: string
     volumeFolderName?: string
+    workDisplayName?: string
     synopsisBody?: string
     outlineBody?: string
+    bodyEdits?: Readonly<{
+      target: "outline"
+      baseDigest?: string
+      ops: readonly Readonly<{ oldText: string; newText: string }>[]
+    }>
     choices?: SynopsisConversationSendResult["messages"][number]["choices"]
     goalProposals?: readonly Readonly<{ payload: GoalProposalPayload; reason?: string }>[]
     stagingDelta?: Readonly<{
@@ -2030,7 +2444,14 @@ function finalizeDiscussReturn(
   reasoningContent?: string
   chapterTitle?: string
   volumeFolderName?: string
+  workDisplayName?: string
   synopsisBody?: string
+  outlineBody?: string
+  bodyEdits?: Readonly<{
+    target: "outline"
+    baseDigest?: string
+    ops: readonly Readonly<{ oldText: string; newText: string }>[]
+  }>
   choices?: SynopsisConversationSendResult["messages"][number]["choices"]
   goalProposals?: readonly Readonly<{ payload: GoalProposalPayload; reason?: string }>[]
   stagingDelta?: Readonly<{
@@ -2074,4 +2495,14 @@ function buildSynopsisDiscussFallbackReturn(input: Readonly<{
   return input.accumulatedReasoning.length === 0
     ? { content }
     : { content, reasoningContent: input.accumulatedReasoning }
+}
+
+/** User clicked confirm_synopsis or typed an equivalent confirmation. */
+export function isConfirmSynopsisUserMessage(message: string): boolean {
+  const text = message.trim()
+  if (text.length === 0) return false
+  return /用这份梗概写细纲/u.test(text)
+    || /确认(?:本章)?梗概/u.test(text)
+    || /开始写细纲/u.test(text)
+    || /确认梗概[，,]?\s*开始写细纲/u.test(text)
 }

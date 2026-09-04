@@ -277,6 +277,28 @@ export function listVolumeFoldersFromInventory(
   return volumes
 }
 
+/**
+ * Prefer an existing volume folder when creating the next chapter's planning files.
+ * Highest volume sequence wins; within the same sequence prefer a non-placeholder title.
+ */
+export function pickPreferredVolumeFolderName(
+  existingFolderNames: readonly string[],
+): string | undefined {
+  const validated = existingFolderNames.flatMap((name) => {
+    const result = validateVolumeFolderName(name)
+    return result.ok ? [result] : []
+  })
+  if (validated.length === 0) return undefined
+  validated.sort((left, right) => {
+    if (left.sequence !== right.sequence) return right.sequence - left.sequence
+    const leftPlaceholder = left.title === VOLUME_PLACEHOLDER_TITLE ? 1 : 0
+    const rightPlaceholder = right.title === VOLUME_PLACEHOLDER_TITLE ? 1 : 0
+    if (leftPlaceholder !== rightPlaceholder) return leftPlaceholder - rightPlaceholder
+    return left.folderName.localeCompare(right.folderName, "zh-CN")
+  })
+  return validated[0]?.folderName
+}
+
 export type VolumeSequenceConflictResult = Readonly<
   | { ok: true }
   | {

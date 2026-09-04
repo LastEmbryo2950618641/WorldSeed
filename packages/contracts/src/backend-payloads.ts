@@ -67,6 +67,16 @@ export const projectRenamePayloadSchema = projectSettingsReadPayloadSchema.exten
   displayName: z.string().trim().min(1).max(200),
 })
 export type ProjectRenamePayload = z.infer<typeof projectRenamePayloadSchema>
+export const projectSuggestDisplayNamePayloadSchema = projectSettingsReadPayloadSchema.extend({
+  model: modelSelectionSchema.optional(),
+  historyNames: z.array(z.string().trim().min(1).max(200)).max(16).optional(),
+})
+export type ProjectSuggestDisplayNamePayload = z.infer<typeof projectSuggestDisplayNamePayloadSchema>
+export const projectSuggestDisplayNameResultSchema = z.object({
+  displayName: z.string().trim().min(1).max(200),
+  alternatives: z.array(z.string().trim().min(1).max(200)).max(5).optional(),
+})
+export type ProjectSuggestDisplayNameResult = z.infer<typeof projectSuggestDisplayNameResultSchema>
 export const projectSettingsSavePayloadSchema = projectSettingsReadPayloadSchema.extend({
   settings: projectSettingsSchema,
 })
@@ -74,6 +84,8 @@ export type ProjectSettingsReadPayload = z.infer<typeof projectSettingsReadPaylo
 export type ProjectSettingsSavePayload = z.infer<typeof projectSettingsSavePayloadSchema>
 export const turnRecoverableTasksPayloadSchema = projectSettingsReadPayloadSchema
 export type TurnRecoverableTasksPayload = z.infer<typeof turnRecoverableTasksPayloadSchema>
+export const turnLatestGetPayloadSchema = projectSettingsReadPayloadSchema
+export type TurnLatestGetPayload = z.infer<typeof turnLatestGetPayloadSchema>
 
 /** Creation-desk narrative intent (orthogonal to project worldDivergenceMode). */
 export const chapterNarrativeIntentSchema = z.object({
@@ -580,6 +592,7 @@ export const backendPayloadSchemas = {
   "project.open": projectWorkspacePayloadSchema,
   "project.list": projectListPayloadSchema,
   "project.rename": projectRenamePayloadSchema,
+  "project.suggestDisplayName": projectSuggestDisplayNamePayloadSchema,
   "project.validate": projectWorkspacePayloadSchema,
   "project.settings.read": projectSettingsReadPayloadSchema,
   "project.settings.save": projectSettingsSavePayloadSchema,
@@ -641,6 +654,7 @@ export const backendPayloadSchemas = {
   "turn.start": turnStartPayloadSchema,
   "turn.resume": turnResumePayloadSchema,
   "turn.recoverable.list": turnRecoverableTasksPayloadSchema,
+  "turn.latest.get": turnLatestGetPayloadSchema,
   "turn.pause": taskPayloadSchema,
   "turn.cancel": taskPayloadSchema,
   "turn.status": taskPayloadSchema,

@@ -31,6 +31,6 @@ export interface ProjectRepository {
   create(project: StoredProject, manifest: ProjectManifest): Promise<void>
   find(projectId: ProjectId): Promise<StoredProject | undefined>
   readManifest(projectId: ProjectId): Promise<ProjectManifest | undefined>
-  updateName(projectId: ProjectId, name: string, updatedAtMs: number): Promise<void>
+  updateName(projectId: ProjectId, name: string, updatedAtMs: number, manifestDigest?: string): Promise<void>
   reconcileManifest(manifest: ProjectManifest, updatedAtMs: number): Promise<void>
 }

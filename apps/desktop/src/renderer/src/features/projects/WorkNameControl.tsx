@@ -1,18 +1,19 @@
 import { useEffect, useRef, useState } from "react"
 import { ChevronDown, History, PencilLine, RefreshCw } from "lucide-react"
 
-import type { ChapterSummary, OpenProject } from "../../api/client.js"
+import type { DesktopModelProfile, OpenProject } from "../../api/client.js"
 import { invokeBackend } from "../../api/client.js"
-import { rememberWorkName, readWorkNameHistory, suggestWorkNameFromHeadings } from "./work-name-history.js"
+import { rememberWorkName, readWorkNameHistory } from "./work-name-history.js"
 
 type Props = Readonly<{
   project: OpenProject
   statusLabel: string
   running: boolean
+  model?: DesktopModelProfile
   onRenamed(displayName: string): void
 }>
 
-export function WorkNameControl({ project, statusLabel, running, onRenamed }: Props): React.JSX.Element {
+export function WorkNameControl({ project, statusLabel, running, model, onRenamed }: Props): React.JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null)
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -65,18 +66,34 @@ export function WorkNameControl({ project, statusLabel, running, onRenamed }: Pr
     }
   }
 
-  const refreshFromChapters = async (): Promise<void> => {
+  const refreshGenerate = async (): Promise<void> => {
+    if (model === undefined) {
+      setError("模型配置尚未加载完成，请稍候再刷新生成")
+      return
+    }
     setBusy("refresh")
     setError(undefined)
     try {
-      const chapters = await invokeBackend<readonly ChapterSummary[]>("chapter.list", {
+      const suggested = await invokeBackend<{ displayName: string; alternatives?: readonly string[] }>("project.suggestDisplayName", {
         projectId: project.projectId,
         workspaceRootRef: project.workspaceRootRef,
+        historyNames: readWorkNameHistory(project.projectId),
+        model: {
+          baseUrl: model.baseUrl,
+          model: model.model,
+          credentialRef: model.credentialRef,
+          apiProtocol: model.apiProtocol,
+          contextWindowTokens: model.contextWindowTokens,
+          thinkingModeEnabled: false,
+          reasoningEffort: model.reasoningEffort,
+          jsonModeEnabled: model.jsonModeEnabled,
+          disableResponseStorage: model.disableResponseStorage,
+          serviceTier: model.serviceTier,
+        },
       })
-      const suggested = suggestWorkNameFromHeadings(chapters.map((chapter) => chapter.heading))
-      setDraft(suggested)
+      setDraft(suggested.displayName)
       setBusy(undefined)
-      await applyName(suggested)
+      await applyName(suggested.displayName)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
       setBusy(undefined)
@@ -98,7 +115,7 @@ export function WorkNameControl({ project, statusLabel, running, onRenamed }: Pr
     </button>
     {open ? <div className="work-name-menu" role="menu">
       <div className="work-name-menu-actions">
-        <button type="button" disabled={busy !== undefined} data-testid="work-name-refresh" onClick={() => { void refreshFromChapters() }}>
+        <button type="button" disabled={busy !== undefined} data-testid="work-name-refresh" onClick={() => { void refreshGenerate() }}>
           <RefreshCw size={13} className={busy === "refresh" ? "work-name-spin" : undefined} />
           刷新生成
         </button>
