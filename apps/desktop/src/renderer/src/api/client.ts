@@ -394,12 +394,48 @@ export async function checkAppUpdate(force = false): Promise<UpdateCheckResult> 
   return bridge.checkAppUpdate({ force })
 }
 
-export async function openAppUpdateDownload(downloadUrl: string): Promise<{ ok: true }> {
+export type UpdateDownloadProgress = Readonly<{
+  receivedBytes: number
+  totalBytes: number
+  percent: number
+}>
+
+export async function startAppUpdateDownload(input: Readonly<{
+  downloadUrl: string
+  version: string
+  buildNumber: string
+}>): Promise<{ ok: true; installerPath: string }> {
   const bridge = getWorldseedBridge()
-  if (bridge?.openAppUpdateDownload === undefined) {
+  if (bridge?.startAppUpdateDownload === undefined) {
     throw new Error("应用接口未更新，请完全退出并重启 Worldseed 后再试")
   }
-  return bridge.openAppUpdateDownload(downloadUrl)
+  return bridge.startAppUpdateDownload(input)
+}
+
+export async function cancelAppUpdateDownload(): Promise<{ ok: true }> {
+  const bridge = getWorldseedBridge()
+  if (bridge?.cancelAppUpdateDownload === undefined) {
+    throw new Error("应用接口未更新，请完全退出并重启 Worldseed 后再试")
+  }
+  return bridge.cancelAppUpdateDownload()
+}
+
+export async function installAppUpdateAndQuit(installerPath: string): Promise<{ ok: true }> {
+  const bridge = getWorldseedBridge()
+  if (bridge?.installAppUpdateAndQuit === undefined) {
+    throw new Error("应用接口未更新，请完全退出并重启 Worldseed 后再试")
+  }
+  return bridge.installAppUpdateAndQuit(installerPath)
+}
+
+export function onAppUpdateDownloadProgress(
+  listener: (progress: UpdateDownloadProgress) => void,
+): () => void {
+  const bridge = getWorldseedBridge()
+  if (bridge?.onAppUpdateDownloadProgress === undefined) {
+    return () => undefined
+  }
+  return bridge.onAppUpdateDownloadProgress(listener)
 }
 
 export async function addWorkDirectory(directoryPath: string): Promise<AppSettingsReadResult> {

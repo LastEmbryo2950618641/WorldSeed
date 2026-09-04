@@ -70,6 +70,7 @@ import { RightRail, summarizeSynopsisStreamTokenMetrics, summarizeSynopsisUsageT
 import { RightPanelViewport } from "../features/status/RightPanelViewport.js"
 import { ModelConfigurationDialog, type ModelProfile } from "../features/settings/ModelConfigurationDialog.js"
 import { ProjectSettingsDialog } from "../features/settings/ProjectSettingsDialog.js"
+import { AppUpdateDialog } from "../features/settings/AppUpdateDialog.js"
 import { UiTooltip } from "../components/UiTooltip.js"
 
 type PendingGraphLoad = Readonly<{
@@ -1634,24 +1635,30 @@ export function App(): React.JSX.Element {
   }
 
   if (project === undefined) {
-    return <AppChrome
-      rail={
-        <ProjectRail
-          onOpen={resetWorkbenchForProject}
-          updateAvailable={appUpdate.available}
-          onUpdateClick={() => {
-            const remote = appUpdate.remote
-            if (remote === null) return
-            const label = `${remote.version}（构建 ${remote.buildNumber}）`
-            if (window.confirm(`发现新版本 ${label}，是否前往下载？`)) {
-              void appUpdate.openDownload()
-            }
-          }}
-        />
-      }
-    >
-      <ProjectLauncher onOpen={resetWorkbenchForProject} />
-    </AppChrome>
+    return <>
+      <AppChrome
+        rail={
+          <ProjectRail
+            onOpen={resetWorkbenchForProject}
+            updateAvailable={appUpdate.available}
+            onUpdateClick={() => {
+              appUpdate.openUpdatePrompt()
+            }}
+          />
+        }
+      >
+        <ProjectLauncher onOpen={resetWorkbenchForProject} />
+      </AppChrome>
+      {appUpdate.dialog !== null
+        ? <AppUpdateDialog
+            state={appUpdate.dialog}
+            onClose={appUpdate.closeDialog}
+            onConfirmDownload={() => { void appUpdate.confirmDownload() }}
+            onCancelDownload={() => { void appUpdate.cancelDownload() }}
+            onInstall={() => { void appUpdate.installAndQuit() }}
+          />
+        : null}
+    </>
   }
 
   const readOnly = selectedPath?.startsWith("世界推演规则/基础规则/") === true
@@ -1680,12 +1687,7 @@ export function App(): React.JSX.Element {
         onOpen={resetWorkbenchForProject}
         updateAvailable={appUpdate.available}
         onUpdateClick={() => {
-          const remote = appUpdate.remote
-          if (remote === null) return
-          const label = `${remote.version}（构建 ${remote.buildNumber}）`
-          if (window.confirm(`发现新版本 ${label}，是否前往下载？`)) {
-            void appUpdate.openDownload()
-          }
+          appUpdate.openUpdatePrompt()
         }}
       />
     }
@@ -1971,6 +1973,15 @@ export function App(): React.JSX.Element {
       onSave={saveProjectSettings}
       onOpenModelSettings={() => { setProjectSettingsOpen(false); setModelDialogOpen(true); }}
     /> : null}
+    {appUpdate.dialog !== null
+      ? <AppUpdateDialog
+          state={appUpdate.dialog}
+          onClose={appUpdate.closeDialog}
+          onConfirmDownload={() => { void appUpdate.confirmDownload() }}
+          onCancelDownload={() => { void appUpdate.cancelDownload() }}
+          onInstall={() => { void appUpdate.installAndQuit() }}
+        />
+      : null}
   </main>
   </AppChrome>
 }

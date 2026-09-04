@@ -130,6 +130,12 @@ export type UpdateCheckResult = Readonly<{
   skipped?: boolean
 }>
 
+export type UpdateDownloadProgress = Readonly<{
+  receivedBytes: number
+  totalBytes: number
+  percent: number
+}>
+
 export type AppUpdateInfoResult = Readonly<{
   local: LocalAppIdentity
   update: AppUpdatePrefs
@@ -163,7 +169,14 @@ export type WorldseedBridge = Readonly<{
   getAppUpdateInfo(): Promise<AppUpdateInfoResult>
   saveAppUpdatePrefs(input: AppUpdatePrefs): Promise<AppSettingsReadResult>
   checkAppUpdate(input?: { force?: boolean }): Promise<UpdateCheckResult>
-  openAppUpdateDownload(downloadUrl: string): Promise<{ ok: true }>
+  startAppUpdateDownload(input: Readonly<{
+    downloadUrl: string
+    version: string
+    buildNumber: string
+  }>): Promise<{ ok: true; installerPath: string }>
+  cancelAppUpdateDownload(): Promise<{ ok: true }>
+  installAppUpdateAndQuit(installerPath: string): Promise<{ ok: true }>
+  onAppUpdateDownloadProgress(listener: (progress: UpdateDownloadProgress) => void): () => void
   allocateBookPath(workDirectory: string): Promise<string>
   selectDirectory(input?: { title?: string; defaultPath?: string }): Promise<string | undefined>
   selectMarkdownFiles(input?: { title?: string; defaultPath?: string }): Promise<readonly string[]>
@@ -203,7 +216,16 @@ export const worldseedBridge: WorldseedBridge = {
   getAppUpdateInfo: async () => ipcRenderer.invoke("worldseed:app-update:info") as Promise<AppUpdateInfoResult>,
   saveAppUpdatePrefs: async (input) => normalizeAppSettingsReadResult(await ipcRenderer.invoke("worldseed:app-update:save-prefs", input)),
   checkAppUpdate: async (input) => ipcRenderer.invoke("worldseed:app-update:check", input ?? {}) as Promise<UpdateCheckResult>,
-  openAppUpdateDownload: async (downloadUrl) => ipcRenderer.invoke("worldseed:app-update:open-download", { downloadUrl }) as Promise<{ ok: true }>,
+  startAppUpdateDownload: async (input) => ipcRenderer.invoke("worldseed:app-update:download-start", input) as Promise<{ ok: true; installerPath: string }>,
+  cancelAppUpdateDownload: async () => ipcRenderer.invoke("worldseed:app-update:download-cancel") as Promise<{ ok: true }>,
+  installAppUpdateAndQuit: async (installerPath) => ipcRenderer.invoke("worldseed:app-update:install-and-quit", { installerPath }) as Promise<{ ok: true }>,
+  onAppUpdateDownloadProgress: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, progress: UpdateDownloadProgress): void => {
+      listener(progress)
+    }
+    ipcRenderer.on("worldseed:app-update:download-progress", handler)
+    return () => ipcRenderer.removeListener("worldseed:app-update:download-progress", handler)
+  },
   allocateBookPath: async (workDirectory) => ipcRenderer.invoke("worldseed:book-path:allocate", { workDirectory }) as Promise<string>,
   selectDirectory: async (input) => ipcRenderer.invoke("worldseed:select-directory", input) as Promise<string | undefined>,
   selectMarkdownFiles: async (input) => {

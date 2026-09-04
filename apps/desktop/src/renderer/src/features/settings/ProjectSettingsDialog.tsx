@@ -44,7 +44,6 @@ type Props = Readonly<{
     remote: UpdateManifest | null
     refreshInfo: () => Promise<void>
     checkNow: (force?: boolean) => Promise<UpdateCheckResult | null>
-    openDownload: () => Promise<void>
   }>
   onClose: () => void
   onSave: (settings: ProjectSettings) => void | Promise<void>
@@ -202,7 +201,6 @@ export function ProjectSettingsDialog({
             remote={appUpdate.remote}
             onRefreshInfo={appUpdate.refreshInfo}
             onCheckNow={appUpdate.checkNow}
-            onOpenDownload={appUpdate.openDownload}
           /> : null}
         </div>
       </div>
@@ -210,7 +208,7 @@ export function ProjectSettingsDialog({
         <p>{section === "workDirectory"
           ? "工作目录变更会立即生效，无需点击应用。"
           : section === "about"
-            ? "更新设置保存后立即生效；检查更新会按清单比对版本与构建号。"
+            ? "更新设置保存后立即生效；检查更新会在应用内提示，并支持下载安装包后打开安装向导。"
           : saveError ?? validationMessage ?? "项目参数保存到内部数据库；新设置从下一轮推演开始生效。"}</p>
         <button className="secondary-command" onClick={onClose}>取消</button>
         {isAppOnlySection

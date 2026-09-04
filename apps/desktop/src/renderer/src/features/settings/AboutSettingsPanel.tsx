@@ -19,7 +19,6 @@ type Props = Readonly<{
   remote: UpdateManifest | null
   onRefreshInfo: () => Promise<void>
   onCheckNow: (force?: boolean) => Promise<UpdateCheckResult | null>
-  onOpenDownload: () => Promise<void>
 }>
 
 function formatCheckedAt(ms: number | undefined): string {
@@ -39,7 +38,6 @@ export function AboutSettingsPanel({
   remote,
   onRefreshInfo,
   onCheckNow,
-  onOpenDownload,
 }: Props): React.JSX.Element {
   const [updateUrl, setUpdateUrl] = useState("")
   const [intervalHours, setIntervalHours] = useState<UpdateCheckIntervalHours | 0>(24)
@@ -78,32 +76,6 @@ export function AboutSettingsPanel({
     }
   }
 
-  const checkUpdate = async (): Promise<void> => {
-    const result = await onCheckNow(true)
-    if (result === null) {
-      // IPC/网络异常：error 已由 hook 写入，再给一次可见提示
-      return
-    }
-    if (result.skipped) {
-      window.alert("已跳过本次检测（距上次检测未满间隔，或正在检测中）。可稍后再试。")
-      return
-    }
-    if (result.updateAvailable && result.remote !== undefined) {
-      const label = `${result.remote.version}（构建 ${result.remote.buildNumber}）`
-      if (window.confirm(`发现新版本 ${label}，是否前往下载？`)) {
-        await onOpenDownload()
-      }
-      return
-    }
-    if (result.remote === undefined) {
-      window.alert(result.reason?.trim() || "检查更新失败，请确认更新地址与网络后重试。")
-      return
-    }
-    window.alert(
-      `当前已是最新。\n本地 ${result.local.version}（构建 ${result.local.buildNumber}）\n远端 ${result.remote.version}（构建 ${result.remote.buildNumber}）`,
-    )
-  }
-
   const local = info?.local
 
   return (
@@ -112,7 +84,7 @@ export function AboutSettingsPanel({
         <span><Info size={18} /></span>
         <div>
           <h2>关于</h2>
-          <p>产品信息与自动更新检测。</p>
+          <p>产品信息与自动更新检测。发现新版本后会在应用内下载安装包。</p>
         </div>
       </header>
       <div className="settings-fields about-settings">
@@ -205,7 +177,7 @@ export function AboutSettingsPanel({
             className="dialog-primary-command"
             data-testid="about-check-update"
             disabled={checking || saving}
-            onClick={() => { void checkUpdate() }}
+            onClick={() => { void onCheckNow(true) }}
           >
             <RefreshCw size={14} />
             {checking ? "检测中…" : "检查更新"}

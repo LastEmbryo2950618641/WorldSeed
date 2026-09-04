@@ -519,6 +519,31 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   color: var(--accent);
   font-size: 11px;
 }
+.app-update-dialog .app-update-dialog-meta {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.app-update-dialog .app-update-dialog-notes {
+  margin-top: 10px;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.app-update-progress {
+  margin-top: 14px;
+  height: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+  overflow: hidden;
+}
+.app-update-progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
 .launcher-loading {
   margin: 0;
   padding: 48px 24px;

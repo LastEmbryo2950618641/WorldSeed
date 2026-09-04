@@ -36,12 +36,17 @@ import {
 import {
   checkForUpdate,
   defaultUpdatePrefs,
-  openUpdateDownload,
   readLocalAppIdentity,
   shouldAutoCheck,
   type AppUpdatePrefs,
   type UpdateCheckIntervalHours,
 } from "./app-update.js"
+import {
+  cancelActiveUpdateDownload,
+  launchInstallerAndQuit,
+  resolveUpdateDownloadPath,
+  startUpdateInstallerDownload,
+} from "./app-update-download.js"
 import { allocateUniqueBookPath } from "./book-path.js"
 
 const MODEL_CREDENTIAL_PAYLOAD_SCHEMAS = {
@@ -169,10 +174,44 @@ export function registerIpcRouter(
     })
     return { ...result, skipped: false }
   })
-  ipcMain.handle("worldseed:app-update:open-download", async (_event, input: unknown) => {
-    const downloadUrl = parseDownloadUrlPayload(input)
-    await openUpdateDownload(downloadUrl)
-    return { ok: true }
+  ipcMain.handle("worldseed:app-update:download-start", async (event, input: unknown) => {
+    const payload = parseUpdateDownloadStartPayload(input)
+    const destinationPath = resolveUpdateDownloadPath(
+      payload.downloadUrl,
+      payload.version,
+      payload.buildNumber,
+    )
+    const handle = await startUpdateInstallerDownload({
+      downloadUrl: payload.downloadUrl,
+      destinationPath,
+      onProgress: (progress) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send("worldseed:app-update:download-progress", progress)
+        }
+      },
+    })
+    try {
+      const installerPath = await handle.done
+      return { ok: true as const, installerPath }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error("已取消下载")
+      }
+      if (/aborted|取消|AbortError/iu.test(message)) {
+        throw new Error("已取消下载")
+      }
+      throw error instanceof Error ? error : new Error(message)
+    }
+  })
+  ipcMain.handle("worldseed:app-update:download-cancel", async () => {
+    cancelActiveUpdateDownload()
+    return { ok: true as const }
+  })
+  ipcMain.handle("worldseed:app-update:install-and-quit", async (_event, input: unknown) => {
+    const installerPath = parseInstallerPathPayload(input)
+    launchInstallerAndQuit(installerPath)
+    return { ok: true as const }
   })
   ipcMain.handle("worldseed:book-path:allocate", async (_event, input: unknown) => {
     const workDirectory = parseWorkDirectoryPayload(input)
@@ -214,7 +253,9 @@ export function unregisterIpcRouter(): void {
   ipcMain.removeHandler("worldseed:app-update:info")
   ipcMain.removeHandler("worldseed:app-update:save-prefs")
   ipcMain.removeHandler("worldseed:app-update:check")
-  ipcMain.removeHandler("worldseed:app-update:open-download")
+  ipcMain.removeHandler("worldseed:app-update:download-start")
+  ipcMain.removeHandler("worldseed:app-update:download-cancel")
+  ipcMain.removeHandler("worldseed:app-update:install-and-quit")
   ipcMain.removeHandler("worldseed:book-path:allocate")
   ipcMain.removeHandler("worldseed:select-directory")
   ipcMain.removeHandler("worldseed:select-markdown-files")
@@ -243,13 +284,33 @@ function parseUpdatePrefsPayload(input: unknown): AppUpdatePrefs {
   }
 }
 
-function parseDownloadUrlPayload(input: unknown): string {
+function parseUpdateDownloadStartPayload(input: unknown): Readonly<{
+  downloadUrl: string
+  version: string
+  buildNumber: string
+}> {
   if (input === null || typeof input !== "object") throw new Error("无效的下载参数")
-  const downloadUrl = (input as { downloadUrl?: unknown }).downloadUrl
-  if (typeof downloadUrl !== "string" || downloadUrl.trim().length === 0) {
-    throw new Error("下载地址不能为空")
+  const record = input as Record<string, unknown>
+  const downloadUrl = typeof record.downloadUrl === "string" ? record.downloadUrl.trim() : ""
+  const version = typeof record.version === "string" ? record.version.trim() : ""
+  const buildNumber = typeof record.buildNumber === "string"
+    ? record.buildNumber.trim()
+    : typeof record.buildNumber === "number"
+      ? String(record.buildNumber)
+      : ""
+  if (downloadUrl.length === 0) throw new Error("下载地址不能为空")
+  if (version.length === 0) throw new Error("版本号不能为空")
+  if (buildNumber.length === 0) throw new Error("构建号不能为空")
+  return { downloadUrl, version, buildNumber }
+}
+
+function parseInstallerPathPayload(input: unknown): string {
+  if (input === null || typeof input !== "object") throw new Error("无效的安装参数")
+  const installerPath = (input as { installerPath?: unknown }).installerPath
+  if (typeof installerPath !== "string" || installerPath.trim().length === 0) {
+    throw new Error("安装包路径不能为空")
   }
-  return downloadUrl.trim()
+  return installerPath.trim()
 }
 
 function parseWaitTimeoutMs(options: unknown): number {

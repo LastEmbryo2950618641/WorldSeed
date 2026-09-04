@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 
-import { app, shell } from "electron"
+import { app } from "electron"
 
 export type UpdateCheckIntervalHours = 1 | 2 | 4 | 8 | 24
 
@@ -192,10 +192,4 @@ export async function checkForUpdate(prefs: AppUpdatePrefs): Promise<UpdateCheck
       reason: error instanceof Error ? error.message : String(error),
     }
   }
-}
-
-export async function openUpdateDownload(downloadUrl: string): Promise<void> {
-  const url = downloadUrl.trim()
-  if (url.length === 0) throw new Error("下载地址为空")
-  await shell.openExternal(url)
 }
