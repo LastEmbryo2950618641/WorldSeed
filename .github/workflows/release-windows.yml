@@ -31,7 +31,9 @@ concurrency:
 
 jobs:
   build-and-release:
-    runs-on: windows-latest
+    # Pin to 2022: windows-latest is currently win25/VS2026, and node-gyp
+    # (used by electron-rebuild for better-sqlite3) does not recognize VS 18 yet.
+    runs-on: windows-2022
     timeout-minutes: 90
 
     steps:
@@ -99,10 +101,15 @@ jobs:
 
       - name: Setup MSVC build environment
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          vsversion: "2022"
 
       - name: Build workspace + Windows installers
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          npm_config_msvs_version: "2022"
+          GYP_MSVS_VERSION: "2022"
         shell: pwsh
         run: |
           corepack pnpm --filter @worldseed/contracts build
