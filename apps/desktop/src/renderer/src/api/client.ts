@@ -23,6 +23,44 @@ export type AppSettingsReadResult = Readonly<{
   defaultWorkDirectory: string
   workDirectories: readonly string[]
   activeWorkDirectory?: string
+  update?: AppUpdatePrefs
+}>
+
+export type UpdateCheckIntervalHours = 1 | 2 | 4 | 8 | 24
+
+export type AppUpdatePrefs = Readonly<{
+  updateUrl: string
+  checkIntervalHours?: UpdateCheckIntervalHours
+  lastCheckedAtMs?: number
+  compareMode?: "any_change" | "semver"
+}>
+
+export type LocalAppIdentity = Readonly<{
+  productName: string
+  version: string
+  buildNumber: string
+}>
+
+export type UpdateManifest = Readonly<{
+  version: string
+  buildNumber: string
+  downloadUrl: string
+  productName?: string
+  releaseNotes?: string
+}>
+
+export type UpdateCheckResult = Readonly<{
+  checkedAtMs: number
+  updateAvailable: boolean
+  local: LocalAppIdentity
+  remote?: UpdateManifest
+  reason?: string
+  skipped?: boolean
+}>
+
+export type AppUpdateInfoResult = Readonly<{
+  local: LocalAppIdentity
+  update: AppUpdatePrefs
 }>
 
 export type RemoveWorkDirectoryMode = "keep_data" | "include_data"
@@ -232,6 +270,25 @@ function getWorldseedBridge(): BridgeWithLegacyAppSettings | undefined {
   return typeof window === "undefined" ? undefined : window.worldseed as BridgeWithLegacyAppSettings | undefined
 }
 
+function normalizeUpdatePrefs(raw: unknown): AppUpdatePrefs | undefined {
+  if (raw === null || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  const updateUrl = typeof record.updateUrl === "string" ? record.updateUrl.trim() : ""
+  if (updateUrl.length === 0) return undefined
+  const interval = record.checkIntervalHours
+  const checkIntervalHours = interval === 1 || interval === 2 || interval === 4 || interval === 8 || interval === 24
+    ? interval
+    : undefined
+  return {
+    updateUrl,
+    ...(checkIntervalHours === undefined ? {} : { checkIntervalHours }),
+    ...(typeof record.lastCheckedAtMs === "number" ? { lastCheckedAtMs: record.lastCheckedAtMs } : {}),
+    ...(record.compareMode === "semver" || record.compareMode === "any_change"
+      ? { compareMode: record.compareMode }
+      : {}),
+  }
+}
+
 function normalizeAppSettingsReadResult(raw: unknown): AppSettingsReadResult {
   const fallback = resolveDefaultWorkDirectoryPath()
   if (raw === null || typeof raw !== "object") {
@@ -242,6 +299,7 @@ function normalizeAppSettingsReadResult(raw: unknown): AppSettingsReadResult {
     workDirectories?: unknown
     workDirectory?: unknown
     activeWorkDirectory?: unknown
+    update?: unknown
   }
   const legacyDirectory = typeof record.workDirectory === "string" ? record.workDirectory.trim() : ""
   const workDirectories = Array.isArray(record.workDirectories)
@@ -257,6 +315,7 @@ function normalizeAppSettingsReadResult(raw: unknown): AppSettingsReadResult {
     : legacyDirectory.length > 0
       ? legacyDirectory
       : undefined
+  const update = normalizeUpdatePrefs(record.update)
   return {
     defaultWorkDirectory,
     workDirectories,
@@ -265,6 +324,7 @@ function normalizeAppSettingsReadResult(raw: unknown): AppSettingsReadResult {
       : workDirectories.length === 1
         ? { activeWorkDirectory: workDirectories[0] }
         : {}),
+    ...(update === undefined ? {} : { update }),
   }
 }
 
@@ -308,6 +368,38 @@ export async function readAppSettings(): Promise<AppSettingsReadResult> {
       workDirectories: [],
     }
   }
+}
+
+export async function getAppUpdateInfo(): Promise<AppUpdateInfoResult> {
+  const bridge = getWorldseedBridge()
+  if (bridge?.getAppUpdateInfo === undefined) {
+    throw new Error("应用接口未更新，请完全退出并重启 Worldseed 后再试")
+  }
+  return bridge.getAppUpdateInfo()
+}
+
+export async function saveAppUpdatePrefs(input: AppUpdatePrefs): Promise<AppSettingsReadResult> {
+  const bridge = getWorldseedBridge()
+  if (bridge?.saveAppUpdatePrefs === undefined) {
+    throw new Error("应用接口未更新，请完全退出并重启 Worldseed 后再试")
+  }
+  return bridge.saveAppUpdatePrefs(input)
+}
+
+export async function checkAppUpdate(force = false): Promise<UpdateCheckResult> {
+  const bridge = getWorldseedBridge()
+  if (bridge?.checkAppUpdate === undefined) {
+    throw new Error("应用接口未更新，请完全退出并重启 Worldseed 后再试")
+  }
+  return bridge.checkAppUpdate({ force })
+}
+
+export async function openAppUpdateDownload(downloadUrl: string): Promise<{ ok: true }> {
+  const bridge = getWorldseedBridge()
+  if (bridge?.openAppUpdateDownload === undefined) {
+    throw new Error("应用接口未更新，请完全退出并重启 Worldseed 后再试")
+  }
+  return bridge.openAppUpdateDownload(downloadUrl)
 }
 
 export async function addWorkDirectory(directoryPath: string): Promise<AppSettingsReadResult> {

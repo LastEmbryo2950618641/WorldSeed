@@ -1067,6 +1067,16 @@ describe("project settings UI contract", () => {
       projectName: "雾港纪事",
       settings: defaultProjectSettings,
       activeModelName: "DeepSeek Chat",
+      appUpdate: {
+        info: null,
+        checking: false,
+        error: null,
+        statusMessage: null,
+        remote: null,
+        refreshInfo: async () => undefined,
+        checkNow: async () => null,
+        openDownload: async () => undefined,
+      },
       onClose: vi.fn(),
       onSave: vi.fn(),
       onOpenModelSettings: vi.fn(),
@@ -1078,6 +1088,7 @@ describe("project settings UI contract", () => {
     expect(html).toContain("世界图")
     expect(html).toContain("推演历史")
     expect(html).toContain("模型服务")
+    expect(html).toContain("关于")
     expect(html).toContain("最大模型调用次数")
     expect(html).toContain("推演发散程度")
     expect(html).toContain("基于世界观生成设定")

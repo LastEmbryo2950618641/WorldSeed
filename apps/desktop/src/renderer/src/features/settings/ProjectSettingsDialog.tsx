@@ -6,6 +6,7 @@ import {
   FolderOpen,
   Gauge,
   History,
+  Info,
   Network,
   Search,
   X,
@@ -14,10 +15,16 @@ import {
 
 import { projectSettingsSchema, type ProjectSettings, type WorldDivergenceMode } from "@worldseed/contracts"
 
+import type {
+  AppUpdateInfoResult,
+  UpdateCheckResult,
+  UpdateManifest,
+} from "../../api/client.js"
 import { UiTooltip } from "../../components/UiTooltip.js"
+import { AboutSettingsPanel } from "./AboutSettingsPanel.js"
 import { WorkDirectorySettingsPanel } from "./WorkDirectorySettingsPanel.js"
 
-type SettingsSection = "execution" | "retrieval" | "graph" | "history" | "model" | "workDirectory"
+type SettingsSection = "execution" | "retrieval" | "graph" | "history" | "model" | "workDirectory" | "about"
 type NumericExecutionSetting = Exclude<
   keyof ProjectSettings["execution"],
   "outputTokenLimitMode" | "worldDivergenceMode"
@@ -28,6 +35,17 @@ type Props = Readonly<{
   settings: ProjectSettings
   activeModelName: string
   historyEntryCount?: number
+  initialSection?: SettingsSection
+  appUpdate: Readonly<{
+    info: AppUpdateInfoResult | null
+    checking: boolean
+    error: string | null
+    statusMessage: string | null
+    remote: UpdateManifest | null
+    refreshInfo: () => Promise<void>
+    checkNow: (force?: boolean) => Promise<UpdateCheckResult | null>
+    openDownload: () => Promise<void>
+  }>
   onClose: () => void
   onSave: (settings: ProjectSettings) => void | Promise<void>
   onOpenModelSettings: () => void
@@ -48,18 +66,23 @@ const sections: readonly SectionDefinition[] = [
   { id: "history", label: "推演历史", group: "项目", keywords: "保存 历史 世界线 保留 上限 删除", icon: History },
   { id: "model", label: "模型服务", group: "应用", keywords: "base url api key deepseek 模型", icon: Bot },
   { id: "workDirectory", label: "工作目录", group: "应用", keywords: "书籍 存放 路径 目录 新建 默认", icon: FolderOpen },
+  { id: "about", label: "关于", group: "应用", keywords: "版本 构建号 更新 检查 关于 worldseed", icon: Info },
 ]
+
+const appOnlySections = new Set<SettingsSection>(["workDirectory", "about"])
 
 export function ProjectSettingsDialog({
   projectName,
   settings,
   activeModelName,
   historyEntryCount = 8,
+  initialSection = "execution",
+  appUpdate,
   onClose,
   onSave,
   onOpenModelSettings,
 }: Props): React.JSX.Element {
-  const [section, setSection] = useState<SettingsSection>("execution")
+  const [section, setSection] = useState<SettingsSection>(initialSection)
   const [query, setQuery] = useState("")
   const [draft, setDraft] = useState<ProjectSettings>(settings)
   const [saving, setSaving] = useState(false)
@@ -71,6 +94,7 @@ export function ProjectSettingsDialog({
     if (normalized.length === 0) return sections
     return sections.filter((item) => `${item.label} ${item.keywords}`.toLocaleLowerCase().includes(normalized))
   }, [query])
+  const isAppOnlySection = appOnlySections.has(section)
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -170,14 +194,26 @@ export function ProjectSettingsDialog({
           {section === "history" ? <HistorySettings value={draft.history} entryCount={historyEntryCount} onChange={updateHistoryLimit} /> : null}
           {section === "model" ? <ModelSettings activeModelName={activeModelName} onOpen={onOpenModelSettings} /> : null}
           {section === "workDirectory" ? <WorkDirectorySettingsPanel /> : null}
+          {section === "about" ? <AboutSettingsPanel
+            info={appUpdate.info}
+            checking={appUpdate.checking}
+            error={appUpdate.error}
+            statusMessage={appUpdate.statusMessage}
+            remote={appUpdate.remote}
+            onRefreshInfo={appUpdate.refreshInfo}
+            onCheckNow={appUpdate.checkNow}
+            onOpenDownload={appUpdate.openDownload}
+          /> : null}
         </div>
       </div>
       <footer className="model-dialog-footer settings-footer">
         <p>{section === "workDirectory"
           ? "工作目录变更会立即生效，无需点击应用。"
+          : section === "about"
+            ? "更新设置保存后立即生效；检查更新会按清单比对版本与构建号。"
           : saveError ?? validationMessage ?? "项目参数保存到内部数据库；新设置从下一轮推演开始生效。"}</p>
         <button className="secondary-command" onClick={onClose}>取消</button>
-        {section === "workDirectory"
+        {isAppOnlySection
           ? null
           : <button className="dialog-primary-command" data-testid="save-project-settings" onClick={() => void save()} disabled={saving || !validation.success}>{saving ? "保存中..." : "应用"}</button>}
       </footer>

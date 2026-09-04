@@ -7,6 +7,7 @@ directories:
 files:
   - out/**/*
   - package.json
+  - build-info.json
 asar: true
 asarUnpack:
   - "**/*.node"
@@ -16,6 +17,8 @@ extraResources:
     to: prompt-contracts/resources
   - from: ../../packages/prompt-contracts/package.json
     to: prompt-contracts/package.json
+  - from: build-info.json
+    to: build-info.json
 win:
   executableName: WorldSeed
   target:

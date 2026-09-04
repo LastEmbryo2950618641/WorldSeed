@@ -45,6 +45,7 @@ import { ProjectLauncher } from "../features/projects/ProjectLauncher.js"
 import { ProjectRail } from "../features/projects/ProjectRail.js"
 import { WorkNameControl } from "../features/projects/WorkNameControl.js"
 import { rememberWorkName } from "../features/projects/work-name-history.js"
+import { useAppUpdate } from "../hooks/useAppUpdate.js"
 import { WorkspaceTree } from "../features/workspace/WorkspaceTree.js"
 import { WorkspaceNameDialog } from "../features/workspace/WorkspaceNameDialog.js"
 import { canCreateFolderInDirectory, findDuplicateVolumeSequence, isValidVolumeFolderName, isChapterVolumeContainerPath, isVolumeDirectoryPath, resolveCreateDestination } from "../features/workspace/workspace-locks.js"
@@ -129,6 +130,8 @@ export function App(): React.JSX.Element {
   const [pendingGraphLoad, setPendingGraphLoad] = useState<PendingGraphLoad>()
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
   const [projectSettingsOpen, setProjectSettingsOpen] = useState(false)
+  const [projectSettingsSection, setProjectSettingsSection] = useState<"execution" | "retrieval" | "graph" | "history" | "model" | "workDirectory" | "about">("execution")
+  const appUpdate = useAppUpdate()
   const [workspaceCreatePrompt, setWorkspaceCreatePrompt] = useState<{
     kind: "file" | "directory"
     parentPath: string
@@ -1601,7 +1604,22 @@ export function App(): React.JSX.Element {
   }
 
   if (project === undefined) {
-    return <AppChrome>
+    return <AppChrome
+      rail={
+        <ProjectRail
+          onOpen={resetWorkbenchForProject}
+          updateAvailable={appUpdate.available}
+          onUpdateClick={() => {
+            const remote = appUpdate.remote
+            if (remote === null) return
+            const label = `${remote.version}（构建 ${remote.buildNumber}）`
+            if (window.confirm(`发现新版本 ${label}，是否前往下载？`)) {
+              void appUpdate.openDownload()
+            }
+          }}
+        />
+      }
+    >
       <ProjectLauncher onOpen={resetWorkbenchForProject} />
     </AppChrome>
   }
@@ -1630,6 +1648,15 @@ export function App(): React.JSX.Element {
       <ProjectRail
         activeProjectId={project.projectId}
         onOpen={resetWorkbenchForProject}
+        updateAvailable={appUpdate.available}
+        onUpdateClick={() => {
+          const remote = appUpdate.remote
+          if (remote === null) return
+          const label = `${remote.version}（构建 ${remote.buildNumber}）`
+          if (window.confirm(`发现新版本 ${label}，是否前往下载？`)) {
+            void appUpdate.openDownload()
+          }
+        }}
       />
     }
     titleLeading={
@@ -1648,7 +1675,7 @@ export function App(): React.JSX.Element {
           <button className="model-config-trigger" data-testid="model-config-trigger" aria-label="配置与切换模型" onClick={() => { setModelDialogOpen(true); }}><Cpu size={14} /><span>{activeModelProfile?.name ?? "未配置模型"}</span><ChevronDown size={13} /></button>
         </UiTooltip>
         <UiTooltip label="项目设置">
-          <button className="project-settings-trigger" data-testid="project-settings-trigger" aria-label="项目设置" disabled={projectSettings === undefined} onClick={() => { setProjectSettingsOpen(true); }}><Settings2 size={15} /></button>
+          <button className="project-settings-trigger" data-testid="project-settings-trigger" aria-label="项目设置" disabled={projectSettings === undefined} onClick={() => { setProjectSettingsSection("execution"); setProjectSettingsOpen(true); }}><Settings2 size={15} /></button>
         </UiTooltip>
       </>
     }
@@ -1908,6 +1935,8 @@ export function App(): React.JSX.Element {
       settings={projectSettings}
       activeModelName={activeModelProfile?.name ?? "未配置模型"}
       historyEntryCount={history?.entries.length ?? 0}
+      initialSection={projectSettingsSection}
+      appUpdate={appUpdate}
       onClose={() => { setProjectSettingsOpen(false); }}
       onSave={saveProjectSettings}
       onOpenModelSettings={() => { setProjectSettingsOpen(false); setModelDialogOpen(true); }}

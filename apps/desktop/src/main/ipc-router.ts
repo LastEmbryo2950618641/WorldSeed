@@ -29,9 +29,19 @@ import {
   addWorkDirectory,
   readAppSettings,
   removeWorkDirectory,
+  saveUpdatePrefs,
   setActiveWorkDirectory,
   toAppSettingsReadResult,
 } from "./app-settings.js"
+import {
+  checkForUpdate,
+  defaultUpdatePrefs,
+  openUpdateDownload,
+  readLocalAppIdentity,
+  shouldAutoCheck,
+  type AppUpdatePrefs,
+  type UpdateCheckIntervalHours,
+} from "./app-update.js"
 import { allocateUniqueBookPath } from "./book-path.js"
 
 const MODEL_CREDENTIAL_PAYLOAD_SCHEMAS = {
@@ -127,6 +137,43 @@ export function registerIpcRouter(
     const saved = await removeWorkDirectory(applicationDataRoot, payload)
     return toAppSettingsReadResult(saved)
   })
+  ipcMain.handle("worldseed:app-update:info", async () => {
+    const stored = await readAppSettings(applicationDataRoot)
+    const local = await readLocalAppIdentity()
+    const update = stored?.update ?? defaultUpdatePrefs()
+    return { local, update }
+  })
+  ipcMain.handle("worldseed:app-update:save-prefs", async (_event, input: unknown) => {
+    const prefs = parseUpdatePrefsPayload(input)
+    const saved = await saveUpdatePrefs(applicationDataRoot, prefs)
+    return toAppSettingsReadResult(saved)
+  })
+  ipcMain.handle("worldseed:app-update:check", async (_event, input: unknown) => {
+    const force = input !== null && typeof input === "object" && (input as { force?: unknown }).force === true
+    const stored = await readAppSettings(applicationDataRoot)
+    const prefs = stored?.update ?? defaultUpdatePrefs()
+    if (!force && !shouldAutoCheck(prefs, Date.now())) {
+      const local = await readLocalAppIdentity()
+      return {
+        checkedAtMs: prefs.lastCheckedAtMs ?? Date.now(),
+        updateAvailable: false,
+        local,
+        skipped: true,
+        reason: "未到检测间隔",
+      }
+    }
+    const result = await checkForUpdate(prefs)
+    await saveUpdatePrefs(applicationDataRoot, {
+      ...prefs,
+      lastCheckedAtMs: result.checkedAtMs,
+    })
+    return { ...result, skipped: false }
+  })
+  ipcMain.handle("worldseed:app-update:open-download", async (_event, input: unknown) => {
+    const downloadUrl = parseDownloadUrlPayload(input)
+    await openUpdateDownload(downloadUrl)
+    return { ok: true }
+  })
   ipcMain.handle("worldseed:book-path:allocate", async (_event, input: unknown) => {
     const workDirectory = parseWorkDirectoryPayload(input)
     return allocateUniqueBookPath(workDirectory)
@@ -164,9 +211,45 @@ export function unregisterIpcRouter(): void {
   ipcMain.removeHandler("worldseed:app-settings:work-directory:add")
   ipcMain.removeHandler("worldseed:app-settings:work-directory:set-active")
   ipcMain.removeHandler("worldseed:app-settings:work-directory:remove")
+  ipcMain.removeHandler("worldseed:app-update:info")
+  ipcMain.removeHandler("worldseed:app-update:save-prefs")
+  ipcMain.removeHandler("worldseed:app-update:check")
+  ipcMain.removeHandler("worldseed:app-update:open-download")
   ipcMain.removeHandler("worldseed:book-path:allocate")
   ipcMain.removeHandler("worldseed:select-directory")
   ipcMain.removeHandler("worldseed:select-markdown-files")
+}
+
+function parseUpdatePrefsPayload(input: unknown): AppUpdatePrefs {
+  if (input === null || typeof input !== "object") throw new Error("无效的更新设置")
+  const record = input as Record<string, unknown>
+  const updateUrl = typeof record.updateUrl === "string" ? record.updateUrl.trim() : ""
+  if (updateUrl.length === 0) throw new Error("更新地址不能为空")
+  const interval = record.checkIntervalHours
+  const checkIntervalHours = interval === undefined || interval === null || interval === ""
+    ? undefined
+    : interval === 1 || interval === 2 || interval === 4 || interval === 8 || interval === 24
+      ? interval as UpdateCheckIntervalHours
+      : undefined
+  if (interval !== undefined && interval !== null && interval !== "" && checkIntervalHours === undefined) {
+    throw new Error("检测间隔仅支持 1/2/4/8/24 小时")
+  }
+  const base = defaultUpdatePrefs()
+  return {
+    updateUrl,
+    ...(checkIntervalHours === undefined ? {} : { checkIntervalHours }),
+    ...(typeof record.lastCheckedAtMs === "number" ? { lastCheckedAtMs: record.lastCheckedAtMs } : {}),
+    compareMode: record.compareMode === "semver" ? "semver" : (base.compareMode ?? "any_change"),
+  }
+}
+
+function parseDownloadUrlPayload(input: unknown): string {
+  if (input === null || typeof input !== "object") throw new Error("无效的下载参数")
+  const downloadUrl = (input as { downloadUrl?: unknown }).downloadUrl
+  if (typeof downloadUrl !== "string" || downloadUrl.trim().length === 0) {
+    throw new Error("下载地址不能为空")
+  }
+  return downloadUrl.trim()
 }
 
 function parseWaitTimeoutMs(options: unknown): number {

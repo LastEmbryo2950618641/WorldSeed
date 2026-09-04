@@ -49,11 +49,10 @@ export type ProjectRailItem = Readonly<{
 
 
 type Props = Readonly<{
-
   activeProjectId?: string | undefined
-
+  updateAvailable?: boolean
   onOpen(project: OpenProject): void
-
+  onUpdateClick?: () => void
 }>
 
 
@@ -96,7 +95,7 @@ function projectIconSrc(item: ProjectRailItem): string {
 
 export function ProjectRail(props: Props): React.JSX.Element {
 
-  const { activeProjectId, onOpen } = props
+  const { activeProjectId, onOpen, updateAvailable = false, onUpdateClick } = props
 
   const workDirectoryState = useWorkDirectory()
 
@@ -310,9 +309,31 @@ export function ProjectRail(props: Props): React.JSX.Element {
 
       <div className="project-rail-header">
 
-        <div className="project-rail-brand" aria-hidden="true" title="Worldseed">
+        <div className="project-rail-brand" title="Worldseed">
 
           <img className="project-rail-brand-mark" src={appBrandIcon} alt="" draggable={false} />
+
+          {updateAvailable
+
+            ? <button
+
+                type="button"
+
+                className="project-rail-update"
+
+                data-testid="project-rail-update"
+
+                aria-label="有可用更新"
+
+                onClick={() => { onUpdateClick?.() }}
+
+              >
+
+                更新
+
+              </button>
+
+            : null}
 
         </div>
 

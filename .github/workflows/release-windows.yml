@@ -69,6 +69,13 @@ jobs:
         run: |
           node -e "const fs=require('fs'); const p='apps/desktop/package.json'; const j=JSON.parse(fs.readFileSync(p,'utf8')); j.version=process.env.RELEASE_VERSION; fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n'); console.log('Set @worldseed/desktop version to', j.version)"
 
+      - name: Stamp build-info.json
+        shell: pwsh
+        run: |
+          $buildNumber = if ($env:GITHUB_RUN_NUMBER) { $env:GITHUB_RUN_NUMBER } else { "0" }
+          @{ buildNumber = "$buildNumber" } | ConvertTo-Json | Set-Content -Path "apps/desktop/build-info.json" -Encoding utf8
+          Write-Host "buildNumber=$buildNumber"
+
       - name: Prefer hoisted node_modules for electron-builder
         shell: pwsh
         run: |
@@ -99,6 +106,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           corepack pnpm --filter @worldseed/desktop package:win
 
+      - name: Write latest.json manifest
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          $buildNumber = if ($env:GITHUB_RUN_NUMBER) { $env:GITHUB_RUN_NUMBER } else { "0" }
+          $downloadUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/WorldSeed-$env:RELEASE_VERSION-Setup.exe"
+          $manifest = @{
+            version = $env:RELEASE_VERSION
+            buildNumber = "$buildNumber"
+            downloadUrl = $downloadUrl
+            productName = "WorldSeed"
+          }
+          $manifest | ConvertTo-Json | Set-Content -Path "apps/desktop/release/latest.json" -Encoding utf8
+          Get-Content "apps/desktop/release/latest.json"
+
       - name: List release artifacts
         shell: pwsh
         run: |
@@ -113,6 +137,7 @@ jobs:
           path: |
             apps/desktop/release/*.exe
             apps/desktop/release/*.blockmap
+            apps/desktop/release/latest.json
           if-no-files-found: error
 
       - name: Create GitHub Release
@@ -127,5 +152,6 @@ jobs:
           files: |
             apps/desktop/release/*.exe
             apps/desktop/release/*.blockmap
+            apps/desktop/release/latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

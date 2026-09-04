@@ -10,6 +10,22 @@ import type {
   ModelProfileDraft,
 } from "@worldseed/contracts"
 
+export type UpdateCheckIntervalHours = 1 | 2 | 4 | 8 | 24
+
+export type AppUpdatePrefs = Readonly<{
+  updateUrl: string
+  checkIntervalHours?: UpdateCheckIntervalHours
+  lastCheckedAtMs?: number
+  compareMode?: "any_change" | "semver"
+}>
+
+export type AppSettingsReadResult = Readonly<{
+  defaultWorkDirectory: string
+  workDirectories: readonly string[]
+  activeWorkDirectory?: string
+  update?: AppUpdatePrefs
+}>
+
 /** Avoid node:os / node:path in sandboxed preload — use env only. */
 export function resolveDefaultWorkDirectoryPath(): string {
   const home = (process.env.USERPROFILE ?? process.env.HOME ?? "").replace(/[\\/]+$/u, "")
@@ -28,6 +44,7 @@ function normalizeAppSettingsReadResult(raw: unknown): AppSettingsReadResult {
     workDirectories?: unknown
     workDirectory?: unknown
     activeWorkDirectory?: unknown
+    update?: unknown
   }
   const legacyDirectory = typeof record.workDirectory === "string" ? record.workDirectory.trim() : ""
   const workDirectories = Array.isArray(record.workDirectories)
@@ -43,6 +60,7 @@ function normalizeAppSettingsReadResult(raw: unknown): AppSettingsReadResult {
     : legacyDirectory.length > 0
       ? legacyDirectory
       : undefined
+  const update = parseUpdatePrefsFromRecord(record.update)
   return {
     defaultWorkDirectory,
     workDirectories,
@@ -51,6 +69,26 @@ function normalizeAppSettingsReadResult(raw: unknown): AppSettingsReadResult {
       : workDirectories.length > 0
         ? { activeWorkDirectory: workDirectories[0] }
         : {}),
+    ...(update === undefined ? {} : { update }),
+  }
+}
+
+function parseUpdatePrefsFromRecord(raw: unknown): AppUpdatePrefs | undefined {
+  if (raw === null || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  const updateUrl = typeof record.updateUrl === "string" ? record.updateUrl.trim() : ""
+  if (updateUrl.length === 0) return undefined
+  const interval = record.checkIntervalHours
+  const checkIntervalHours = interval === 1 || interval === 2 || interval === 4 || interval === 8 || interval === 24
+    ? interval
+    : undefined
+  return {
+    updateUrl,
+    ...(checkIntervalHours === undefined ? {} : { checkIntervalHours }),
+    ...(typeof record.lastCheckedAtMs === "number" ? { lastCheckedAtMs: record.lastCheckedAtMs } : {}),
+    ...(record.compareMode === "semver" || record.compareMode === "any_change"
+      ? { compareMode: record.compareMode }
+      : {}),
   }
 }
 
@@ -69,10 +107,32 @@ export type DesktopModelProfiles = Readonly<{
 
 export type RemoveWorkDirectoryMode = "keep_data" | "include_data"
 
-export type AppSettingsReadResult = Readonly<{
-  defaultWorkDirectory: string
-  workDirectories: readonly string[]
-  activeWorkDirectory?: string
+export type LocalAppIdentity = Readonly<{
+  productName: string
+  version: string
+  buildNumber: string
+}>
+
+export type UpdateManifest = Readonly<{
+  version: string
+  buildNumber: string
+  downloadUrl: string
+  productName?: string
+  releaseNotes?: string
+}>
+
+export type UpdateCheckResult = Readonly<{
+  checkedAtMs: number
+  updateAvailable: boolean
+  local: LocalAppIdentity
+  remote?: UpdateManifest
+  reason?: string
+  skipped?: boolean
+}>
+
+export type AppUpdateInfoResult = Readonly<{
+  local: LocalAppIdentity
+  update: AppUpdatePrefs
 }>
 
 export type AppSettings = Readonly<{
@@ -100,6 +160,10 @@ export type WorldseedBridge = Readonly<{
   addWorkDirectory(directoryPath: string): Promise<AppSettingsReadResult>
   setActiveWorkDirectory(directoryPath: string): Promise<AppSettingsReadResult>
   removeWorkDirectory(input: Readonly<{ directoryPath: string; mode: RemoveWorkDirectoryMode }>): Promise<AppSettingsReadResult>
+  getAppUpdateInfo(): Promise<AppUpdateInfoResult>
+  saveAppUpdatePrefs(input: AppUpdatePrefs): Promise<AppSettingsReadResult>
+  checkAppUpdate(input?: { force?: boolean }): Promise<UpdateCheckResult>
+  openAppUpdateDownload(downloadUrl: string): Promise<{ ok: true }>
   allocateBookPath(workDirectory: string): Promise<string>
   selectDirectory(input?: { title?: string; defaultPath?: string }): Promise<string | undefined>
   selectMarkdownFiles(input?: { title?: string; defaultPath?: string }): Promise<readonly string[]>
@@ -136,6 +200,10 @@ export const worldseedBridge: WorldseedBridge = {
   addWorkDirectory: async (directoryPath) => normalizeAppSettingsReadResult(await ipcRenderer.invoke("worldseed:app-settings:work-directory:add", { directoryPath })),
   setActiveWorkDirectory: async (directoryPath) => normalizeAppSettingsReadResult(await ipcRenderer.invoke("worldseed:app-settings:work-directory:set-active", { directoryPath })),
   removeWorkDirectory: async (input) => normalizeAppSettingsReadResult(await ipcRenderer.invoke("worldseed:app-settings:work-directory:remove", input)),
+  getAppUpdateInfo: async () => ipcRenderer.invoke("worldseed:app-update:info") as Promise<AppUpdateInfoResult>,
+  saveAppUpdatePrefs: async (input) => normalizeAppSettingsReadResult(await ipcRenderer.invoke("worldseed:app-update:save-prefs", input)),
+  checkAppUpdate: async (input) => ipcRenderer.invoke("worldseed:app-update:check", input ?? {}) as Promise<UpdateCheckResult>,
+  openAppUpdateDownload: async (downloadUrl) => ipcRenderer.invoke("worldseed:app-update:open-download", { downloadUrl }) as Promise<{ ok: true }>,
   allocateBookPath: async (workDirectory) => ipcRenderer.invoke("worldseed:book-path:allocate", { workDirectory }) as Promise<string>,
   selectDirectory: async (input) => ipcRenderer.invoke("worldseed:select-directory", input) as Promise<string | undefined>,
   selectMarkdownFiles: async (input) => {
