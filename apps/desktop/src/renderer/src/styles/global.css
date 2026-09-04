@@ -519,6 +519,15 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   color: var(--accent);
   font-size: 11px;
 }
+.app-update-dialog > header > div {
+  min-width: 0;
+}
+.app-update-dialog > header strong,
+.app-update-dialog > header small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .app-update-dialog .app-update-dialog-meta {
   margin-top: 10px;
   color: var(--text-muted);

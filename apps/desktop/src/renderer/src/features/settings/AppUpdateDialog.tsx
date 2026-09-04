@@ -1,3 +1,5 @@
+import { Download } from "lucide-react"
+
 import type { LocalAppIdentity, UpdateManifest } from "../../api/client.js"
 
 export type AppUpdateDialogPhase =
@@ -163,6 +165,7 @@ export function AppUpdateDialog(props: Props): React.JSX.Element {
         aria-labelledby="app-update-dialog-title"
       >
         <header>
+          <span className="work-name-prompt-icon" aria-hidden="true"><Download size={16} /></span>
           <div>
             <strong id="app-update-dialog-title">{title}</strong>
             <small>{subtitle}</small>
