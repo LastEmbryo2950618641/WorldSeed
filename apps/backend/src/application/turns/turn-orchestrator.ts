@@ -1680,7 +1680,28 @@ export class TurnOrchestrator {
     totalUsage: PhaseUsage,
   ): Promise<TurnExecutionResult> {
     const parsedNaming = chapterNamingArtifactSchema.parse(artifacts.chapter_naming)
-    const naming = { ...parsedNaming, heading: normalizeChapterHeading(parsedNaming.heading) }
+    let naming = { ...parsedNaming, heading: normalizeChapterHeading(parsedNaming.heading) }
+    if (this.dependencies.chapterSynopsis !== undefined) {
+      const planning = await this.dependencies.chapterSynopsis.findPlanningHeading({
+        workspaceRootRef: input.workspaceRootRef,
+        chapterSequence: input.chapterSequence,
+      })
+      if (planning !== undefined) {
+        // Formal deduction from 梗概/细纲 must keep the same title stem as planning files.
+        naming = {
+          ...naming,
+          heading: normalizeChapterHeading(planning.titleLabel),
+          volumeFolderName: planning.volumeFolderName,
+        }
+        this.log("info", "turn.chapter_heading.aligned_to_planning", {
+          taskId: state.taskId,
+          chapterSequence: input.chapterSequence,
+          proposedHeading: parsedNaming.heading,
+          alignedHeading: naming.heading,
+          sourcePath: planning.sourcePath,
+        })
+      }
+    }
     const draft = internalDraftArtifactSchema.parse(artifacts.draft)
     const commitReview = parsePhaseArtifact("commit_review", artifacts.commit_review) as { recommendation: string }
     this.log("debug", "turn.commit_review.advisory", {
@@ -1857,6 +1878,25 @@ export class TurnOrchestrator {
             })
           }
         }
+        // Mark the turn completed before post-commit synopsis handoff analysis so
+        // the desktop can open 正文 while analysis still runs (handoff remains awaited
+        // so evolution / execute settlement stay serialized after it).
+        this.log("debug", "turn.finalization.step.started", {
+          taskId: current.taskId,
+          finalizationId: current.finalizationId,
+          step: "task_complete",
+        })
+        await this.dependencies.persistence.completeFinalization(
+          current.finalizationId,
+          current.taskId,
+          "commit_review",
+          this.dependencies.now(),
+        )
+        this.log("debug", "turn.finalization.step.completed", {
+          taskId: current.taskId,
+          finalizationId: current.finalizationId,
+          step: "task_complete",
+        })
         if (this.dependencies.synopsisConversation !== undefined) {
           try {
             const body = await this.dependencies.workspace.readMarkdown(
@@ -1888,22 +1928,6 @@ export class TurnOrchestrator {
             })
           }
         }
-        this.log("debug", "turn.finalization.step.started", {
-          taskId: current.taskId,
-          finalizationId: current.finalizationId,
-          step: "task_complete",
-        })
-        await this.dependencies.persistence.completeFinalization(
-          current.finalizationId,
-          current.taskId,
-          "commit_review",
-          this.dependencies.now(),
-        )
-        this.log("debug", "turn.finalization.step.completed", {
-          taskId: current.taskId,
-          finalizationId: current.finalizationId,
-          step: "task_complete",
-        })
       }
       return this.turnResultFromFinalization(current)
     } catch (error) {

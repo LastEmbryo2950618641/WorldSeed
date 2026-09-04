@@ -3481,6 +3481,54 @@ describe("TurnOrchestrator", () => {
       .where("kind", "=", "canonical_chapter").execute())).toHaveLength(1)
   })
 
+  it("marks the task completed before awaiting post-commit synopsis handoff analysis", async () => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    let releaseHandoff!: () => void
+    const handoffGate = new Promise<void>((resolve) => {
+      releaseHandoff = resolve
+    })
+    let handoffStarted = false
+    let taskStatusWhenHandoffStarted: string | undefined
+    const events: Array<{ event: string; fields?: Readonly<Record<string, unknown>> }> = []
+
+    const orchestrator = fixture.createOrchestrator(fake, fixture.commit, {
+      log: (_level, event, fields) => { events.push({ event, fields }) },
+      synopsisConversation: {
+        recordTurnHandoff: async () => {
+          handoffStarted = true
+          const task = await fixture.database.selectFrom("tasks").select("status").executeTakeFirstOrThrow()
+          taskStatusWhenHandoffStarted = task.status
+          await handoffGate
+          return undefined
+        },
+      },
+    })
+
+    const executePromise = orchestrator.execute({
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "验证提交完成后才做交接分析。",
+      chapterSequence: 1,
+    })
+
+    for (let attempt = 0; attempt < 200 && !handoffStarted; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    expect(handoffStarted).toBe(true)
+    expect(taskStatusWhenHandoffStarted).toBe("completed")
+    expect((await fixture.persistence.findFinalizationByTask(
+      (await fixture.database.selectFrom("tasks").select("id").executeTakeFirstOrThrow()).id,
+    ))?.status).toBe("completed")
+
+    releaseHandoff()
+    const result = await executePromise
+    expect(result.kind).toBe("turn")
+    expect(events.some((entry) => entry.event === "turn.finalization.step.completed"
+      && entry.fields?.step === "task_complete")).toBe(true)
+  })
+
   it("reuses one persistent model context chain across consecutive turns", async () => {
     const fixture = await createFixture()
     const fake = new FakeAiModelAdapter(randomUUID)
@@ -4088,7 +4136,10 @@ async function createFixture() {
     createOrchestrator(
       model: AIModelPort,
       commitRepository: ScopeCommitRepository,
-      diagnostics?: { log(level: "debug" | "info" | "warn" | "error", event: string, fields?: Readonly<Record<string, unknown>>): void },
+      diagnostics?: {
+        log?(level: "debug" | "info" | "warn" | "error", event: string, fields?: Readonly<Record<string, unknown>>): void
+        synopsisConversation?: { recordTurnHandoff(input: unknown): Promise<unknown> }
+      },
       workspace: WorkspacePort = new NodeWorkspaceAdapter(),
       webResearch?: WebResearchPort,
     ) {
@@ -4111,10 +4162,13 @@ async function createFixture() {
         internalStore: new NodeInternalStoreAdapter(applicationDataRoot),
         workspace,
         ...(webResearch === undefined ? {} : { webResearch }),
+        ...(diagnostics?.synopsisConversation === undefined
+          ? {}
+          : { synopsisConversation: diagnostics.synopsisConversation as never }),
         createId: randomUUID,
         idAllocator: new SqliteProjectIdAllocator(database),
         now: () => Date.now(),
-        diagnostics,
+        ...(diagnostics?.log === undefined ? {} : { diagnostics: { log: diagnostics.log } }),
       })
     },
   }

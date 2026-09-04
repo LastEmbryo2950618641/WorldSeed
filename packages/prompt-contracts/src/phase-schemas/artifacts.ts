@@ -617,6 +617,13 @@ export const synopsisPresentationWriteSchema = z.object({
 export const synopsisDiscussArtifactSchema = z.object({
   assistantMessage: z.string().min(1),
   chapterTitle: z.string().min(1).optional(),
+  /**
+   * When 正文 vs 梗概/细纲 标题主干不一致时：系统按目标统一重命名。
+   * - `body`：把梗概/细纲改成与已落盘正文同名（推荐）
+   * - `planning`：把正文文件改成与当前梗概/细纲同名
+   * 须先经用户 `choices` 确认；可与 `chapterTitle` 同回（标题须与目标一致）。
+   */
+  titleAlignTarget: z.enum(["body", "planning"]).optional(),
   /** Volume folder under 章节正文, e.g. `第一卷 潮水退去时`. */
   volumeFolderName: z.string().min(1).refine(
     (value) => /^第(?:\d+|[零一二三四五六七八九十百]+)卷\s+\S.*$/u.test(value.trim()),

@@ -3,11 +3,19 @@ import type { ChapterSynopsis, ProjectId } from "@worldseed/contracts"
 import type { WorkspacePort } from "../workspace/index.js"
 import type { SqliteChapterSynopsisRepository } from "../../infrastructure/sqlite/repositories/sqlite-chapter-synopsis-repository.js"
 import type { SqliteSynopsisConversationRepository } from "../../infrastructure/sqlite/repositories/sqlite-synopsis-conversation-repository.js"
+import { DEFAULT_VOLUME_FOLDER_NAME, extractVolumeFolderNameFromPath } from "../../core/chapters/chapter-volume.js"
+import { normalizeChapterHeading, parseChapterSequenceFromLabel } from "../../core/chapters/chapter-document.js"
 import {
+  deriveOutlineMarkdownPath,
   deriveSynopsisMarkdownPath,
+  isChapterBodyMarkdownPath,
+  isChapterPlanningMarkdownPath,
+  isOutlineMarkdownPath,
   isSynopsisMarkdownPath,
   isSynopsisPlaceholderDocument,
+  parseOutlineMarkdownPath,
   parseSynopsisMarkdownPath,
+  parseSynopsisTitleFromLabel,
 } from "../../core/chapters/synopsis-path.js"
 import { runtimeLog } from "../../infrastructure/diagnostics/index.js"
 
@@ -23,6 +31,23 @@ export type CapturedSynopsisRematerialize = Readonly<{
   markdown: string
   chapterSequence?: number
   sessionId?: string
+}>
+
+export type PlanningChapterHeading = Readonly<{
+  titleLabel: string
+  volumeFolderName: string
+  sourcePath: string
+}>
+
+/** Injected into synopsisDiscuss when body vs planning titles diverge for the same sequence. */
+export type TitleAlignmentIssue = Readonly<{
+  chapterSequence: number
+  bodyPath: string
+  bodyHeading: string
+  planningHeading: string
+  planningPaths: readonly string[]
+  recommendedTarget: "body" | "planning"
+  remediation: string
 }>
 
 export class ChapterSynopsisService {
@@ -42,6 +67,111 @@ export class ChapterSynopsisService {
     return undefined
   }
 
+  /**
+   * Prefer existing 细纲/梗概 title for the sequence so publish cannot invent a divergent heading.
+   * Outline wins over synopsis when both exist.
+   */
+  public async findPlanningHeading(input: Readonly<{
+    workspaceRootRef: string
+    chapterSequence: number
+  }>): Promise<PlanningChapterHeading | undefined> {
+    const candidates = await this.listPlanningFilesForSequence(input.workspaceRootRef, input.chapterSequence)
+    const outline = candidates.find((entry) => entry.kind === "outline")
+    const synopsis = candidates.find((entry) => entry.kind === "synopsis")
+    const preferred = outline ?? synopsis
+    if (preferred === undefined) return undefined
+    return {
+      titleLabel: preferred.titleLabel,
+      volumeFolderName: preferred.volumeFolderName,
+      sourcePath: preferred.path,
+    }
+  }
+
+  /**
+   * Detect same-sequence body vs 梗概/细纲 filename stem mismatch (UI related rail "尚未创建").
+   */
+  public async detectTitleAlignmentIssue(input: Readonly<{
+    workspaceRootRef: string
+    chapterSequence: number
+  }>): Promise<TitleAlignmentIssue | undefined> {
+    const planning = await this.findPlanningHeading(input)
+    const body = await this.findBodyForSequence(input.workspaceRootRef, input.chapterSequence)
+    if (planning === undefined || body === undefined) return undefined
+    const planningShort = parseSynopsisTitleFromLabel(planning.titleLabel) ?? planning.titleLabel
+    const bodyShort = parseSynopsisTitleFromLabel(body.heading) ?? body.heading
+    if (planningShort === bodyShort || planning.titleLabel === body.heading) return undefined
+    const candidates = await this.listPlanningFilesForSequence(input.workspaceRootRef, input.chapterSequence)
+    return {
+      chapterSequence: input.chapterSequence,
+      bodyPath: body.path,
+      bodyHeading: body.heading,
+      planningHeading: planning.titleLabel,
+      planningPaths: candidates.map((entry) => entry.path),
+      recommendedTarget: "body",
+      remediation: [
+        "同章正文与梗概/细纲标题不一致；右侧关联栏可能误显示「尚未创建」。",
+        "先用 choices 请用户选择统一到正文或统一到细纲。",
+        "用户确认后输出 titleAlignTarget=body|planning（可辅以 chapterTitle）。",
+        "验收：文件树同章只剩一个折叠入口，关联栏梗概/细纲变为已创建。",
+      ].join(" "),
+    }
+  }
+
+  /**
+   * Rename on-disk 梗概/细纲 so their title stem matches the published body heading.
+   * Design: 三文件共享同一标题主干.
+   */
+  public async alignPlanningTitlesToPublishedHeading(input: Readonly<{
+    projectId: ProjectId
+    workspaceRootRef: string
+    chapterSequence: number
+    chapterHeading: string
+    chapterPath: string
+  }>): Promise<void> {
+    const heading = normalizeChapterHeading(input.chapterHeading)
+    const volumeFolderName = extractVolumeFolderNameFromPath(input.chapterPath)
+      ?? DEFAULT_VOLUME_FOLDER_NAME
+    const targetSynopsis = deriveSynopsisMarkdownPath(input.chapterSequence, heading, volumeFolderName)
+    const targetOutline = deriveOutlineMarkdownPath(input.chapterSequence, heading, volumeFolderName)
+    const candidates = await this.listPlanningFilesForSequence(input.workspaceRootRef, input.chapterSequence)
+
+    for (const entry of candidates) {
+      const target = entry.kind === "outline" ? targetOutline : targetSynopsis
+      if (entry.path === target) continue
+      const content = await this.readPlanningFile(input.workspaceRootRef, entry.path)
+      if (content.trim().length === 0) {
+        await this.dependencies.workspace.removeSynopsisMarkdown(input.workspaceRootRef, entry.path).catch(() => undefined)
+        continue
+      }
+      const existingTarget = await this.readPlanningFile(input.workspaceRootRef, target)
+      if (existingTarget.trim().length === 0) {
+        await this.dependencies.workspace.saveSynopsisMarkdown(input.workspaceRootRef, target, content)
+      }
+      if (entry.path !== target) {
+        await this.dependencies.workspace.removeSynopsisMarkdown(input.workspaceRootRef, entry.path).catch(() => undefined)
+      }
+    }
+
+    const session = await this.dependencies.conversation.findBySequence(input.projectId, input.chapterSequence)
+    if (session !== undefined && (session.synopsisPath !== targetSynopsis || session.title !== heading)) {
+      const shortTitle = parseSynopsisTitleFromLabel(heading) ?? heading
+      await this.dependencies.conversation.updateSession({
+        sessionId: session.sessionId,
+        synopsisPath: targetSynopsis,
+        title: shortTitle,
+        updatedAtMs: this.dependencies.now(),
+      })
+    }
+
+    runtimeLog("debug", "chapter-synopsis", "aligned_planning_titles", {
+      projectId: input.projectId,
+      chapterSequence: input.chapterSequence,
+      chapterHeading: heading,
+      targetSynopsis,
+      targetOutline,
+    })
+  }
+
   public async linkAfterPublish(input: Readonly<{
     projectId: ProjectId
     workspaceRootRef: string
@@ -49,6 +179,21 @@ export class ChapterSynopsisService {
     chapterSequence: number
     chapterPath: string
   }>): Promise<void> {
+    const chapterHeading = input.chapterPath
+      .replaceAll("\\", "/")
+      .split("/")
+      .at(-1)
+      ?.replace(/\.md$/u, "")
+    if (chapterHeading !== undefined && chapterHeading.length > 0) {
+      await this.alignPlanningTitlesToPublishedHeading({
+        projectId: input.projectId,
+        workspaceRootRef: input.workspaceRootRef,
+        chapterSequence: input.chapterSequence,
+        chapterHeading,
+        chapterPath: input.chapterPath,
+      })
+    }
+
     const session = await this.dependencies.conversation.findBySequence(input.projectId, input.chapterSequence)
     if (session === undefined) return
 
@@ -252,5 +397,66 @@ export class ChapterSynopsisService {
       status: "completed",
       updatedAtMs: this.dependencies.now(),
     })
+  }
+
+  private async findBodyForSequence(
+    workspaceRootRef: string,
+    chapterSequence: number,
+  ): Promise<Readonly<{ path: string; heading: string; volumeFolderName: string }> | undefined> {
+    const report = await this.dependencies.workspace.validate(workspaceRootRef)
+    for (const entry of report.inventory) {
+      if (entry.kind !== "file" || !isChapterBodyMarkdownPath(entry.path)) continue
+      const normalized = entry.path.replaceAll("\\", "/")
+      const filename = normalized.slice(normalized.lastIndexOf("/") + 1).replace(/\.md$/u, "")
+      if (parseChapterSequenceFromLabel(filename) !== chapterSequence) continue
+      return {
+        path: normalized,
+        heading: filename,
+        volumeFolderName: extractVolumeFolderNameFromPath(normalized) ?? DEFAULT_VOLUME_FOLDER_NAME,
+      }
+    }
+    return undefined
+  }
+
+  private async listPlanningFilesForSequence(
+    workspaceRootRef: string,
+    chapterSequence: number,
+  ): Promise<readonly Readonly<{
+    path: string
+    kind: "synopsis" | "outline"
+    titleLabel: string
+    volumeFolderName: string
+  }>[]> {
+    const report = await this.dependencies.workspace.validate(workspaceRootRef)
+    const found: Array<{
+      path: string
+      kind: "synopsis" | "outline"
+      titleLabel: string
+      volumeFolderName: string
+    }> = []
+    for (const entry of report.inventory) {
+      if (entry.kind !== "file" || !isChapterPlanningMarkdownPath(entry.path)) continue
+      const parsed = isOutlineMarkdownPath(entry.path)
+        ? parseOutlineMarkdownPath(entry.path)
+        : parseSynopsisMarkdownPath(entry.path)
+      if (parsed?.sequence !== chapterSequence) continue
+      found.push({
+        path: entry.path,
+        kind: isOutlineMarkdownPath(entry.path) ? "outline" : "synopsis",
+        titleLabel: parsed.titleLabel,
+        volumeFolderName: parsed.volumeFolderName
+          ?? extractVolumeFolderNameFromPath(entry.path)
+          ?? DEFAULT_VOLUME_FOLDER_NAME,
+      })
+    }
+    return found
+  }
+
+  private async readPlanningFile(workspaceRootRef: string, relativePath: string): Promise<string> {
+    try {
+      return await this.dependencies.workspace.readMarkdown(workspaceRootRef, relativePath)
+    } catch {
+      return ""
+    }
   }
 }

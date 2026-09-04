@@ -61,7 +61,7 @@ import { CreationDeskProgressReviewDialog } from "../features/editor/CreationDes
 import { countPendingReviews } from "../features/editor/creation-desk-goals.js"
 import {
   isChapterPlanningMarkdownPath,
-  resolveChapterArtifactRelations,
+  resolveChapterArtifactRelationsWithInventory,
   resolveChapterMarkdownKind,
   resolveChapterSurfacePath,
 } from "../features/editor/synopsis-path.js"
@@ -175,7 +175,8 @@ export function App(): React.JSX.Element {
       setRelatedChapterArtifacts([])
       return
     }
-    const relations = resolveChapterArtifactRelations(path)
+    const inventoryPaths = report.inventory.map((entry) => entry.path)
+    const relations = resolveChapterArtifactRelationsWithInventory(path, inventoryPaths)
     if (relations === undefined) {
       setRelatedChapterArtifacts([])
       return
@@ -211,7 +212,7 @@ export function App(): React.JSX.Element {
       }
     }))
     setRelatedChapterArtifacts(loaded)
-  }, [project])
+  }, [project, report.inventory])
 
   const refreshChapterConversation = useCallback(async (chapterId: string): Promise<void> => {
     if (project === undefined) return
@@ -250,8 +251,9 @@ export function App(): React.JSX.Element {
       list.push(entry.path)
       byDir.set(dir, list)
     }
-    for (const [dir, paths] of byDir) {
-      // Group by chapter sequence stem loosely: keep one surface per unique basename stem.
+    for (const [, paths] of byDir) {
+      // Group by chapter sequence when parseable so divergent titles still fold;
+      // fall back to basename stem for unlabeled files.
       const groups = new Map<string, string[]>()
       for (const path of paths) {
         const name = path.slice(path.lastIndexOf("/") + 1)
@@ -261,9 +263,13 @@ export function App(): React.JSX.Element {
           .replace(/\s*\[剧情细纲\]\.md$/u, "")
           .replace(/\[剧情细纲\]\.md$/u, "")
           .replace(/\.md$/u, "")
-        const group = groups.get(stem) ?? []
+        const sequenceMatch = stem.match(/^第(\d+|[零一二三四五六七八九十百]+)章(?:\s|$)/u)
+        const groupKey = sequenceMatch === null
+          ? `stem:${stem}`
+          : `seq:${sequenceMatch[1] ?? stem}`
+        const group = groups.get(groupKey) ?? []
         group.push(path)
-        groups.set(stem, group)
+        groups.set(groupKey, group)
       }
       for (const groupPaths of groups.values()) {
         const surface = resolveChapterSurfacePath(groupPaths)
@@ -844,6 +850,7 @@ export function App(): React.JSX.Element {
 
   const monitorTask = async (taskId: string): Promise<void> => {
     let consecutiveFailures = 0
+    let chapterSurfaceOpened = false
     for (;;) {
       let snapshot: TaskSnapshot
       try {
@@ -856,20 +863,41 @@ export function App(): React.JSX.Element {
         continue
       }
       setTask(snapshot)
-      if (snapshot.status === "completed") {
-        setPrompt("")
+
+      const finalizationReady = snapshot.finalization !== undefined
+        && (snapshot.finalization.status === "chapter_registered"
+          || snapshot.finalization.status === "completed")
+      if (!chapterSurfaceOpened && finalizationReady && snapshot.finalization !== undefined) {
+        const chapterPath = snapshot.finalization.chapterPath
         try {
           await refreshWorkspace()
-        } catch (cause) {
-          setPostCommitNotice(`本轮正文与图数据已提交，但工作区刷新失败：${cause instanceof Error ? cause.message : String(cause)}`)
-        }
-        const chapterPath = snapshot.result?.chapterPath ?? snapshot.finalization?.chapterPath
-        if (chapterPath !== undefined) {
-          if (snapshot.result !== undefined) await loadCommittedGraph(snapshot.result)
           await openFile(chapterPath)
-        } else if (snapshot.finalization !== undefined) {
-          setPostCommitNotice("本轮已完成，但未找到可打开的章节路径；章节提交记录仍已保留。")
+          chapterSurfaceOpened = true
+          if (snapshot.status !== "completed") {
+            setPostCommitNotice("正文已写入工作区，正在完成梗概交接…")
+          }
+        } catch (cause) {
+          setPostCommitNotice(`正文已提交，但打开章节失败：${cause instanceof Error ? cause.message : String(cause)}`)
         }
+      }
+
+      if (snapshot.status === "completed") {
+        setPrompt("")
+        if (!chapterSurfaceOpened) {
+          try {
+            await refreshWorkspace()
+          } catch (cause) {
+            setPostCommitNotice(`本轮正文与图数据已提交，但工作区刷新失败：${cause instanceof Error ? cause.message : String(cause)}`)
+          }
+          const chapterPath = snapshot.result?.chapterPath ?? snapshot.finalization?.chapterPath
+          if (chapterPath !== undefined) {
+            await openFile(chapterPath)
+            chapterSurfaceOpened = true
+          } else if (snapshot.finalization !== undefined) {
+            setPostCommitNotice("本轮已完成，但未找到可打开的章节路径；章节提交记录仍已保留。")
+          }
+        }
+        if (snapshot.result !== undefined) await loadCommittedGraph(snapshot.result)
         try {
           const goals = await invokeBackend<DeductionGoalsSnapshot>("deduction.goals.list", {
             projectId: project!.projectId,
@@ -879,6 +907,8 @@ export function App(): React.JSX.Element {
           setPendingReviewCount(reviewCount)
           if (reviewCount > 0) {
             setPostCommitNotice(`本轮已提交。有 ${String(reviewCount)} 条推演目标待复盘（已达成 / 部分达成 / 未达成）。`)
+          } else if (chapterSurfaceOpened) {
+            setPostCommitNotice(undefined)
           }
         } catch {
           // Review prompt is optional; turn completion already succeeded.

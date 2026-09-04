@@ -161,6 +161,15 @@ export type TurnPhaseInput = Readonly<{
     userEditedOutlineSinceAgent?: boolean
     currentWorkDisplayName?: string
     synopsisConfirmed?: boolean
+    titleAlignmentIssue?: Readonly<{
+      chapterSequence: number
+      bodyPath: string
+      bodyHeading: string
+      planningHeading: string
+      planningPaths: readonly string[]
+      recommendedTarget: "body" | "planning"
+      remediation: string
+    }>
     conversationHistory: readonly Readonly<{ role: "user" | "assistant"; content: string }>[]
     activeGoals?: readonly Readonly<{
       goalId: string

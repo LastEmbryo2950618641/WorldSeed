@@ -301,6 +301,82 @@ describe("ModelContextAppender", () => {
     ) as { input: Record<string, unknown> }
     expect(changed.input.stageProjection).toMatchObject({ projectionDigest: "projection-b" })
   })
+
+  it("includes synopsisDiscuss conversationHistory on the first request of a discuss turn", () => {
+    const appender = new ModelContextAppender()
+    const request = { ...createRequest(), phase: "synopsis_discuss" as const }
+    const history = [
+      { role: "user", content: "先把北桥冲突写清楚" },
+      { role: "assistant", content: "已补充北桥冲突与来使动机。" },
+    ]
+    const modelRequest = {
+      phase: "synopsis_discuss",
+      protocolVersion: "1.0.0",
+      committedReadIds: [],
+      visiblePendingIds: [],
+      remainingBudget: {},
+      input: {
+        workflow: "synopsis_discuss",
+        userInput: "继续推进来使见面",
+        synopsisDiscuss: {
+          heading: "第二章 北地来的信使",
+          chapterSequence: 2,
+          synopsisMarkdown: "# 梗概\n来使抵达北桥。",
+          conversationHistory: history,
+          discussTrigger: "user",
+        },
+      },
+    }
+
+    const firstDelta = appender.createDelta(request, modelRequest, [systemMessage()]) as {
+      input: Record<string, unknown>
+    }
+    expect(firstDelta.input.synopsisDiscuss).toEqual(modelRequest.input.synopsisDiscuss)
+
+    const firstMessage = visibleMessage({
+      messageId: "00000000-0000-4000-8000-000000000031",
+      sequence: 1,
+      kind: "phase_request",
+      phase: "synopsis_discuss",
+      content: appender.formatDelta(firstDelta),
+    })
+    const secondDelta = appender.createDelta(request, modelRequest, [systemMessage(), firstMessage]) as {
+      input: Record<string, unknown>
+    }
+    expect(secondDelta.input.synopsisDiscuss).toBeUndefined()
+  })
+
+  it("includes revisionAssist conversationHistory on the first request of a revision turn", () => {
+    const appender = new ModelContextAppender()
+    const request = { ...createRequest(), phase: "revision_assist" as const }
+    const revisionAssist = {
+      chapterId: "chapter-1",
+      heading: "第一章",
+      committedBody: "正文定稿",
+      workingBody: "正文草稿",
+      conversationHistory: [
+        { role: "user", content: "加强悬念" },
+        { role: "assistant", content: "已在结尾埋伏笔。" },
+      ],
+    }
+    const modelRequest = {
+      phase: "revision_assist",
+      protocolVersion: "1.0.0",
+      committedReadIds: [],
+      visiblePendingIds: [],
+      remainingBudget: {},
+      input: {
+        workflow: "revision_assist",
+        userInput: "再压缩一点",
+        revisionAssist,
+      },
+    }
+
+    const delta = appender.createDelta(request, modelRequest, [systemMessage()]) as {
+      input: Record<string, unknown>
+    }
+    expect(delta.input.revisionAssist).toEqual(revisionAssist)
+  })
 })
 
 function createRequest(): PhaseRequestEnvelope {

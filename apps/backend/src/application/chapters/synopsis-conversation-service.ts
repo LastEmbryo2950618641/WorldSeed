@@ -29,6 +29,7 @@ import {
   assembleSynopsisPlaceholderDocument,
   assertUniqueVolumeSequence,
   DEFAULT_VOLUME_FOLDER_NAME,
+  deriveChapterPublishPath,
   deriveOutlineMarkdownPath,
   deriveSynopsisMarkdownPath,
   deriveVolumeDirectoryPath,
@@ -37,6 +38,7 @@ import {
   formatChapterSequenceLabel,
   digest,
   pickPreferredVolumeFolderName,
+  parseSynopsisTitleFromLabel,
   remapPathVolumeFolder,
   siblingPlanningMarkdownPath,
   validateSynopsisMarkdownPath,
@@ -49,6 +51,7 @@ import type { WorkspacePort, InternalStorePort } from "../workspace/index.js"
 import type { WorkspaceCatalogPort } from "../retrieval/ports/workspace-catalog.js"
 import type { WebResearchPort } from "../retrieval/ports/web-research-port.js"
 import type { ChapterResolveService } from "./chapter-resolve-service.js"
+import type { ChapterSynopsisService } from "./chapter-synopsis-service.js"
 import type { DeductionGoalsService } from "./deduction-goals-service.js"
 import type { StagingPromoteService } from "./staging-promote-service.js"
 import type { SettingsLineageService } from "../settings/settings-lineage-service.js"
@@ -106,6 +109,7 @@ export class SynopsisInvalidStateError extends Error {}
 
 export type SynopsisConversationServiceDependencies = Readonly<{
   chapters: ChapterResolveService
+  chapterSynopsis: ChapterSynopsisService
   conversation: SqliteSynopsisConversationRepository
   goals: DeductionGoalsService
   stagingPromote: StagingPromoteService
@@ -476,6 +480,21 @@ export class SynopsisConversationService {
             if (assist.chapterTitle !== undefined) sessionTitle = resolvedTitle
           }
         }
+      }
+
+      if (assist.titleAlignTarget !== undefined) {
+        const aligned = await this.applyTitleAlignTarget({
+          projectId: input.projectId,
+          workspaceRootRef: input.workspaceRootRef,
+          chapterSequence: session.chapterSequence,
+          target: assist.titleAlignTarget,
+          synopsisPath,
+          sessionTitle,
+          volumeFolderName: nextVolume,
+        })
+        synopsisPath = aligned.synopsisPath
+        sessionTitle = aligned.sessionTitle
+        writeNotices.push(...aligned.notices)
       }
 
       const outlineWriteAllowed = synopsisConfirmed || confirmingSynopsis
@@ -1168,6 +1187,7 @@ export class SynopsisConversationService {
     content: string
     reasoningContent?: string
     chapterTitle?: string
+    titleAlignTarget?: "body" | "planning"
     volumeFolderName?: string
     workDisplayName?: string
     synopsisBody?: string
@@ -1203,7 +1223,7 @@ export class SynopsisConversationService {
     }>[]
     arcPlanMarkdown?: string
     budgetAdvisory?: SynopsisConversationBudgetAdvisory
-  }>> {
+    }>> {
     const basePhasePrompt = await this.dependencies.prompts.loadPhase("synopsis_discuss")
     const intentAppendix = chapterNarrativeIntentPhaseAppendix(input.chapterIntent, "synopsis_discuss")
     const presentationAppendix = chapterPresentationPhaseAppendix(input.presentation, "synopsis_discuss")
@@ -1237,6 +1257,10 @@ export class SynopsisConversationService {
       workspaceRootRef: input.workspaceRootRef,
       generatedAtMs: nowMs,
     })
+    const titleAlignmentIssue = await this.dependencies.chapterSynopsis.detectTitleAlignmentIssue({
+      workspaceRootRef: input.workspaceRootRef,
+      chapterSequence: input.chapterSequence,
+    })
     let readEvidence: TurnReadEvidence[] = [...await this.bootstrapSynopsisEvidence({
       projectId: input.projectId,
       workspaceRootRef: input.workspaceRootRef,
@@ -1257,6 +1281,11 @@ export class SynopsisConversationService {
     } else if (isConfirmSynopsisUserMessage(input.userMessage)) {
       repairHints.push(
         "用户已选择用这份梗概写细纲：本轮应输出合格 outlineBody（引导 §4.1：必填章定位/分场/信息边界/风险待决；不适用节写「本节：无」；须含相对梗概的增量，禁止同构扩写），不要只改梗概；本轮不要再给 start_turn。",
+      )
+    }
+    if (titleAlignmentIssue !== undefined) {
+      repairHints.push(
+        `检测到标题分叉：正文「${titleAlignmentIssue.bodyHeading}」≠ 规划「${titleAlignmentIssue.planningHeading}」。优先用 choices 征询，用户确认后输出 titleAlignTarget（推荐 ${titleAlignmentIssue.recommendedTarget}）。`,
       )
     }
     let latestBudgetAdvisory: SynopsisConversationBudgetAdvisory | undefined
@@ -1353,6 +1382,7 @@ export class SynopsisConversationService {
               status: item.status,
             })),
             discussTrigger,
+            ...(titleAlignmentIssue === undefined ? {} : { titleAlignmentIssue }),
             ...(turnMonitor === undefined ? {} : { turnMonitor }),
           },
         },
@@ -1494,6 +1524,9 @@ export class SynopsisConversationService {
           content: artifact.data.assistantMessage,
           ...(accumulatedReasoning.length === 0 ? {} : { reasoningContent: accumulatedReasoning }),
           ...(artifact.data.chapterTitle === undefined ? {} : { chapterTitle: artifact.data.chapterTitle }),
+          ...(artifact.data.titleAlignTarget === undefined
+            ? {}
+            : { titleAlignTarget: artifact.data.titleAlignTarget }),
           ...(artifact.data.volumeFolderName === undefined
             ? {}
             : { volumeFolderName: artifact.data.volumeFolderName }),
@@ -1555,6 +1588,9 @@ export class SynopsisConversationService {
             content: artifact.data.assistantMessage,
             ...(accumulatedReasoning.length === 0 ? {} : { reasoningContent: accumulatedReasoning }),
             ...(artifact.data.chapterTitle === undefined ? {} : { chapterTitle: artifact.data.chapterTitle }),
+            ...(artifact.data.titleAlignTarget === undefined
+              ? {}
+              : { titleAlignTarget: artifact.data.titleAlignTarget }),
             ...(artifact.data.volumeFolderName === undefined
               ? {}
               : { volumeFolderName: artifact.data.volumeFolderName }),
@@ -2173,6 +2209,107 @@ export class SynopsisConversationService {
     const content = await this.readSynopsisFile(workspaceRootRef, synopsisPath)
     return content.length > 0
   }
+
+  private async applyTitleAlignTarget(input: Readonly<{
+    projectId: ProjectId
+    workspaceRootRef: string
+    chapterSequence: number
+    target: "body" | "planning"
+    synopsisPath: string
+    sessionTitle: string
+    volumeFolderName: string
+  }>): Promise<Readonly<{
+    synopsisPath: string
+    sessionTitle: string
+    notices: readonly string[]
+  }>> {
+    const notices: string[] = []
+    if (input.target === "body") {
+      const indexed = await this.dependencies.chapterIndex.findBySequence(input.projectId, input.chapterSequence)
+      const issue = await this.dependencies.chapterSynopsis.detectTitleAlignmentIssue({
+        workspaceRootRef: input.workspaceRootRef,
+        chapterSequence: input.chapterSequence,
+      })
+      const bodyPath = indexed?.currentPublishPath ?? issue?.bodyPath
+      const bodyHeading = issue?.bodyHeading
+        ?? (bodyPath === undefined
+          ? undefined
+          : bodyPath.replaceAll("\\", "/").split("/").at(-1)?.replace(/\.md$/u, ""))
+      if (bodyPath === undefined || bodyHeading === undefined) {
+        notices.push("未能找到同章正文文件，titleAlignTarget=body 未执行。")
+        return { synopsisPath: input.synopsisPath, sessionTitle: input.sessionTitle, notices }
+      }
+      await this.dependencies.chapterSynopsis.alignPlanningTitlesToPublishedHeading({
+        projectId: input.projectId,
+        workspaceRootRef: input.workspaceRootRef,
+        chapterSequence: input.chapterSequence,
+        chapterHeading: bodyHeading,
+        chapterPath: bodyPath,
+      })
+      const shortTitle = parseSynopsisTitleFromLabel(bodyHeading) ?? bodyHeading
+      const nextSynopsis = deriveSynopsisMarkdownPath(
+        input.chapterSequence,
+        shortTitle,
+        extractVolumeFolderNameFromPath(bodyPath) ?? input.volumeFolderName,
+      )
+      notices.push(
+        `已按正文标题对齐梗概/细纲（→ ${bodyHeading}）。请刷新文件树验收：同章应只剩一个折叠入口，关联栏梗概/细纲应变为已创建。`,
+      )
+      return { synopsisPath: nextSynopsis, sessionTitle: shortTitle, notices }
+    }
+
+    const planning = await this.dependencies.chapterSynopsis.findPlanningHeading({
+      workspaceRootRef: input.workspaceRootRef,
+      chapterSequence: input.chapterSequence,
+    })
+    const indexed = await this.dependencies.chapterIndex.findBySequence(input.projectId, input.chapterSequence)
+    const issue = await this.dependencies.chapterSynopsis.detectTitleAlignmentIssue({
+      workspaceRootRef: input.workspaceRootRef,
+      chapterSequence: input.chapterSequence,
+    })
+    const currentBodyPath = indexed?.currentPublishPath ?? issue?.bodyPath
+    if (planning === undefined || currentBodyPath === undefined) {
+      notices.push("未能同时找到规划文件与正文，titleAlignTarget=planning 未执行。")
+      return { synopsisPath: input.synopsisPath, sessionTitle: input.sessionTitle, notices }
+    }
+    const nextBodyPath = deriveChapterPublishPath(planning.titleLabel, planning.volumeFolderName)
+    if (currentBodyPath !== nextBodyPath) {
+      const content = await this.dependencies.workspace.readMarkdown(
+        input.workspaceRootRef,
+        currentBodyPath,
+      )
+      await this.dependencies.workspace.replacePublishedChapter(
+        input.workspaceRootRef,
+        currentBodyPath,
+        nextBodyPath,
+        digest(content),
+        content,
+      )
+      if (indexed !== undefined) {
+        await this.dependencies.chapterIndex.updateCurrent({
+          projectId: input.projectId,
+          chapterId: indexed.chapterId,
+          currentSourceId: indexed.currentSourceId,
+          currentPublishPath: nextBodyPath,
+        })
+      }
+    }
+    const shortTitle = parseSynopsisTitleFromLabel(planning.titleLabel) ?? planning.titleLabel
+    const nextSynopsis = deriveSynopsisMarkdownPath(
+      input.chapterSequence,
+      shortTitle,
+      planning.volumeFolderName,
+    )
+    notices.push(
+      `已按细纲/梗概标题重命名正文（→ ${planning.titleLabel}）。请刷新文件树验收：同章应只剩一个折叠入口。`,
+    )
+    return {
+      synopsisPath: nextSynopsis,
+      sessionTitle: shortTitle,
+      notices,
+    }
+  }
+
 }
 
 function summarizeConversation(messages: readonly Readonly<{ role: string; content: string }>[]): string {
@@ -2404,6 +2541,7 @@ function finalizeDiscussReturn(
     content: string
     reasoningContent?: string
     chapterTitle?: string
+    titleAlignTarget?: "body" | "planning"
     volumeFolderName?: string
     workDisplayName?: string
     synopsisBody?: string
@@ -2443,6 +2581,7 @@ function finalizeDiscussReturn(
   content: string
   reasoningContent?: string
   chapterTitle?: string
+  titleAlignTarget?: "body" | "planning"
   volumeFolderName?: string
   workDisplayName?: string
   synopsisBody?: string

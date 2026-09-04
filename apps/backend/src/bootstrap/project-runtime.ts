@@ -532,6 +532,7 @@ export class ProjectRuntime {
   public createSynopsisConversationService(): SynopsisConversationService {
     return new SynopsisConversationService({
       chapters: this.createChapterResolveService(),
+      chapterSynopsis: this.createChapterSynopsisService(),
       conversation: new SqliteSynopsisConversationRepository(this.database),
       goals: this.createDeductionGoalsService(),
       stagingPromote: this.createStagingPromoteService(),

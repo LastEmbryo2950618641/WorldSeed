@@ -68,6 +68,41 @@ export function resolveChapterArtifactRelations(path: string): ChapterArtifactRe
   }
 }
 
+/**
+ * Like resolveChapterArtifactRelations, but when stem-based siblings are missing,
+ * fall back to same-directory files that share the same「第N章」sequence token.
+ */
+export function resolveChapterArtifactRelationsWithInventory(
+  path: string,
+  inventoryPaths: readonly string[],
+): ChapterArtifactRelations | undefined {
+  const base = resolveChapterArtifactRelations(path)
+  if (base === undefined) return undefined
+  const sequenceKey = chapterSequenceGroupKey(base.currentPath)
+  if (sequenceKey === undefined) return base
+
+  const siblings = inventoryPaths
+    .map((item) => item.replaceAll("\\", "/"))
+    .filter((item) => {
+      if (!item.startsWith("章节正文/") || !item.endsWith(".md")) return false
+      const dir = item.includes("/") ? item.slice(0, item.lastIndexOf("/")) : "章节正文"
+      const baseDir = base.currentPath.includes("/")
+        ? base.currentPath.slice(0, base.currentPath.lastIndexOf("/"))
+        : "章节正文"
+      return dir === baseDir && chapterSequenceGroupKey(item) === sequenceKey
+    })
+
+  const synopsis = siblings.find((item) => isSynopsisMarkdownPath(item)) ?? base.synopsisPath
+  const outline = siblings.find((item) => isOutlineMarkdownPath(item)) ?? base.outlinePath
+  const body = siblings.find((item) => isChapterBodyMarkdownPath(item)) ?? base.bodyPath
+  return {
+    ...base,
+    synopsisPath: synopsis,
+    outlinePath: outline,
+    bodyPath: body,
+  }
+}
+
 export function chapterArtifactStageLabel(kind: ChapterMarkdownKind): string {
   if (kind === "plot_synopsis") return "梗概"
   if (kind === "plot_outline") return "细纲"
@@ -88,4 +123,12 @@ function stripPlanningFilenameSuffix(filename: string): string {
     return filename.slice(0, -OUTLINE_MARKDOWN_SUFFIX.length)
   }
   return filename
+}
+
+function chapterSequenceGroupKey(path: string): string | undefined {
+  const normalized = path.replaceAll("\\", "/")
+  const name = normalized.slice(normalized.lastIndexOf("/") + 1)
+  const stem = stripPlanningFilenameSuffix(name.replace(/\.md$/u, ""))
+  const match = stem.match(/^第(\d+|[零一二三四五六七八九十百]+)章(?:\s|$)/u)
+  return match?.[1]
 }

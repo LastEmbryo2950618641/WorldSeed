@@ -62,7 +62,13 @@
 - `synopsisBody` 若提供，必须是**完整梗概 Markdown**（含标题），将覆盖工作区 `… [剧情梗概].md` 文件；
 - **梗概 / 细纲内容标准**：以《剧情梗概讨论引导》§4.1 / §4.1.1 为准（反例见该节）；此处只守门禁——未确认禁 `outlineBody`/`bodyEdits`；已确认后细纲须含增量（分场张力/信息进出/场末状态等），不适用节写「本节：无」，**禁止**同构扩写；
 - **细纲写入通道**：首写/大改用 `outlineBody`；局部改用 `bodyEdits`（精确唯一替换，失败不会自动改全量）；`assistantMessage` 不要整篇粘贴细纲；
-- `chapterTitle` 若提供，表示本章标题（不含「第X章」前缀）；系统会据此重命名梗概文件为 `第{中文序号}章 {标题} [剧情梗概].md`；
+- `chapterTitle` 若提供，表示本章标题（不含「第X章」前缀）；系统会据此重命名梗概文件为 `第{中文序号}章 {标题} [剧情梗概].md`，并尽量把同章细纲一并迁到同名；
+- **标题三件套一致（硬规则）**：同章「正文 / 梗概 / 细纲」文件名主干必须相同（仅后缀 `[剧情梗概]`/`[剧情细纲]` 不同）。若上下文注入 `titleAlignmentIssue`（或 `workspaceCatalog` 同章序号出现两套标题），**本轮须优先处理**，不得假装关联栏「尚未创建」等于没有梗概/细纲：
+  1. **识别**：对照 `titleAlignmentIssue.bodyHeading` 与 `planningHeading`（或 list/读 `章节正文/…/第N章 …`）；
+  2. **征询**：用 `choices`（`continue_discuss`）给出互斥项，例如「统一为正文标题『…』」「统一为细纲标题『…』」「暂不处理」；默认推荐统一到**已落盘正文**；
+  3. **执行（用户点选后）**：输出 `titleAlignTarget`——`body` 或 `planning`；系统会重命名对应文件。可同时给 `chapterTitle`（短标题，须与所选目标一致）；**禁止**只改梗概正文里的 `# 标题` 却不交 `titleAlignTarget`/`chapterTitle`；
+  4. **结果审核（告诉用户怎么验）**：请用户刷新文件树后确认——同章只剩**一个**折叠入口；点开正文右侧关联栏梗概/细纲应变为「已创建」而非「尚未创建」；若仍分叉，再发一轮并再次提交 `titleAlignTarget`；
+- `titleAlignTarget`：仅用于修复标题分叉；`body`＝规划文件对齐正文；`planning`＝正文文件对齐当前规划标题。未出现分叉时不要输出；
 - `volumeFolderName` 若提供，必须为「第N卷 标题」（如 `第一卷 潮水退去时`）；系统会在 `章节正文/` 下创建/重命名该卷文件夹，并把梗概放到卷内。**禁止**把章节/梗概直接放在 `章节正文/` 根下；名称不合规会被拒绝并要求你按错误重写；
 - `workDisplayName` 若提供，表示**整部作品的作品名**（标题栏显示名），不是章名也不是卷名；系统会立即更新项目作品名。上下文会注入 `currentWorkDisplayName`：
   - 当前仍是「新建作品」且故事气质已可概括时，应主动给出合适作品名；
@@ -99,4 +105,4 @@
 - 对已有 `goalId` 的提案，必须使用上下文 `activeGoals` / `chapterProgress` 中给出的 `goalId`（可能是 `goal-1` 这类别名），不要编造；
 - UI 文案里的「落盘…与目标」中的「目标」= 本次 `stagingPromote.goalProposals`（可选捆绑提案），**不等于**必须已有 active 目标。`activeGoals: []` 时仍可只落设定文件。
 
-输出 JSON：顶层含 `outcome`、`requestedReads`、`reason`、`selfReview`；正式结束时 `outcome=continue` 并给出 `artifact`（`assistantMessage`、`chapterTitle`（可选）、`volumeFolderName`（可选，`第N卷 标题`）、`workDisplayName`（可选，整部作品名）、`synopsisBody`（可选）、`outlineBody`（可选，完整剧情细纲，**仅 synopsisConfirmed 后首写/大改**）、`bodyEdits`（可选，细纲局部精确替换，与 `outlineBody` 互斥）、`choices`（可选；action 取值与互斥见上文「动作互斥」，禁止同轮堆互斥动作）、`goalProposals`（可选）、`stagingDelta`（可选）、`stagingPromote`（可选）、`presentationWrites`（可选，描写/笔风规则立即落盘）、`arcPlan`（可选）、`finalSelfReview`）。需要读取时 `outcome=request_read` 且 `requestedReads` 非空，此时不要把「准备去读」写进最终用户可见结论。
+输出 JSON：顶层含 `outcome`、`requestedReads`、`reason`、`selfReview`；正式结束时 `outcome=continue` 并给出 `artifact`（`assistantMessage`、`chapterTitle`（可选）、`titleAlignTarget`（可选，`body`|`planning`，标题分叉修复）、`volumeFolderName`（可选，`第N卷 标题`）、`workDisplayName`（可选，整部作品名）、`synopsisBody`（可选）、`outlineBody`（可选，完整剧情细纲，**仅 synopsisConfirmed 后首写/大改**）、`bodyEdits`（可选，细纲局部精确替换，与 `outlineBody` 互斥）、`choices`（可选；action 取值与互斥见上文「动作互斥」，禁止同轮堆互斥动作）、`goalProposals`（可选）、`stagingDelta`（可选）、`stagingPromote`（可选）、`presentationWrites`（可选，描写/笔风规则立即落盘）、`arcPlan`（可选）、`finalSelfReview`）。需要读取时 `outcome=request_read` 且 `requestedReads` 非空，此时不要把「准备去读」写进最终用户可见结论。

@@ -90,9 +90,13 @@ function selectCoreTurnInput(input: Record<string, unknown>): Record<string, unk
     "userInput",
     "chapterSequence",
     "allowWorkspaceChapterReads",
-      "presentation",
-      "projectSettings",
-    ].flatMap((key) => input[key] === undefined ? [] : [[key, input[key]]]))
+    "presentation",
+    "projectSettings",
+    // Assist/discuss sessions are not on the continuous deduction chain; their
+    // envelopes (incl. conversationHistory) must ride the first-turn delta.
+    "synopsisDiscuss",
+    "revisionAssist",
+  ].flatMap((key) => input[key] === undefined ? [] : [[key, input[key]]]))
 }
 
 function selectChangedStructuralValue(
