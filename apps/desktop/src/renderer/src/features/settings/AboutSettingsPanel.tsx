@@ -80,12 +80,28 @@ export function AboutSettingsPanel({
 
   const checkUpdate = async (): Promise<void> => {
     const result = await onCheckNow(true)
-    if (result === null || result.skipped) return
-    if (!result.updateAvailable || result.remote === undefined) return
-    const label = `${result.remote.version}（构建 ${result.remote.buildNumber}）`
-    if (window.confirm(`发现新版本 ${label}，是否前往下载？`)) {
-      await onOpenDownload()
+    if (result === null) {
+      // IPC/网络异常：error 已由 hook 写入，再给一次可见提示
+      return
     }
+    if (result.skipped) {
+      window.alert("已跳过本次检测（距上次检测未满间隔，或正在检测中）。可稍后再试。")
+      return
+    }
+    if (result.updateAvailable && result.remote !== undefined) {
+      const label = `${result.remote.version}（构建 ${result.remote.buildNumber}）`
+      if (window.confirm(`发现新版本 ${label}，是否前往下载？`)) {
+        await onOpenDownload()
+      }
+      return
+    }
+    if (result.remote === undefined) {
+      window.alert(result.reason?.trim() || "检查更新失败，请确认更新地址与网络后重试。")
+      return
+    }
+    window.alert(
+      `当前已是最新。\n本地 ${result.local.version}（构建 ${result.local.buildNumber}）\n远端 ${result.remote.version}（构建 ${result.remote.buildNumber}）`,
+    )
   }
 
   const local = info?.local
@@ -196,6 +212,9 @@ export function AboutSettingsPanel({
           </button>
         </div>
         {saveOk ? <p className="about-settings-ok" role="status">更新设置已保存</p> : null}
+        {statusMessage !== null && statusMessage.length > 0 && error === null
+          ? <p className="about-settings-ok" role="status" data-testid="about-check-status">{statusMessage}</p>
+          : null}
         {saveError !== undefined
           ? <p className="form-error" role="alert">{saveError}</p>
           : null}

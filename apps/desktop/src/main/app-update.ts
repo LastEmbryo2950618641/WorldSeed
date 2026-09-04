@@ -129,7 +129,10 @@ export async function fetchUpdateManifest(updateUrl: string): Promise<UpdateMani
     redirect: "follow",
   })
   if (!response.ok) {
-    throw new Error(`更新清单请求失败（HTTP ${String(response.status)}）`)
+    const hint = response.status === 404
+      ? "。若仓库为私有，公开 Release 下载链接会返回 404，需将仓库设为公开，或改用可匿名访问的清单地址"
+      : ""
+    throw new Error(`更新清单请求失败（HTTP ${String(response.status)}）${hint}`)
   }
   const raw = await response.json() as unknown
   return parseUpdateManifest(raw)

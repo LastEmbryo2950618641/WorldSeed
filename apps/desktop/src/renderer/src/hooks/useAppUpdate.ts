@@ -65,12 +65,14 @@ export function useAppUpdate(): UseAppUpdateResult {
     setChecking(true)
     try {
       const result = await checkAppUpdate(force)
-      applyCheckResult(result)
+      // Refresh prefs/identity first; applyCheckResult last so it is not wiped by refreshInfo.
       await refreshInfo()
+      applyCheckResult(result)
       return result
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       setError(message)
+      setStatusMessage(null)
       return null
     } finally {
       checkingRef.current = false
