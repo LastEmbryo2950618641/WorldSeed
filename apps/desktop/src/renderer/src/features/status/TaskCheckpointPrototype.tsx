@@ -150,6 +150,16 @@ export function TaskCheckpointDialog({ task, project, onClose, onResume, onRollb
   const settingsReadyToContinue = !isSettingsReview || pendingSettingsProposals.length === 0
 
   useEffect(() => {
+    const status = task.status
+    if (status === "running" || status === "committing" || status === "completed"
+      || status === "failed" || status === "cancelled") {
+      onClose()
+    }
+    // Intentionally omit onClose: parent passes an inline lambda; status is the gate.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- close only when status leaves decision gate
+  }, [task.status])
+
+  useEffect(() => {
     if (!isSettingsReview || project === undefined || taskId === undefined) {
       setSettingsSnapshot(undefined)
       return
@@ -196,7 +206,14 @@ export function TaskCheckpointDialog({ task, project, onClose, onResume, onRollb
       await onResume(mode)
       onClose()
     } catch (cause) {
-      setActionError(cause instanceof Error ? cause.message : String(cause))
+      const message = cause instanceof Error ? cause.message : String(cause)
+      // Resume raced or already took effect — task left the decision gate.
+      if (isCheckpointResumeAlreadyProgressed(message)) {
+        await onRefreshTask?.()
+        onClose()
+        return
+      }
+      setActionError(message)
       setPendingAction(undefined)
     }
   }
@@ -314,6 +331,10 @@ function finalizationLabel(status: NonNullable<TaskSnapshot["finalization"]>["st
     case "completed": return "已完成"
     default: return "状态未知"
   }
+}
+
+export function isCheckpointResumeAlreadyProgressed(message: string): boolean {
+  return /cannot resume from status:\s*(running|committing|completed)/iu.test(message)
 }
 
 export function resolveCheckpointPauseReason(input: Readonly<{

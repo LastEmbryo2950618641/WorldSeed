@@ -94,7 +94,17 @@ export function RightRail({
   const setTab = useWorkbenchStore((state) => state.setRightTab)
   const tokenSummary = summarizeTaskTokenMetrics(task)
   useEffect(() => {
-    if (task?.status === "awaiting_user_decision" || task?.status === "waiting_for_review") setCheckpointOpen(true)
+    const status = task?.status
+    if (status === "awaiting_user_decision" || status === "waiting_for_review" || status === "paused") {
+      setCheckpointOpen(true)
+      return
+    }
+    // Locked dialog must not linger after the task has already moved on (e.g. resume
+    // started → running while proposals show "已全部处理").
+    if (status === "running" || status === "committing" || status === "completed"
+      || status === "failed" || status === "cancelled" || status === "created") {
+      setCheckpointOpen(false)
+    }
   }, [task?.status])
   return <><aside className="right-rail">
     <div className="right-tabs" role="tablist" aria-label="右侧面板">

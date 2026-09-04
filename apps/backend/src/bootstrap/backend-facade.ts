@@ -1249,7 +1249,13 @@ export class BackendFacade {
         handle: { ...(inMemory?.handle ?? storedHandle), status: stored.status },
         status: stored.status,
         ...(stored?.lastPhase === undefined ? {} : { lastPhase: stored.lastPhase }),
-        ...(stored?.error === undefined ? {} : { interruption: stored.error }),
+        // Only surface interruption while the task is actually gated on a user decision.
+        ...((stored.status === "awaiting_user_decision"
+          || stored.status === "waiting_for_review"
+          || stored.status === "paused")
+          && stored.error !== undefined
+          ? { interruption: stored.error }
+          : {}),
         ...(finalization === undefined ? {} : { finalization }),
         ...(runtimeMetrics === undefined ? {} : { runtimeMetrics }),
         phaseRuns,
@@ -1286,6 +1292,27 @@ export class BackendFacade {
   }
 
   private async resumeTurn(payload: { taskId: string; mode: "continue" | "retry_phase"; resetMetricIds: readonly ("model_calls" | "input_tokens" | "output_tokens" | "wall_time")[]; model?: ModelSelection | undefined; maxModelCalls?: number | undefined; deadlineMs?: number | undefined; maxRetrievalRounds?: number | undefined }): Promise<TaskHandle> {
+    const runtime = this.container.getCurrentRuntime()
+    if (runtime === undefined) throw new Error("No project is open")
+    const already = this.tasks.get(payload.taskId)
+    const storedBefore = await runtime.taskScopes.findTask(payload.taskId)
+    // Idempotent: a prior Continue already moved the task off the decision gate.
+    if (storedBefore?.status === "running" || storedBefore?.status === "committing"
+      || already?.status === "running" || already?.status === "committing") {
+      const handle: TaskHandle = {
+        taskId: payload.taskId,
+        projectId: storedBefore?.projectId ?? already?.handle.projectId ?? "",
+        kind: storedBefore?.kind ?? already?.handle.kind ?? "turn",
+        status: "running",
+      }
+      runtimeLog("info", "backend-facade", "turn.resume.already_running", {
+        taskId: payload.taskId,
+        storedStatus: storedBefore?.status,
+        memoryStatus: already?.status,
+      })
+      return handle
+    }
+
     const selectedModel = payload.model === undefined
       ? undefined
       : this.container.createModelFromSelection({
@@ -1304,8 +1331,6 @@ export class BackendFacade {
     const record = payload.model === undefined
       ? loadedRecord
       : { ...loadedRecord, modelSelection: payload.model as ModelSelection }
-    const runtime = this.container.getCurrentRuntime()
-    if (runtime === undefined) throw new Error("No project is open")
     if (record.turnInput.executionOrigin?.kind === "automatic_evolution") {
       this.automaticEvolutionTasks.add(payload.taskId)
       this.activeAutomaticEvolutionByProject.set(record.turnInput.projectId, payload.taskId)
@@ -1364,9 +1389,8 @@ export class BackendFacade {
           return
         }
         const backendError = this.errorFrom(error)
-        const runtime = this.container.getCurrentRuntime()
-        const stored = await runtime?.taskScopes.findTask(payload.taskId)
-        await runtime?.persistenceUpdateTask(payload.taskId, "awaiting_user_decision", stored?.lastPhase, backendError)
+        const stored = await runtime.taskScopes.findTask(payload.taskId)
+        await runtime.persistenceUpdateTask(payload.taskId, "awaiting_user_decision", stored?.lastPhase, backendError)
         this.tasks.set(payload.taskId, { ...record, handle: { ...handle, status: "awaiting_user_decision" }, status: "awaiting_user_decision", error: backendError, abortController })
         runtimeLog("warn", "backend-facade", "turn.resume.failed", {
           taskId: payload.taskId,

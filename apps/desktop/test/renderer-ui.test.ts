@@ -14,7 +14,7 @@ import { CreationDeskProgressReview } from "../src/renderer/src/features/editor/
 import { RightRail } from "../src/renderer/src/features/status/RightRail.js"
 import { RightPanelViewport } from "../src/renderer/src/features/status/RightPanelViewport.js"
 import { HistoryPanel } from "../src/renderer/src/features/status/HistoryPanel.js"
-import { TaskCheckpointDialog, resolveCheckpointPauseReason } from "../src/renderer/src/features/status/TaskCheckpointPrototype.js"
+import { TaskCheckpointDialog, resolveCheckpointPauseReason, isCheckpointResumeAlreadyProgressed } from "../src/renderer/src/features/status/TaskCheckpointPrototype.js"
 import { ProjectSettingsDialog } from "../src/renderer/src/features/settings/ProjectSettingsDialog.js"
 import { ModelConfigurationDialog } from "../src/renderer/src/features/settings/ModelConfigurationDialog.js"
 import {
@@ -915,6 +915,12 @@ describe("right rail process UI contract", () => {
     expect(html).not.toContain("阻塞指标")
     expect(html).toContain("checkpoint-settings-review")
     expect(html).toContain("没有待确认的设定提案")
+  })
+
+  it("treats resume-already-running as progressed so the locked checkpoint can dismiss", () => {
+    expect(isCheckpointResumeAlreadyProgressed("Task cannot resume from status: running")).toBe(true)
+    expect(isCheckpointResumeAlreadyProgressed("Task cannot resume from status: completed")).toBe(true)
+    expect(isCheckpointResumeAlreadyProgressed("仍有 2 条设定提案待确认")).toBe(false)
   })
 
   it("renders finalization recovery without implying another AI request", () => {
