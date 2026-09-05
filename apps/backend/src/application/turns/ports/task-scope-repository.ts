@@ -59,8 +59,13 @@ export type ScopeCommitResult = Readonly<{
   committedSequence: number
 }>
 
+export type ResetPendingOptions = Readonly<{
+  /** Explicit sourceIds to clear when no pending document_versions exist yet (e.g. chapter_naming). */
+  sourceIds?: readonly string[]
+}>
+
 export interface ScopeCommitRepository {
-  resetPending(scopeId: ScopeId): Promise<void>
+  resetPending(scopeId: ScopeId, options?: ResetPendingOptions): Promise<void>
   commit(scopeId: ScopeId): Promise<ScopeCommitResult>
   retire(scopeId: ScopeId, retiredAtMs: number): Promise<void>
 }

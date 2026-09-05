@@ -4,23 +4,37 @@ import { sql } from "kysely"
 import type { ScopeId } from "@worldseed/contracts"
 
 import type {
+  ResetPendingOptions,
   ScopeCommitRepository,
   ScopeCommitResult,
 } from "../../../application/index.js"
 import type { ProjectDatabase } from "../database-types.js"
+import { clearUncommittedSourceUnitsInTransaction } from "./sqlite-document-repository.js"
 
 type ProjectTransaction = Transaction<ProjectDatabase>
 
 export class SqliteScopeCommitRepository implements ScopeCommitRepository {
   public constructor(private readonly database: Kysely<ProjectDatabase>) {}
 
-  public async resetPending(scopeId: ScopeId): Promise<void> {
+  public async resetPending(scopeId: ScopeId, options?: ResetPendingOptions): Promise<void> {
     await this.database.transaction().execute(async (transaction) => {
       const scope = await transaction.selectFrom("artifact_scopes")
-        .select("visibility")
+        .select(["visibility", "project_id"])
         .where("id", "=", scopeId)
         .executeTakeFirstOrThrow()
       if (scope.visibility !== "pending") return
+
+      const pendingDocuments = await transaction.selectFrom("document_versions")
+        .select("source_id")
+        .where("scope_id", "=", scopeId)
+        .where("visibility", "=", "pending")
+        .execute()
+      const sourceIds = [...new Set([
+        ...pendingDocuments.map((document) => document.source_id),
+        ...(options?.sourceIds ?? []),
+      ])]
+      // Clear draft source_units before deleting scope-bound rows; units have no scope_id.
+      await clearUncommittedSourceUnitsInTransaction(transaction, scope.project_id, sourceIds)
 
       await sql`DELETE FROM retrieval_fts WHERE scope_id = ${scopeId}`.execute(transaction)
       await transaction.deleteFrom("retrieval_exact_keys")

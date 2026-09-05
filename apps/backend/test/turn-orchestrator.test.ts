@@ -3335,6 +3335,131 @@ describe("TurnOrchestrator", () => {
     expect((await fixture.taskScopes.findTask(task.id))?.status).toBe("completed")
   })
 
+  it("retries chapter_naming by replacing uncommitted source_units without UNIQUE conflicts", async () => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    let namingCalls = 0
+    const model: AIModelPort = {
+      info: fake.info,
+      execute: async (request, options) => {
+        const execution = await fake.execute(request, options)
+        if (request.phase !== "chapter_naming") return execution
+        namingCalls += 1
+        if (namingCalls === 1) return execution
+        return {
+          ...execution,
+          result: {
+            ...execution.result,
+            artifact: {
+              ...(execution.result.artifact as Record<string, unknown>),
+              heading: "第一章 重试后的标题",
+            },
+          },
+        }
+      },
+    }
+    const orchestrator = fixture.createOrchestrator(model, fixture.commit)
+    const input = {
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "雨夜里旧桥下出现一枚铜钥匙。",
+      chapterSequence: 1,
+    }
+
+    // 7 model phases through chapter_naming (incl. source_retrieval); next phase hits the call budget.
+    await expect(orchestrator.execute({ ...input, maxModelCalls: 7 })).rejects.toThrow("Model call budget exhausted")
+    const task = await fixture.database.selectFrom("tasks").selectAll().executeTakeFirstOrThrow()
+    const sourceId = (await fixture.database.selectFrom("source_units").select("source_id").executeTakeFirstOrThrow()).source_id
+    const unitsBefore = await fixture.documentRepository.listSourceUnits(fixture.projectId, sourceId)
+    expect(unitsBefore.length).toBeGreaterThan(0)
+    expect(unitsBefore.some((unit) => unit.digest.length > 0)).toBe(true)
+    const latestRun = (await fixture.persistence.listPhaseRuns(task.id))
+      .filter((run) => run.status !== "superseded")
+      .at(-1)
+    expect(latestRun?.phase).toBe("chapter_naming")
+    expect(latestRun?.status).toBe("completed")
+
+    await orchestrator.resume(
+      { ...input, taskId: task.id, maxModelCalls: 63, resetMetricIds: ["model_calls"] },
+      "retry_phase",
+    )
+
+    expect(namingCalls).toBe(2)
+    const unitsAfter = await fixture.documentRepository.listSourceUnits(fixture.projectId, sourceId)
+    expect(unitsAfter.length).toBeGreaterThan(0)
+    expect(unitsAfter.map((unit) => unit.id)).not.toEqual(unitsBefore.map((unit) => unit.id))
+    const unitContents = await Promise.all(unitsAfter.map(async (unit) =>
+      readFileSync(unit.contentRef, "utf8"),
+    ))
+    expect(unitContents.some((content) => content.includes("重试后的标题"))).toBe(true)
+    expect((await fixture.taskScopes.findTask(task.id))?.status).toBe("completed")
+  })
+
+  it("continues past completed chapter_naming without rewriting existing source_units", async () => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    let namingCalls = 0
+    const model: AIModelPort = {
+      info: fake.info,
+      execute: async (request, options) => {
+        if (request.phase === "chapter_naming") namingCalls += 1
+        return fake.execute(request, options)
+      },
+    }
+    const orchestrator = fixture.createOrchestrator(model, fixture.commit)
+    const input = {
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "继续推演时不应重复写入命名单元。",
+      chapterSequence: 1,
+    }
+
+    await expect(orchestrator.execute({ ...input, maxModelCalls: 7 })).rejects.toThrow("Model call budget exhausted")
+    const task = await fixture.database.selectFrom("tasks").selectAll().executeTakeFirstOrThrow()
+    const sourceId = (await fixture.database.selectFrom("source_units").select("source_id").executeTakeFirstOrThrow()).source_id
+    const unitsBefore = await fixture.documentRepository.listSourceUnits(fixture.projectId, sourceId)
+    expect(namingCalls).toBe(1)
+
+    await orchestrator.resume({ ...input, taskId: task.id, maxModelCalls: 63, resetMetricIds: ["model_calls"] })
+
+    expect(namingCalls).toBe(1)
+    const unitsAfter = await fixture.documentRepository.listSourceUnits(fixture.projectId, sourceId)
+    expect(unitsAfter.map((unit) => unit.id)).toEqual(unitsBefore.map((unit) => unit.id))
+    expect(unitsAfter.map((unit) => unit.digest)).toEqual(unitsBefore.map((unit) => unit.digest))
+    expect((await fixture.taskScopes.findTask(task.id))?.status).toBe("completed")
+  })
+
+  it("rejects replaceUncommittedSourceUnits for a committed source", async () => {
+    const fixture = await createFixture()
+    await fixture.createOrchestrator(new FakeAiModelAdapter(randomUUID), fixture.commit).execute({
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "提交后的章节单元不可替换。",
+      chapterSequence: 1,
+    })
+    const chapter = (await fixture.documentRepository.listCommittedChapters(fixture.projectId))[0]
+    expect(chapter).toBeDefined()
+    const existing = await fixture.documentRepository.listSourceUnits(fixture.projectId, chapter!.sourceId)
+    expect(existing.length).toBeGreaterThan(0)
+
+    await expect(fixture.documentRepository.replaceUncommittedSourceUnits(
+      fixture.projectId,
+      chapter!.sourceId,
+      existing.map((unit, sequence) => ({
+        ...unit,
+        id: randomUUID(),
+        sequence,
+        digest: `replaced-${String(sequence)}`,
+        createdAtMs: Date.now(),
+      })),
+    )).rejects.toThrow(/committed source/i)
+    expect(await fixture.documentRepository.listSourceUnits(fixture.projectId, chapter!.sourceId))
+      .toEqual(existing)
+  })
+
   it("resumes chapter finalization without rerunning AI or duplicating the committed scope", async () => {
     const fixture = await createFixture()
     const fake = new FakeAiModelAdapter(randomUUID)

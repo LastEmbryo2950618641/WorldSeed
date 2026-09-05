@@ -1,4 +1,5 @@
-import type { Kysely } from "kysely"
+import type { Kysely, Transaction } from "kysely"
+import { sql } from "kysely"
 
 import type { ProjectId, ScopeId } from "@worldseed/contracts"
 
@@ -8,6 +9,8 @@ import type {
   SourceUnit,
 } from "../../../application/index.js"
 import type { DocumentVersionRow, ProjectDatabase, SourceUnitRow } from "../database-types.js"
+
+type ProjectDb = Kysely<ProjectDatabase> | Transaction<ProjectDatabase>
 
 export class SqliteDocumentRepository implements DocumentRepository {
   public constructor(private readonly database: Kysely<ProjectDatabase>) {}
@@ -44,6 +47,41 @@ export class SqliteDocumentRepository implements DocumentRepository {
       digest: unit.digest,
       created_at: unit.createdAtMs,
     }))).executeTakeFirstOrThrow()
+  }
+
+  public async replaceUncommittedSourceUnits(
+    projectId: ProjectId,
+    sourceId: string,
+    units: readonly SourceUnit[],
+  ): Promise<void> {
+    await this.database.transaction().execute(async (transaction) => {
+      if (await isCommittedSource(transaction, projectId, sourceId)) {
+        throw new Error(`Cannot replace source units for committed source: ${sourceId}`)
+      }
+      await deleteSourceUnitsAndDependents(transaction, projectId, [sourceId])
+      if (units.length === 0) return
+      for (const unit of units) {
+        if (unit.projectId !== projectId || unit.sourceId !== sourceId) {
+          throw new Error("replaceUncommittedSourceUnits received units for a different project/source")
+        }
+      }
+      await transaction.insertInto("source_units").values(units.map((unit) => ({
+        id: unit.id,
+        project_id: unit.projectId,
+        source_id: unit.sourceId,
+        sequence_no: unit.sequence,
+        content_ref: unit.contentRef,
+        digest: unit.digest,
+        created_at: unit.createdAtMs,
+      }))).executeTakeFirstOrThrow()
+    })
+  }
+
+  public async clearUncommittedSourceUnits(projectId: ProjectId, sourceIds: readonly string[]): Promise<void> {
+    if (sourceIds.length === 0) return
+    await this.database.transaction().execute(async (transaction) => {
+      await clearUncommittedSourceUnitsInTransaction(transaction, projectId, sourceIds)
+    })
   }
 
   public async listSourceUnits(projectId: ProjectId, sourceId: string): Promise<readonly SourceUnit[]> {
@@ -108,6 +146,87 @@ export class SqliteDocumentRepository implements DocumentRepository {
       .executeTakeFirst()
     return row === undefined ? undefined : mapDocumentVersion(row)
   }
+}
+
+export async function clearUncommittedSourceUnitsInTransaction(
+  database: ProjectDb,
+  projectId: string,
+  sourceIds: readonly string[],
+): Promise<void> {
+  if (sourceIds.length === 0) return
+  const replaceable: string[] = []
+  for (const sourceId of [...new Set(sourceIds)]) {
+    if (!(await isCommittedSource(database, projectId, sourceId))) {
+      replaceable.push(sourceId)
+    }
+  }
+  if (replaceable.length === 0) return
+  await deleteSourceUnitsAndDependents(database, projectId, replaceable)
+}
+
+async function isCommittedSource(
+  database: ProjectDb,
+  projectId: string,
+  sourceId: string,
+): Promise<boolean> {
+  const committed = await database.selectFrom("document_versions")
+    .select("id")
+    .where("project_id", "=", projectId)
+    .where("source_id", "=", sourceId)
+    .where("visibility", "=", "committed")
+    .executeTakeFirst()
+  if (committed !== undefined) return true
+
+  const activeHead = await database.selectFrom("active_document_heads")
+    .innerJoin("document_versions", "document_versions.id", "active_document_heads.document_version_id")
+    .select("document_versions.id")
+    .where("active_document_heads.project_id", "=", projectId)
+    .where("document_versions.source_id", "=", sourceId)
+    .executeTakeFirst()
+  return activeHead !== undefined
+}
+
+async function deleteSourceUnitsAndDependents(
+  database: ProjectDb,
+  projectId: string,
+  sourceIds: readonly string[],
+): Promise<void> {
+  if (sourceIds.length === 0) return
+  const units = await database.selectFrom("source_units")
+    .select("id")
+    .where("project_id", "=", projectId)
+    .where("source_id", "in", [...sourceIds])
+    .execute()
+  const unitIds = units.map((unit) => unit.id)
+  if (unitIds.length === 0) return
+
+  await database.deleteFrom("settlement_records")
+    .where("source_unit_id", "in", unitIds)
+    .execute()
+
+  const projections = await database.selectFrom("retrieval_projections")
+    .select("id")
+    .where("project_id", "=", projectId)
+    .where("owner_kind", "=", "source")
+    .where("owner_id", "in", unitIds)
+    .execute()
+  const projectionIds = projections.map((projection) => projection.id)
+  if (projectionIds.length > 0) {
+    await database.deleteFrom("retrieval_exact_keys")
+      .where("projection_id", "in", projectionIds)
+      .execute()
+    for (const projectionId of projectionIds) {
+      await sql`DELETE FROM retrieval_fts WHERE projection_id = ${projectionId}`.execute(database)
+    }
+    await database.deleteFrom("retrieval_projections")
+      .where("id", "in", projectionIds)
+      .execute()
+  }
+
+  await database.deleteFrom("source_units")
+    .where("project_id", "=", projectId)
+    .where("source_id", "in", [...sourceIds])
+    .execute()
 }
 
 async function assertPendingScope(

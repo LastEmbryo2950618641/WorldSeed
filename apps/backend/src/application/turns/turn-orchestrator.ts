@@ -905,7 +905,9 @@ export class TurnOrchestrator {
         currentPhaseRuns.map((run) => run.phaseRunId),
         input.nowMs ?? this.dependencies.now(),
       )
-      if (latestRun.phase === "chapter_naming") await this.dependencies.commit.resetPending(task.scopeId)
+      if (latestRun.phase === "chapter_naming") {
+        await this.dependencies.commit.resetPending(task.scopeId, { sourceIds: [sourceId] })
+      }
       startPhaseIndex = latestPhaseIndex
     } else {
       const latestResult = latestRun.status === "completed" && latestRun.result !== undefined
@@ -1501,6 +1503,21 @@ export class TurnOrchestrator {
             spacetimeContinuityPreserved: review.spacetimeContinuityPreserved,
           }
         }
+        // Persist naming side effects before treating the phase as successfully advanced.
+        if (phase === "chapter_naming") {
+          try {
+            sourceUnitIds = await this.persistDraftUnits(input, state.scopeId, state.sourceId, artifacts)
+          } catch (error) {
+            await this.dependencies.persistence.finishPhaseRun({
+              phaseRunId: result.phaseRunId,
+              status: "failed",
+              result: { error: error instanceof Error ? error.message : String(error) },
+              usage: result.usage,
+              finishedAtMs: this.dependencies.now(),
+            })
+            throw error
+          }
+        }
         this.log("debug", "phase.completed", {
           taskId: state.taskId,
           phase,
@@ -1539,9 +1556,6 @@ export class TurnOrchestrator {
           })
           context = { ...context, ruleSnapshotId }
           await this.dependencies.persistence.saveContext(context, this.dependencies.now())
-        }
-        if (phase === "chapter_naming") {
-          sourceUnitIds = await this.persistDraftUnits(input, state.scopeId, state.sourceId, artifacts)
         }
         await this.dependencies.persistence.saveTaskCheckpoint({
           projectId: input.projectId,
@@ -3988,7 +4002,7 @@ export class TurnOrchestrator {
         createdAtMs: this.dependencies.now(),
       }
     }))
-    await this.dependencies.documents.stageSourceUnits(sourceUnits)
+    await this.dependencies.documents.replaceUncommittedSourceUnits(input.projectId, sourceId, sourceUnits)
     for (const [index, unit] of sourceUnits.entries()) {
       const contentMarkdown = units[index]
       if (contentMarkdown === undefined) throw new Error(`Missing staged source unit content: ${String(index)}`)
