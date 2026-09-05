@@ -189,6 +189,29 @@ describe("shared contracts", () => {
     expect(result.modelReasoningKind).toBe("provider_summary")
   })
 
+  it("treats empty modelReasoning as absent so resume can parse stored results", () => {
+    const result = phaseResultEnvelopeSchema.parse({
+      schemaVersion: 1,
+      envelopeId: ids.envelope,
+      contextId: ids.context,
+      phase: "chapter_naming",
+      outcome: "continue",
+      artifact: { heading: "第一章" },
+      requestedReads: [],
+      citedReadIds: [],
+      producedArtifactIds: [],
+      decisionRecordIds: [],
+      unresolvedDependencies: [],
+      reason: "Named the chapter",
+      selfReview: "Heading is present",
+      modelReasoning: "",
+      modelReasoningKind: "provider_reasoning",
+    })
+
+    expect(result.modelReasoning).toBeUndefined()
+    expect(result.modelReasoningKind).toBe("provider_reasoning")
+  })
+
   it("supports archive-preserving graph retirement", () => {
     expect(graphMutationSchema.parse({
       operation: "retire_node",

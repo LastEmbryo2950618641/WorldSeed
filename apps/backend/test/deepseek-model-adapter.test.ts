@@ -1271,6 +1271,29 @@ describe("DeepSeekAiModelAdapter", () => {
     expect(inputs[1]).not.toHaveProperty("reasoningEffort")
   })
 
+  it("omits empty provider reasoning from phase usage", async () => {
+    const request = createRequest()
+    const fake = await new FakeAiModelAdapter(randomUUID).execute(request)
+    const client: DeepSeekCompletionClient = {
+      complete: () => Promise.resolve({
+        content: JSON.stringify(toModelResult(fake.result)),
+        reasoningContent: "   ",
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+      }),
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      defaultDeepSeekRuntimeConfig,
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    const execution = await adapter.execute(request)
+
+    expect(execution.usage.reasoningContent).toBeUndefined()
+    expect(execution.usage.reasoningKind).toBeUndefined()
+  })
+
   it("retries provider connection errors before failing the phase", async () => {
     const request = createRequest()
     const fake = await new FakeAiModelAdapter(randomUUID).execute(request)

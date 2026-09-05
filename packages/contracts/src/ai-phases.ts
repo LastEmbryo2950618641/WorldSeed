@@ -49,7 +49,12 @@ export const phaseResultEnvelopeSchema = z.object({
   unresolvedDependencies: z.array(unresolvedDependencySchema),
   reason: z.string().min(1),
   selfReview: z.string().min(1),
-  modelReasoning: z.string().min(1).optional(),
+  // Empty / whitespace-only values are treated as absent so resume can parse
+  // results that accidentally persisted an empty reasoning string.
+  modelReasoning: z.preprocess(
+    (value) => (typeof value === "string" && value.trim().length === 0 ? undefined : value),
+    z.string().min(1).optional(),
+  ),
   modelReasoningKind: modelReasoningKindSchema.optional(),
 }).superRefine((result, context) => {
   if (result.outcome === "request_read" && result.requestedReads.length === 0) {

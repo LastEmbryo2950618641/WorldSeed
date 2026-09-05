@@ -314,6 +314,7 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
           requestedReadCount: result.requestedReads.length,
           citedReadCount: result.citedReadIds.length,
         })
+        const reasoningContent = nonEmptyReasoning(response.reasoningContent)
         return {
           result,
           contextExchange: {
@@ -337,10 +338,10 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
             ...(hasCacheMiss ? { cacheMissInputTokens } : {}),
             provider: "deepseek",
             model: this.config.model,
-            ...(response.reasoningContent === undefined || response.reasoningContent === null
+            ...(reasoningContent === undefined
               ? {}
               : {
-                  reasoningContent: response.reasoningContent,
+                  reasoningContent,
                   reasoningKind: response.reasoningKind
                     ?? (this.config.apiProtocol === "openai_responses" ? "provider_summary" : "provider_reasoning"),
                 }),
@@ -422,7 +423,7 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
           const responseStatus = readString(responseRecord.status)
           const incompleteReason = readString(incompleteDetails.reason)
           const finishReason = incompleteReason ?? responseStatus
-          const reasoningContent = readResponsesReasoning(responseRecord.output)
+          const reasoningContent = nonEmptyReasoning(readResponsesReasoning(responseRecord.output))
           const usage = normalizeResponsesUsage(responseRecord.usage)
           return {
             content: readString(responseRecord.output_text) ?? null,
@@ -491,7 +492,7 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
           input.signal === undefined ? undefined : { signal: input.signal },
         ) as OpenAI.Chat.Completions.ChatCompletion
         const message = asRecord(response.choices[0]?.message)
-        const reasoningContent = readString(message.reasoning_content)
+        const reasoningContent = nonEmptyReasoning(readString(message.reasoning_content))
         return {
           content: response.choices[0]?.message.content ?? null,
           finishReason: response.choices[0]?.finish_reason ?? null,
@@ -1149,6 +1150,11 @@ function readNumber(value: unknown): number | undefined {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined
+}
+
+function nonEmptyReasoning(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string") return undefined
+  return value.trim().length === 0 ? undefined : value
 }
 
 function isRetryable(error: unknown): boolean {

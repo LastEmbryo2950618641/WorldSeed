@@ -2439,13 +2439,18 @@ export class TurnOrchestrator {
         sequence: currentContext.segments.length,
       }
       currentContext = appendContextSegments(currentContext, [resultSegment])
+      const modelReasoning = execution.usage.reasoningContent?.trim()
       await this.dependencies.persistence.finishPhaseRun({
         phaseRunId: currentPhaseRunId,
         status: "completed",
         result: {
           ...parsedResult,
-          ...(execution.usage.reasoningContent === undefined ? {} : { modelReasoning: execution.usage.reasoningContent }),
-          ...(execution.usage.reasoningKind === undefined ? {} : { modelReasoningKind: execution.usage.reasoningKind }),
+          ...(modelReasoning === undefined || modelReasoning.length === 0
+            ? {}
+            : { modelReasoning }),
+          ...(modelReasoning === undefined || modelReasoning.length === 0 || execution.usage.reasoningKind === undefined
+            ? {}
+            : { modelReasoningKind: execution.usage.reasoningKind }),
         },
         usage: execution.usage,
         ...(execution.contextExchange === undefined ? {} : {
