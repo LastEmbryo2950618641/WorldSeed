@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   BASE_RULES_RESOURCE,
+  CONTENT_HANDLING_RESOURCE,
   PLOT_SYNOPSIS_GUIDE_RESOURCE,
   SETTINGS_QUERY_GUIDE_RESOURCE,
   SETTINGS_REVISION_GUIDE_RESOURCE,
@@ -20,6 +21,8 @@ import {
   parsePhaseResult,
   phaseArtifactJsonSchema,
   promptDefinitions,
+  synopsisDiscussArtifactSchema,
+  synopsisPresentationWriteSchema,
 } from "../src/index.js"
 
 const envelopeId = "00000000-0000-4000-8000-000000000001"
@@ -58,13 +61,14 @@ describe("prompt contracts", () => {
     const packageRoot = resolve(process.cwd(), "packages/prompt-contracts")
     const resources = [
       BASE_RULES_RESOURCE,
+      CONTENT_HANDLING_RESOURCE,
       PLOT_SYNOPSIS_GUIDE_RESOURCE,
       SETTINGS_QUERY_GUIDE_RESOURCE,
       SETTINGS_REVISION_GUIDE_RESOURCE,
       ...aiPhaseValues.map((phase) => promptDefinitions[phase].resourcePath),
     ]
 
-    expect(new Set(resources).size).toBe(aiPhaseValues.length + 4)
+    expect(new Set(resources).size).toBe(aiPhaseValues.length + 5)
     for (const resource of resources) {
       const path = resolve(packageRoot, resource)
       expect(existsSync(path), resource).toBe(true)
@@ -95,6 +99,19 @@ describe("prompt contracts", () => {
     expect(baseRules).toContain("可被用户精确复述、追问或作为后续指代的原文片段")
     expect(baseRules).toContain("本轮实际读取的图信息是过去万事万物的演化和当前有效状态的首要依据")
     expect(baseRules).toContain("一句话可以是世界生成的起点")
+    expect(readResource(CONTENT_HANDLING_RESOURCE)).toContain("当前任务是虚构长篇的世界生成与正文交付")
+    expect(readResource(CONTENT_HANDLING_RESOURCE)).toContain("都是失败输出，删掉重写")
+    expect(readResource(CONTENT_HANDLING_RESOURCE)).toContain("第一句就是交付物本身")
+    expect(readResource(CONTENT_HANDLING_RESOURCE)).toContain("禁止在思考中讨论题材是否可写")
+    expect(readResource(CONTENT_HANDLING_RESOURCE)).toContain("用户规则若明确限制某些内容，仅在该明确范围内遵守")
+    expect(readResource(CONTENT_HANDLING_RESOURCE)).toContain("人物身心状态由世界因果推出")
+    expect(readResource(CONTENT_HANDLING_RESOURCE)).toContain("禁止为体面补选择")
+    expect(readResource(CONTENT_HANDLING_RESOURCE)).toContain("一夜如常")
+    expect(readResource(CONTENT_HANDLING_RESOURCE)).toContain("自行切黑")
+    expect(readResource(CONTENT_HANDLING_RESOURCE)).toContain("不能用「角色不该知道」")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("遵守内容处理规则")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("chapterBodyMarkdown")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("1 ≤ N ≤ 当前焦点章序")
     expect(sourceRetrieval).toContain("已有局部图自身形成的组织方式")
     expect(sourceRetrieval).toContain("检索未命中不等于本轮不能推演")
     expect(sourceRetrieval).toContain("`missingEvidence` 和 `nextExpansionHints` 都必须是数组")
@@ -114,6 +131,9 @@ describe("prompt contracts", () => {
     expect(frontierSettlement).toContain("不能因为某个无关节点可读")
     expect(semanticReview).toContain("不是修改项、节点或连接的逐项清单")
     expect(draft).toContain("不得输出“等待读取资料")
+    expect(draft).toContain("遵守内容处理规则")
+    expect(readResource(promptDefinitions.draft.resourcePath)).toContain("不能用「角色未知」")
+    expect(readResource(promptDefinitions.interpret.resourcePath)).toContain("遵守内容处理规则")
     expect(semanticReview).toContain("有限预算内")
     expect(semanticReview).toContain("可精确复述或再次指代的正文片段")
     expect(settlementReview).toContain("演化过程与当前有效状态")
@@ -131,6 +151,9 @@ describe("prompt contracts", () => {
     expect(ruleAssembly).toContain("设定集默认查询规则")
     expect(sourceRetrieval).toContain("设定集默认查询规则")
     expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("设定集修订规则")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("表现输出/本作品描写/*.md")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).not.toContain("presentationWrites 给出完整 Markdown、`relativePath`（仅 `表现输出/描写规则/*.md`")
+    expect(readResource(PLOT_SYNOPSIS_GUIDE_RESOURCE)).toContain("表现输出/本作品描写/")
     expect(ruleAssembly).toContain("本阶段没有正文或长文本字段")
     expect(ruleAssembly).toContain("不要为了表示“已完整阅读”而重复路径")
     expect(ruleAssembly).toContain("每个路径和冲突各只出现一次")
@@ -585,5 +608,37 @@ describe("prompt contracts", () => {
       archiveOutletRefs: [],
       decisionRecords: [],
     })).toThrow("no_change graph governance cannot contain mutations")
+  })
+
+  it("restricts presentationWrites to this-work overlay files with size caps", () => {
+    expect(synopsisPresentationWriteSchema.parse({
+      relativePath: "表现输出/本作品描写/压抑氛围.md",
+      markdown: "# 压抑\n",
+      mode: "create",
+    }).relativePath).toBe("表现输出/本作品描写/压抑氛围.md")
+    expect(() => synopsisPresentationWriteSchema.parse({
+      relativePath: "表现输出/描写规则/近景跟随.md",
+      markdown: "# 近景\n",
+      mode: "create",
+    })).toThrow(/本作品描写/)
+    expect(() => synopsisPresentationWriteSchema.parse({
+      relativePath: "表现输出/本作品描写/nested/x.md",
+      markdown: "# nested\n",
+      mode: "create",
+    })).toThrow(/本作品描写/)
+    expect(() => synopsisPresentationWriteSchema.parse({
+      relativePath: "表现输出/本作品描写/过长.md",
+      markdown: "字".repeat(4001),
+      mode: "update",
+    })).toThrow()
+  })
+
+  it("treats empty synopsisBody as omitted so schema repair can continue", () => {
+    const parsed = synopsisDiscussArtifactSchema.parse({
+      assistantMessage: "先把戏核收窄，再决定要不要重写细纲。",
+      finalSelfReview: "本轮只改对话，没有覆盖空梗概。",
+      synopsisBody: "",
+    })
+    expect(parsed.synopsisBody).toBeUndefined()
   })
 })

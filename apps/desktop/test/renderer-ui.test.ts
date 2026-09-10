@@ -66,6 +66,9 @@ vi.mock("sigma", () => ({
 }))
 
 function renderPortaledHtml(element: React.ReactElement): string {
+  if (typeof document === "undefined") {
+    return renderToStaticMarkup(element)
+  }
   const mount = document.createElement("div")
   document.body.appendChild(mount)
   const root = createRoot(mount)
@@ -103,6 +106,19 @@ function editorDefaults(overrides: Partial<React.ComponentProps<typeof EditorAre
     onMaximumWordCountChange: vi.fn(),
     onBoundaryPaceChange: vi.fn(),
     onCausalityFocusChange: vi.fn(),
+    modelProfiles: [{
+      id: "model-1",
+      name: "测试模型",
+      model: "test-model",
+      baseUrl: "http://localhost",
+      credentialRef: "cred-1",
+      apiKey: "",
+      hasApiKey: true,
+      reasoningEffort: "medium",
+    }],
+    activeModelProfileId: "model-1",
+    onActiveModelIdChange: vi.fn(),
+    onReasoningEffortChange: vi.fn(),
     onSave: vi.fn(),
     onRun: vi.fn(),
     onEnsureRevision: vi.fn(async () => undefined),
@@ -167,6 +183,33 @@ describe("renderer workbench UI contract", () => {
     expect(html).toContain("因果焦点")
     expect(html).toContain("自动")
     expect(html).not.toContain("data-testid=\"creation-desk-jump-latest\"")
+  })
+
+  it("renders a searchable chapter focus bar on the creation desk", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      synopsisSession: {
+        sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        projectId: "11111111-1111-4111-8111-111111111111",
+        chapterSequence: 1,
+        synopsisPath: "章节正文/第一卷 待命名/第一章 雨夜来信 [剧情梗概].md",
+        title: "雨夜来信",
+        focusKind: "plot_synopsis",
+        status: "active",
+        createdAtMs: 1,
+        updatedAtMs: 1,
+      },
+      onSetFocus: vi.fn(),
+      focusChapters: [{
+        sequence: 1,
+        label: "第一章 雨夜来信",
+        synopsisPath: "章节正文/第一卷 待命名/第一章 雨夜来信 [剧情梗概].md",
+      }],
+    })))
+
+    expect(html).toContain("data-testid=\"creation-desk-focus-bar\"")
+    expect(html).toContain("第一章 雨夜来信")
+    expect(html).toContain("打开梗概文件")
+    expect(html).not.toContain("章节正文/第一卷 待命名/第一章 雨夜来信 [剧情梗概].md")
   })
 
   it("detects when the creation-desk thread is away from the latest messages", async () => {
@@ -865,12 +908,52 @@ describe("right rail process UI contract", () => {
     expect(html).toContain("暂停原因")
     expect(html).toContain("本轮执行时间已到上限")
     expect(html).not.toContain("Turn deadline exceeded")
-    expect(html).toContain("请先在运行监控中重置 1 项限制后再继续")
+    expect(html).toContain("会自动重置已耗尽的执行限制")
     expect(html).toContain("回退本轮")
     expect(html).toContain("重试")
     expect(html).toContain("继续")
     expect(html).not.toContain("保持暂停")
-    expect(html.match(/disabled=""/gu)?.length).toBeGreaterThanOrEqual(2)
+    expect(html).not.toContain('data-testid="checkpoint-continue" disabled')
+    expect(html).not.toContain('data-testid="checkpoint-retry" disabled')
+  })
+
+  it("shows a handle button on the interrupted phase so recovery can reopen after dismiss", () => {
+    const html = renderToStaticMarkup(React.createElement(RightRail, {
+      graphSlice: undefined,
+      task: {
+        handle: { taskId: "task-deadline", status: "awaiting_user_decision" },
+        status: "awaiting_user_decision",
+        lastPhase: "graph_capacity_rewrite",
+        error: { message: "Turn deadline exceeded while the model request was in flight." },
+        interruption: {
+          kind: "limit_exhausted",
+          message: "Turn deadline exceeded while the model request was in flight.",
+          blockedMetrics: ["wall_time"],
+          phase: "graph_capacity_rewrite",
+        },
+        phaseRuns: [{
+          phaseRunId: "phase-structure",
+          phase: "graph_structure_plan",
+          status: "completed",
+          attempt: 1,
+          usage: {},
+          startedAtMs: 1,
+          finishedAtMs: 2,
+        }, {
+          phaseRunId: "phase-rewrite",
+          phase: "graph_capacity_rewrite",
+          status: "running",
+          attempt: 1,
+          usage: {},
+          startedAtMs: 3,
+        }],
+      },
+    }))
+
+    expect(html).toContain("data-testid=\"phase-handle-graph_governance\"")
+    expect(html).toContain("处理")
+    expect(html).toContain("task-error")
+    expect(html).toContain("task-error-dismiss")
   })
 
   it("renders settings extraction review checkpoint without blocked metrics", () => {
@@ -957,7 +1040,7 @@ describe("right rail process UI contract", () => {
     expect(html).not.toContain("Chapter publish failed")
     expect(html).toContain("重试收尾步骤")
     expect(html).toContain("回退本轮")
-    expect(html).toContain("committed")
+    expect(html).toContain("data-testid=\"checkpoint-continue\"")
     expect(html).not.toContain("继续执行会重发当前模型请求")
     expect(html).not.toContain("此前阶段、读取结果和待提交作用域均已保存")
     expect(html).not.toContain("保持暂停")
@@ -971,7 +1054,7 @@ describe("checkpoint pause reason copy", () => {
       blockedMetricCount: 0,
       interruptionKind: "execution_error",
       interruptionMessage: "driver has already been destroyed",
-    })).toBe("本地数据库连接已关闭")
+    })).toBe("本地数据库连接已关闭，请再点一次回退本轮（系统会自动重连）")
   })
 })
 

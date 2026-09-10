@@ -122,9 +122,6 @@ export function TaskCheckpointDialog({ task, project, onClose, onResume, onRollb
   const [actionError, setActionError] = useState<string>()
   const isSettingsReview = task.interruption?.kind === "settings_extraction_review" || task.status === "waiting_for_review"
   const blockedMetricIds = isSettingsReview ? [] as const : (task.interruption?.blockedMetrics ?? [])
-  const blockedMetrics = blockedMetricIds.map((metricId) => task.runtimeMetrics?.metrics.find((metric) => metric.metricId === metricId))
-  const unresolvedMetrics = blockedMetrics.filter((metric) => metric === undefined || metric.blocking)
-  const allBlockedMetricsReset = unresolvedMetrics.length === 0
   const finalizationActive = !isSettingsReview && task.finalization !== undefined && task.finalization.status !== "completed"
   const latestPhase = finalizationActive
     ? `正式章节收尾 · ${finalizationLabel(task.finalization.status)}`
@@ -136,9 +133,9 @@ export function TaskCheckpointDialog({ task, project, onClose, onResume, onRollb
     interruptionKind: task.interruption?.kind,
     interruptionMessage,
   })
-  const resetHint = unresolvedMetrics.length === 0
+  const resetHint = blockedMetricIds.length === 0
     ? undefined
-    : `请先在运行监控中重置 ${String(unresolvedMetrics.length)} 项限制后再继续。`
+    : "点「继续」或「重试」时会自动重置已耗尽的执行限制（如本轮时限），不会卡死在此。"
   const taskId = task.handle?.taskId
   const [settingsSnapshot, setSettingsSnapshot] = useState<SettingsExtractionSnapshot>()
   const [settingsBusy, setSettingsBusy] = useState(false)
@@ -230,12 +227,13 @@ export function TaskCheckpointDialog({ task, project, onClose, onResume, onRollb
     }
   }
 
-  return createPortal(<div className="dialog-backdrop checkpoint-backdrop checkpoint-backdrop--locked" role="presentation">
+  const dialog = <div className="dialog-backdrop checkpoint-backdrop checkpoint-backdrop--locked" role="presentation">
     <section className="checkpoint-dialog checkpoint-dialog--compact" role="dialog" aria-modal="true" aria-labelledby="checkpoint-dialog-title" data-testid="checkpoint-dialog">
-      <header className="checkpoint-dialog-header checkpoint-dialog-header--locked">
+      <header className="checkpoint-dialog-header">
         <span className="checkpoint-status-icon"><Pause size={17} /></span>
         <div><strong id="checkpoint-dialog-title">{isSettingsReview ? "设定抽取待确认" : "推演已暂停"}</strong><small>{latestPhase}</small></div>
         <span className="checkpoint-state">{isSettingsReview ? "等待确认" : "等待决定"}</span>
+        <button type="button" aria-label="关闭" data-testid="checkpoint-close" onClick={onClose}><X size={16} /></button>
       </header>
 
       <div className="checkpoint-dialog-body">
@@ -261,11 +259,13 @@ export function TaskCheckpointDialog({ task, project, onClose, onResume, onRollb
 
       <footer className="checkpoint-dialog-footer">
         <button className="checkpoint-rollback-command" type="button" disabled={pendingAction !== undefined} data-testid="checkpoint-rollback" onClick={() => { void runRollback(); }}><ArrowLeftToLine size={13} />回退本轮</button>
-        <button type="button" disabled={!settingsReadyToContinue || !allBlockedMetricsReset || pendingAction !== undefined} onClick={() => { void runResume("retry_phase"); }}><RotateCcw size={13} />{finalizationActive ? "重试收尾步骤" : isSettingsReview ? "重试设定抽取" : "重试"}</button>
-        <button className="checkpoint-continue-command" type="button" disabled={!settingsReadyToContinue || !allBlockedMetricsReset || pendingAction !== undefined} data-testid="checkpoint-continue" onClick={() => { void runResume("continue"); }}><Play size={13} />{isSettingsReview ? "继续图治理" : "继续"}</button>
+        <button type="button" disabled={!settingsReadyToContinue || pendingAction !== undefined} data-testid="checkpoint-retry" onClick={() => { void runResume("retry_phase"); }}><RotateCcw size={13} />{finalizationActive ? "重试收尾步骤" : isSettingsReview ? "重试设定抽取" : "重试"}</button>
+        <button className="checkpoint-continue-command" type="button" disabled={!settingsReadyToContinue || pendingAction !== undefined} data-testid="checkpoint-continue" onClick={() => { void runResume("continue"); }}><Play size={13} />{isSettingsReview ? "继续图治理" : "继续"}</button>
       </footer>
     </section>
-  </div>, document.body)
+  </div>
+  if (typeof document === "undefined") return dialog
+  return createPortal(dialog, document.body)
 }
 
 function SettingsExtractionReviewPanel({ proposals, busy, error, onApprove, onReject }: {

@@ -302,13 +302,21 @@ describe("ModelContextAppender", () => {
     expect(changed.input.stageProjection).toMatchObject({ projectionDigest: "projection-b" })
   })
 
-  it("includes synopsisDiscuss conversationHistory on the first request of a discuss turn", () => {
+  it("drops conversationHistory and only re-emits changed synopsis markdown across discuss sends", () => {
     const appender = new ModelContextAppender()
-    const request = { ...createRequest(), phase: "synopsis_discuss" as const }
-    const history = [
-      { role: "user", content: "先把北桥冲突写清楚" },
-      { role: "assistant", content: "已补充北桥冲突与来使动机。" },
-    ]
+    const firstRequest = { ...createRequest(), phase: "synopsis_discuss" as const }
+    const discuss = {
+      heading: "第二章 北地来的信使",
+      chapterSequence: 2,
+      synopsisMarkdown: "# 梗概\n来使抵达北桥。",
+      outlineMarkdown: "# 细纲\n场 1",
+      chapterBodyMarkdown: "# 正文\n爷爷站在田埂上。",
+      conversationHistory: [
+        { role: "user", content: "先把北桥冲突写清楚" },
+        { role: "assistant", content: "已补充北桥冲突与来使动机。" },
+      ],
+      discussTrigger: "user",
+    }
     const modelRequest = {
       phase: "synopsis_discuss",
       protocolVersion: "1.0.0",
@@ -318,20 +326,21 @@ describe("ModelContextAppender", () => {
       input: {
         workflow: "synopsis_discuss",
         userInput: "继续推进来使见面",
-        synopsisDiscuss: {
-          heading: "第二章 北地来的信使",
-          chapterSequence: 2,
-          synopsisMarkdown: "# 梗概\n来使抵达北桥。",
-          conversationHistory: history,
-          discussTrigger: "user",
-        },
+        synopsisDiscuss: discuss,
       },
     }
 
-    const firstDelta = appender.createDelta(request, modelRequest, [systemMessage()]) as {
+    const firstDelta = appender.createDelta(firstRequest, modelRequest, [systemMessage()]) as {
       input: Record<string, unknown>
     }
-    expect(firstDelta.input.synopsisDiscuss).toEqual(modelRequest.input.synopsisDiscuss)
+    expect(firstDelta.input.synopsisDiscuss).toEqual({
+      heading: discuss.heading,
+      chapterSequence: discuss.chapterSequence,
+      synopsisMarkdown: discuss.synopsisMarkdown,
+      outlineMarkdown: discuss.outlineMarkdown,
+      chapterBodyMarkdown: discuss.chapterBodyMarkdown,
+      discussTrigger: "user",
+    })
 
     const firstMessage = visibleMessage({
       messageId: "00000000-0000-4000-8000-000000000031",
@@ -340,10 +349,24 @@ describe("ModelContextAppender", () => {
       phase: "synopsis_discuss",
       content: appender.formatDelta(firstDelta),
     })
-    const secondDelta = appender.createDelta(request, modelRequest, [systemMessage(), firstMessage]) as {
+    const sameTurnDelta = appender.createDelta(firstRequest, modelRequest, [systemMessage(), firstMessage]) as {
       input: Record<string, unknown>
     }
-    expect(secondDelta.input.synopsisDiscuss).toBeUndefined()
+    expect(sameTurnDelta.input.synopsisDiscuss).toBeUndefined()
+
+    const secondSend = {
+      ...firstRequest,
+      turnId: "00000000-0000-4000-8000-000000000044",
+    }
+    const secondSendDelta = appender.createDelta(secondSend, modelRequest, [systemMessage(), firstMessage]) as {
+      input: Record<string, unknown>
+    }
+    const secondDiscuss = secondSendDelta.input.synopsisDiscuss as Record<string, unknown>
+    expect(secondDiscuss.conversationHistory).toBeUndefined()
+    expect(secondDiscuss.synopsisMarkdown).toBeUndefined()
+    expect(secondDiscuss.outlineMarkdown).toBeUndefined()
+    expect(secondDiscuss.chapterBodyMarkdown).toBeUndefined()
+    expect(secondDiscuss.heading).toBe(discuss.heading)
   })
 
   it("includes revisionAssist conversationHistory on the first request of a revision turn", () => {

@@ -20,6 +20,7 @@ import type {
   SynopsisConversationSendResult,
   SynopsisConversationStartResult,
   SynopsisConversationStreamSnapshot,
+  DiscussFocusKind,
   SynopsisConversationBudgetAdvisory,
   SynopsisConversationStreamUsage,
   SynopsisStagingPromoteProposal,
@@ -48,7 +49,7 @@ import { rememberWorkName } from "../features/projects/work-name-history.js"
 import { useAppUpdate } from "../hooks/useAppUpdate.js"
 import { WorkspaceTree } from "../features/workspace/WorkspaceTree.js"
 import { WorkspaceNameDialog } from "../features/workspace/WorkspaceNameDialog.js"
-import { canCreateFolderInDirectory, findDuplicateVolumeSequence, isValidVolumeFolderName, isChapterVolumeContainerPath, isVolumeDirectoryPath, resolveCreateDestination } from "../features/workspace/workspace-locks.js"
+import { AUTO_DESCRIPTION_RULE_PATH, canCreateFolderInDirectory, findDuplicateVolumeSequence, isValidVolumeFolderName, isChapterVolumeContainerPath, isVolumeDirectoryPath, resolveCreateDestination } from "../features/workspace/workspace-locks.js"
 import { EditorArea } from "../features/editor/EditorArea.js"
 import { useCreationDeskPresentationPreferences } from "../features/editor/creation-desk-presentation-preferences.js"
 import { SettingsLineagePanel } from "../features/settings/SettingsLineagePanel.js"
@@ -60,7 +61,10 @@ import {
 import { CreationDeskProgressReviewDialog } from "../features/editor/CreationDeskProgressReviewDialog.js"
 import { countPendingReviews } from "../features/editor/creation-desk-goals.js"
 import {
+  isChapterBodyMarkdownPath,
   isChapterPlanningMarkdownPath,
+  listDiscussFocusChapters,
+  parseChapterSequenceFromPath,
   resolveChapterArtifactRelationsWithInventory,
   resolveChapterMarkdownKind,
   resolveChapterSurfacePath,
@@ -108,6 +112,9 @@ export function App(): React.JSX.Element {
   const synopsisActiveRequestRef = useRef<string | null>(null)
   const synopsisStopDraftRef = useRef<string | null>(null)
   const synopsisSendInFlightRef = useRef(false)
+  const discussHandoffWatchRef = useRef(0)
+  const selectedPathRef = useRef<string | undefined>(undefined)
+  selectedPathRef.current = selectedPath
   const [chapterSynopsis, setChapterSynopsis] = useState<ChapterSynopsis>()
   const [synopsisPanelOpen, setSynopsisPanelOpen] = useState(false)
   const [relatedChapterArtifacts, setRelatedChapterArtifacts] = useState<readonly RelatedChapterArtifact[]>([])
@@ -157,6 +164,23 @@ export function App(): React.JSX.Element {
     })
     setSynopsisConversation(result)
     setSynopsisUsage(result.usage)
+  }, [project])
+
+  const syncDiscussFocus = useCallback(async (path: string): Promise<void> => {
+    if (project === undefined) return
+    const normalized = path.replaceAll("\\", "/")
+    if (!normalized.startsWith("章节正文/") || !normalized.endsWith(".md")) return
+    try {
+      const focused = await invokeBackend<SynopsisConversationStartResult>("synopsis.conversation.setFocus", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        relativePath: normalized,
+      })
+      setSynopsisConversation(focused)
+      if (focused.usage !== undefined) setSynopsisUsage(focused.usage)
+    } catch {
+      // Opening a chapter file should still succeed if discuss focus cannot update.
+    }
   }, [project])
 
   const refreshChapterSynopsis = useCallback(async (chapterId: string): Promise<void> => {
@@ -235,13 +259,22 @@ export function App(): React.JSX.Element {
         workspaceRootRef: project.workspaceRootRef,
       }),
     ])
+    // Tree surfaces prefer body > outline > synopsis among same-chapter siblings.
+    // Use on-disk files only — registered-but-missing publish paths must not hide
+    // current 梗概/细纲 after titles were renamed (e.g. 第三章 秤与约 → 北地来的信使).
+    const onDiskPaths = new Set(
+      next.inventory.filter((entry) => entry.kind === "file").map((entry) => entry.path),
+    )
     const chapterFiles = [
       ...next.inventory.filter((entry) => (
         entry.path.startsWith("章节正文/")
         && entry.kind === "file"
-        && isChapterPlanningMarkdownPath(entry.path)
+        && (isChapterPlanningMarkdownPath(entry.path) || isChapterBodyMarkdownPath(entry.path))
       )),
-      ...chapters.map((chapter) => ({ path: chapter.publishPath, kind: "file" as const })),
+      ...chapters
+        .map((chapter) => chapter.publishPath)
+        .filter((publishPath) => onDiskPaths.has(publishPath) && isChapterBodyMarkdownPath(publishPath))
+        .map((publishPath) => ({ path: publishPath, kind: "file" as const })),
     ]
     const surfaceByDir = new Map<string, string>()
     const byDir = new Map<string, string[]>()
@@ -297,6 +330,69 @@ export function App(): React.JSX.Element {
       setError(visibleIssues.map((issue) => `${issue.path}：${issue.message}`).join("\n"))
     }
   }, [project])
+
+  const setDiscussFocus = useCallback(async (sequence: number, focusKind: DiscussFocusKind): Promise<void> => {
+    if (project === undefined) return
+    try {
+      const focused = await invokeBackend<SynopsisConversationStartResult>("synopsis.conversation.setFocus", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        chapterSequence: sequence,
+        focusKind,
+      })
+      setSynopsisConversation(focused)
+      if (focused.usage !== undefined) setSynopsisUsage(focused.usage)
+      await refreshWorkspace()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }, [project, refreshWorkspace])
+
+  const watchDiscussFocusAfterPublish = useCallback(async (publishedSequence: number): Promise<void> => {
+    if (project === undefined) return
+    discussHandoffWatchRef.current += 1
+    const watchId = discussHandoffWatchRef.current
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      if (watchId !== discussHandoffWatchRef.current) return
+      try {
+        const result = await invokeBackend<SynopsisConversationListResult>("synopsis.conversation.list", {
+          projectId: project.projectId,
+          workspaceRootRef: project.workspaceRootRef,
+        })
+        if (watchId !== discussHandoffWatchRef.current) return
+        setSynopsisConversation(result)
+        if (result.usage !== undefined) setSynopsisUsage(result.usage)
+        if ((result.session?.chapterSequence ?? 0) > publishedSequence) {
+          const openPath = selectedPathRef.current
+          if (openPath !== undefined && openPath.startsWith("章节正文/")) {
+            await syncDiscussFocus(openPath)
+            return
+          }
+          setPostCommitNotice((current) => (
+            current === "正文已写入工作区，正在完成梗概交接…" ? undefined : current
+          ))
+          return
+        }
+      } catch {
+        // Handoff focus watch is best-effort while analysis still runs.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+    }
+  }, [project, syncDiscussFocus])
+
+  const discussFocusChapters = useMemo(() => {
+    const listed = listDiscussFocusChapters(report.inventory.map((entry) => entry.path))
+    const session = synopsisConversation.session
+    if (session === undefined) return listed
+    if (listed.some((item) => item.sequence === session.chapterSequence)) return listed
+    const fromSessionPath = listDiscussFocusChapters([session.synopsisPath])[0]
+    const injected = fromSessionPath ?? {
+      sequence: session.chapterSequence,
+      label: session.title,
+      synopsisPath: session.synopsisPath,
+    }
+    return [...listed, injected].sort((left, right) => left.sequence - right.sequence)
+  }, [report.inventory, synopsisConversation.session])
 
   const loadHistoryGraph = useCallback(async (anchorIds: readonly string[]): Promise<void> => {
     if (project === undefined || anchorIds.length === 0) {
@@ -454,6 +550,7 @@ export function App(): React.JSX.Element {
         setChapterBody("")
         setSavedContent(result.content)
         void loadRelatedChapterArtifacts(path)
+        void syncDiscussFocus(path)
         return
       }
       if (path.startsWith("章节正文/")) {
@@ -476,6 +573,7 @@ export function App(): React.JSX.Element {
         void refreshChapterConversation(resolved.committed.chapterId)
         void refreshChapterSynopsis(resolved.committed.chapterId)
         void loadRelatedChapterArtifacts(path)
+        void syncDiscussFocus(path)
         return
       }
       setChapterConversation({ messages: [] })
@@ -616,6 +714,7 @@ export function App(): React.JSX.Element {
     setChapterBody(current.body)
     setSavedContent(current.content)
     await refreshWorkspace()
+    void syncDiscussFocus(current.publishPath)
     setPostCommitNotice(revision.graphSyncStatus === "completed"
       ? "章节修订、上下文登记与世界图同步已完成。"
       : "章节正文已提交，世界图正在后台同步。")
@@ -851,7 +950,7 @@ export function App(): React.JSX.Element {
 
   const monitorTask = async (taskId: string): Promise<void> => {
     let consecutiveFailures = 0
-    let chapterSurfaceOpened = false
+    let publishedChapterRefreshed = false
     for (;;) {
       let snapshot: TaskSnapshot
       try {
@@ -868,35 +967,35 @@ export function App(): React.JSX.Element {
       const finalizationReady = snapshot.finalization !== undefined
         && (snapshot.finalization.status === "chapter_registered"
           || snapshot.finalization.status === "completed")
-      if (!chapterSurfaceOpened && finalizationReady && snapshot.finalization !== undefined) {
-        const chapterPath = snapshot.finalization.chapterPath
+      if (!publishedChapterRefreshed && finalizationReady && snapshot.finalization !== undefined) {
         try {
           await refreshWorkspace()
-          await openFile(chapterPath)
-          chapterSurfaceOpened = true
+          publishedChapterRefreshed = true
           if (snapshot.status !== "completed") {
             setPostCommitNotice("正文已写入工作区，正在完成梗概交接…")
           }
         } catch (cause) {
-          setPostCommitNotice(`正文已提交，但打开章节失败：${cause instanceof Error ? cause.message : String(cause)}`)
+          setPostCommitNotice(`正文已提交，但刷新工作区失败：${cause instanceof Error ? cause.message : String(cause)}`)
         }
       }
 
       if (snapshot.status === "completed") {
         setPrompt("")
-        if (!chapterSurfaceOpened) {
+        openWorkspaceHome()
+        if (!publishedChapterRefreshed) {
           try {
             await refreshWorkspace()
+            publishedChapterRefreshed = true
           } catch (cause) {
             setPostCommitNotice(`本轮正文与图数据已提交，但工作区刷新失败：${cause instanceof Error ? cause.message : String(cause)}`)
           }
-          const chapterPath = snapshot.result?.chapterPath ?? snapshot.finalization?.chapterPath
-          if (chapterPath !== undefined) {
-            await openFile(chapterPath)
-            chapterSurfaceOpened = true
-          } else if (snapshot.finalization !== undefined) {
-            setPostCommitNotice("本轮已完成，但未找到可打开的章节路径；章节提交记录仍已保留。")
-          }
+        }
+        void refreshSynopsisConversation()
+        const publishedPath = snapshot.result?.chapterPath ?? snapshot.finalization?.chapterPath
+        const publishedSequence = snapshot.finalization?.committedSequence
+          ?? (publishedPath === undefined ? undefined : parseChapterSequenceFromPath(publishedPath))
+        if (publishedSequence !== undefined && publishedSequence > 0) {
+          void watchDiscussFocusAfterPublish(publishedSequence)
         }
         if (snapshot.result !== undefined) await loadCommittedGraph(snapshot.result)
         try {
@@ -908,8 +1007,8 @@ export function App(): React.JSX.Element {
           setPendingReviewCount(reviewCount)
           if (reviewCount > 0) {
             setPostCommitNotice(`本轮已提交。有 ${String(reviewCount)} 条推演目标待复盘（已达成 / 部分达成 / 未达成）。`)
-          } else if (chapterSurfaceOpened) {
-            setPostCommitNotice(undefined)
+          } else if (publishedChapterRefreshed) {
+            setPostCommitNotice("正文已写入工作区，正在完成梗概交接…")
           }
         } catch {
           // Review prompt is optional; turn completion already succeeded.
@@ -1363,9 +1462,35 @@ export function App(): React.JSX.Element {
   const resumeTask = async (mode: "continue" | "retry_phase"): Promise<void> => {
     const taskId = task?.handle?.taskId
     if (taskId === undefined || projectSettings === undefined) throw new Error("当前任务没有可恢复标识")
+    const fromInterruption = (task?.interruption?.blockedMetrics ?? []).filter((metricId): metricId is ResettableRuntimeMetricId => (
+      metricId === "model_calls"
+      || metricId === "input_tokens"
+      || metricId === "output_tokens"
+      || metricId === "wall_time"
+    ))
+    const message = (task?.interruption?.message ?? task?.error?.message ?? "").toLowerCase()
+    const inferred: ResettableRuntimeMetricId[] = []
+    if (message.includes("turn deadline exceeded") || message.includes("wall time") || task?.interruption?.kind === "limit_exhausted") {
+      inferred.push("wall_time")
+    }
+    if (message.includes("model call budget")) inferred.push("model_calls")
+    if (message.includes("input token budget")) inferred.push("input_tokens")
+    if (message.includes("output token budget")) inferred.push("output_tokens")
+    const fromMetrics = (task?.runtimeMetrics?.metrics ?? [])
+      .filter((metric) => (
+        (metric.metricId === "model_calls"
+          || metric.metricId === "input_tokens"
+          || metric.metricId === "output_tokens"
+          || metric.metricId === "wall_time")
+        && metric.resettable
+        && (metric.state === "exhausted" || metric.blocking)
+      ))
+      .map((metric) => metric.metricId as ResettableRuntimeMetricId)
+    const resetMetricIds = [...new Set([...fromInterruption, ...inferred, ...fromMetrics])]
     const handle = await invokeBackend<{ taskId: string; status: string }>("turn.resume", {
       taskId,
       mode,
+      resetMetricIds,
       ...(activeModelProfile === undefined ? {} : {
         model: {
           baseUrl: activeModelProfile.baseUrl,
@@ -1559,7 +1684,11 @@ export function App(): React.JSX.Element {
     useWorkbenchStore.getState().closeProjectSettings()
   }
 
-  const descriptionRules = useMemo(() => report.inventory.filter((entry) => entry.kind === "file" && entry.path.startsWith("表现输出/描写规则/")).map((entry) => entry.path), [report])
+  const descriptionRules = useMemo(() => report.inventory.filter((entry) => (
+    entry.kind === "file"
+    && entry.path.startsWith("表现输出/描写规则/")
+    && entry.path !== AUTO_DESCRIPTION_RULE_PATH
+  )).map((entry) => entry.path), [report])
   const proseRules = useMemo(() => report.inventory.filter((entry) => entry.kind === "file" && entry.path.startsWith("表现输出/笔风规则/")).map((entry) => entry.path), [report])
 
   useEffect(() => {
@@ -1575,6 +1704,15 @@ export function App(): React.JSX.Element {
       updatePresentation({ proseRule: "" })
     }
   }, [proseRule, proseRules, report.inventory.length, updatePresentation])
+
+  useEffect(() => {
+    if (postCommitNotice === undefined) return
+    if (pendingGraphLoad !== undefined || pendingReviewCount > 0) return
+    const timer = window.setTimeout(() => {
+      setPostCommitNotice(undefined)
+    }, 3000)
+    return () => window.clearTimeout(timer)
+  }, [postCommitNotice, pendingGraphLoad, pendingReviewCount])
 
   const synopsisTokenMetrics = useMemo((): TaskTokenMetrics => {
     const fromUsage = summarizeSynopsisUsageTokenMetrics(synopsisUsage)
@@ -1764,11 +1902,19 @@ export function App(): React.JSX.Element {
             </button>
           : null}
         {pendingGraphLoad === undefined ? null : <button onClick={() => { void continueGraphLoad(); }}>{pendingGraphLoad.reason === "continue" ? "继续加载世界图" : "重试世界图"}</button>}
-        <button onClick={() => {
-          setPostCommitNotice(undefined)
-          setPendingGraphLoad(undefined)
-          setPendingReviewCount(0)
-        }}>只看正文</button>
+        <button
+          type="button"
+          className="post-commit-notice-close"
+          aria-label="关闭"
+          data-testid="post-commit-notice-close"
+          onClick={() => {
+            setPostCommitNotice(undefined)
+            setPendingGraphLoad(undefined)
+            setPendingReviewCount(0)
+          }}
+        >
+          <X size={14} />
+        </button>
       </div>
     </div>}
     {project !== undefined && progressReviewOpen
@@ -1887,6 +2033,8 @@ export function App(): React.JSX.Element {
           onPromoteStaging={promoteStaging}
           onRejectStagingPromote={rejectStagingPromote}
           onOpenSynopsisFile={(path) => { void openFile(path); }}
+          onSetFocus={(sequence, focusKind) => { void setDiscussFocus(sequence, focusKind); }}
+          focusChapters={discussFocusChapters}
           onOpenSettingsLineage={openSettingsLineage}
           diffFocusMessageId={diffFocusMessageId}
           onDiffFocusHandled={() => { setDiffFocusMessageId(undefined); }}

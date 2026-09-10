@@ -51,6 +51,8 @@ export type ModelExecutionOptions = Readonly<{
   phasePrompt?: PromptResource
   /** When set, adapters should stream provider deltas when the protocol supports it. */
   onPartial?: (partial: ModelStreamPartial) => void
+  /** Called before a schema-repair completion so UIs can reset streamed resulting text. */
+  onSchemaRepair?: () => void
   /** Force DeepSeek thinking on for this call regardless of profile default. */
   forceThinking?: boolean
 }>
@@ -77,6 +79,7 @@ export type PromptResource = Readonly<{
 
 export interface PromptResourcePort {
   loadBaseRules(): Promise<PromptResource>
+  loadContentHandling(): Promise<PromptResource>
   loadPlotSynopsisGuide(): Promise<PromptResource>
   loadSettingsQueryGuide(): Promise<PromptResource>
   loadSettingsRevisionGuide(): Promise<PromptResource>
@@ -154,8 +157,10 @@ export type TurnPhaseInput = Readonly<{
   synopsisDiscuss?: Readonly<{
     heading: string
     chapterSequence: number
-    synopsisMarkdown: string
+    synopsisMarkdown?: string
     outlineMarkdown?: string
+    /** Read-only committed body of the focused chapter, when published. */
+    chapterBodyMarkdown?: string
     outlineDigest?: string
     userEditedSinceAgent: boolean
     userEditedOutlineSinceAgent?: boolean
@@ -170,7 +175,7 @@ export type TurnPhaseInput = Readonly<{
       recommendedTarget: "body" | "planning"
       remediation: string
     }>
-    conversationHistory: readonly Readonly<{ role: "user" | "assistant"; content: string }>[]
+    conversationHistory?: readonly Readonly<{ role: "user" | "assistant"; content: string }>[]
     activeGoals?: readonly Readonly<{
       goalId: string
       content: string

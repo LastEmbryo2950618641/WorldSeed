@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Activity, Check, Circle, GitBranch, History, Network, Orbit } from "lucide-react"
+import { Activity, AlertCircle, Check, Circle, GitBranch, History, Network, Orbit, X } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { aiPhaseValues, type HistoryOverview, type ProjectSettings, type ResettableRuntimeMetricId } from "@worldseed/contracts"
@@ -90,13 +90,25 @@ export function RightRail({
   onRefreshWorkspace,
 }: Props): React.JSX.Element {
   const [checkpointOpen, setCheckpointOpen] = useState(false)
+  const [dismissedCheckpointKey, setDismissedCheckpointKey] = useState<string>()
   const tab = useWorkbenchStore((state) => state.rightTab)
   const setTab = useWorkbenchStore((state) => state.setRightTab)
   const tokenSummary = summarizeTaskTokenMetrics(task)
+  const checkpointKey = checkpointDecisionKey(task)
+  const openCheckpoint = (): void => {
+    setDismissedCheckpointKey(undefined)
+    setCheckpointOpen(true)
+  }
+  const closeCheckpoint = (): void => {
+    setCheckpointOpen(false)
+    if (checkpointKey !== undefined) setDismissedCheckpointKey(checkpointKey)
+  }
   useEffect(() => {
     const status = task?.status
     if (status === "awaiting_user_decision" || status === "waiting_for_review" || status === "paused") {
-      setCheckpointOpen(true)
+      if (checkpointKey !== undefined && checkpointKey !== dismissedCheckpointKey) {
+        setCheckpointOpen(true)
+      }
       return
     }
     // Locked dialog must not linger after the task has already moved on (e.g. resume
@@ -104,8 +116,9 @@ export function RightRail({
     if (status === "running" || status === "committing" || status === "completed"
       || status === "failed" || status === "cancelled" || status === "created") {
       setCheckpointOpen(false)
+      setDismissedCheckpointKey(undefined)
     }
-  }, [task?.status])
+  }, [task?.status, checkpointKey, dismissedCheckpointKey])
   return <><aside className="right-rail">
     <div className="right-tabs" role="tablist" aria-label="右侧面板">
       <Tab id="process" tab={tab} onChange={setTab} icon={<Activity size={15} />} label="流程" />
@@ -117,6 +130,7 @@ export function RightRail({
       {tab === "process" ? <ProcessPanel
         task={task}
         onResetMetrics={onResetTaskMetrics}
+        onOpenCheckpoint={openCheckpoint}
       /> : null}
       {tab === "graph" ? <WorldGraph slice={graphSlice} settings={graphSettings} /> : null}
       {tab === "evolution" ? <EvolutionPanel /> : null}
@@ -129,7 +143,7 @@ export function RightRail({
         taskRunning={task?.status === "running"}
         {...(historyLoading === undefined ? {} : { loading: historyLoading })}
         onOpenSettings={onOpenProjectSettings ?? (() => undefined)}
-        onOpenCheckpoint={() => { setCheckpointOpen(true); }}
+        onOpenCheckpoint={openCheckpoint}
         onSave={onSaveHistory ?? (() => Promise.reject(new Error("历史保存接口尚未连接")))}
         onRestore={onRestoreHistory ?? (() => Promise.reject(new Error("历史恢复接口尚未连接")))}
         onContinueFrom={onContinueFromHistory ?? (() => Promise.reject(new Error("历史分叉接口尚未连接")))}
@@ -147,7 +161,7 @@ export function RightRail({
   </aside>{checkpointOpen && task !== undefined ? <TaskCheckpointDialog
     task={task}
     project={project}
-    onClose={() => { setCheckpointOpen(false); }}
+    onClose={closeCheckpoint}
     onResume={onResumeTask ?? (() => Promise.reject(new Error("恢复接口尚未连接")))}
     onResetMetrics={onResetTaskMetrics ?? (() => Promise.reject(new Error("指标重置接口尚未连接")))}
     onRollbackRound={onReturnPreviousRound ?? (() => Promise.reject(new Error("回退本轮接口尚未连接")))}
@@ -175,10 +189,26 @@ function Tab({ id, tab, onChange, icon, label }: { id: RightTab; tab: RightTab; 
 function ProcessPanel({
   task,
   onResetMetrics,
+  onOpenCheckpoint,
 }: {
   task: TaskSnapshot | undefined
   onResetMetrics?: ((metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>) | undefined
+  onOpenCheckpoint: () => void
 }): React.JSX.Element {
+  const taskErrorMessage = task?.error?.message
+  const [dismissedTaskError, setDismissedTaskError] = useState<string>()
+  useEffect(() => {
+    if (taskErrorMessage === undefined) {
+      setDismissedTaskError(undefined)
+      return
+    }
+    if (dismissedTaskError === taskErrorMessage) return
+    const timer = window.setTimeout(() => {
+      setDismissedTaskError(taskErrorMessage)
+    }, 3000)
+    return () => window.clearTimeout(timer)
+  }, [taskErrorMessage, dismissedTaskError])
+  const showTaskError = taskErrorMessage !== undefined && dismissedTaskError !== taskErrorMessage
   return <div className="process-panel">
     <RuntimeMonitor
       task={task}
@@ -187,36 +217,62 @@ function ProcessPanel({
     {task?.finalization === undefined || task.finalization.status === "completed" ? null : <p className="phase-empty">正式章节收尾：{task.finalization.status} · {task.finalization.chapterHeading}</p>}
     <div className="phase-list">{visibleTopLevelPhases.flatMap((phase) => {
       const rows: React.ReactNode[] = []
-      if (phase === "settlement_review") rows.push(<GraphGovernanceGroup task={task} key="staged-graph-governance" />)
+      if (phase === "settlement_review") {
+        rows.push(<GraphGovernanceGroup task={task} onOpenCheckpoint={onOpenCheckpoint} key="staged-graph-governance" />)
+      }
       const runs = task?.phaseRuns?.filter((run) => run.phase === phase) ?? []
       const latest = runs.at(-1)
-      const isDone = latest?.status === "completed"
-      const isCurrent = latest?.status === "running" || latest?.status === "failed"
-      rows.push(<details className={`phase-detail ${isDone ? "done" : isCurrent ? "current" : ""}`} key={phase}>
-        <summary className={`phase-row ${isDone ? "done" : isCurrent ? "current" : ""}`}>
+      const visual = resolvePhaseVisualState(task, phase, latest)
+      rows.push(<details className={`phase-detail ${visual.css}`} key={phase}>
+        <summary className={`phase-row ${visual.css}`}>
           <UiTooltip label={uiTooltipRich(labels[phase] ?? phase, phase)} rich>
-            <span className="phase-icon">{isDone ? <Check size={13} /> : isCurrent ? <span className="phase-spinner" aria-hidden="true" /> : <Circle size={10} />}</span>
+            <span className="phase-icon"><PhaseStatusIcon state={visual.kind} /></span>
           </UiTooltip>
           <span className="phase-row-copy">
             <strong>{labels[phase] ?? phase}</strong>
             <small>{phase}</small>
           </span>
-          <PhaseMetricRings runs={runs} />
+          <span className="phase-row-trailing">
+            {visual.showHandle
+              ? <button type="button" className="phase-handle-button" data-testid={`phase-handle-${phase}`} onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                onOpenCheckpoint()
+              }}>处理</button>
+              : null}
+            <PhaseMetricRings runs={runs} />
+          </span>
         </summary>
-        {latest?.result === undefined ? <PhasePending latestStatus={latest?.status} /> : <PhaseDetails result={latest.result} />}
+        {latest?.result === undefined ? <PhasePending latestStatus={latest?.status} visualKind={visual.kind} /> : <PhaseDetails result={latest.result} />}
       </details>)
       return rows
     })}</div>
-    {task?.error?.message === undefined ? null : <p className="task-error">{task.error.message}</p>}
+    {showTaskError
+      ? <p className="task-error" role="alert">
+          <span className="task-error-text">{taskErrorMessage}</span>
+          <button
+            type="button"
+            className="task-error-dismiss"
+            aria-label="关闭"
+            data-testid="task-error-dismiss"
+            onClick={() => { setDismissedTaskError(taskErrorMessage) }}
+          >
+            <X size={14} />
+          </button>
+        </p>
+      : null}
   </div>
 }
 
-function GraphGovernanceGroup({ task }: { task: TaskSnapshot | undefined }): React.JSX.Element {
+function GraphGovernanceGroup({
+  task,
+  onOpenCheckpoint,
+}: {
+  task: TaskSnapshot | undefined
+  onOpenCheckpoint: () => void
+}): React.JSX.Element {
   const runs = task?.phaseRuns?.filter((run) => stagedGraphPhases.includes(run.phase as typeof stagedGraphPhases[number])) ?? []
   const completed = new Set(runs.filter((run) => run.status === "completed").map((run) => run.phase))
-  const active = runs.findLast((run) => run.status === "running" || run.status === "failed")
-  const done = completed.has("graph_governance_review")
-  const capacityRuns = runs.filter((run) => run.phase === "graph_capacity_rewrite")
   const steps = [
     { id: "graph_structure_plan", label: "候选结构规划", kind: "ai" as const },
     { id: "graph_capacity_assessment", label: "容量检查", kind: "mechanical" as const },
@@ -226,38 +282,84 @@ function GraphGovernanceGroup({ task }: { task: TaskSnapshot | undefined }): Rea
     { id: "graph_retrieval_design", label: "查询投影设计", kind: "ai" as const },
     { id: "graph_governance_review", label: "整体治理审核", kind: "ai" as const },
   ]
-  return <details className={`phase-detail graph-governance-group ${done ? "done" : active === undefined ? "" : "current"}`}>
-    <summary className={`phase-row ${done ? "done" : active === undefined ? "" : "current"}`}>
+  const capacityRuns = runs.filter((run) => run.phase === "graph_capacity_rewrite")
+  const stepVisuals = steps.map((step) => {
+    const phaseRuns = step.kind === "ai" ? runs.filter((run) => run.phase === step.id) : []
+    const latest = phaseRuns.at(-1)
+    const mechanicalComplete = step.id === "graph_capacity_assessment"
+      ? completed.has("graph_structure_plan")
+      : completed.has("graph_structure_plan") && (capacityRuns.length === 0 || completed.has("graph_capacity_rewrite"))
+    if (step.kind === "mechanical") {
+      return {
+        step,
+        phaseRuns,
+        latest,
+        mechanicalComplete,
+        visual: { kind: mechanicalComplete ? "done" as const : "idle" as const, css: mechanicalComplete ? "done" : "", showHandle: false },
+      }
+    }
+    return {
+      step,
+      phaseRuns,
+      latest,
+      mechanicalComplete,
+      visual: resolvePhaseVisualState(task, step.id, latest),
+    }
+  })
+  const done = completed.has("graph_governance_review")
+  const groupFailed = stepVisuals.some((entry) => entry.visual.kind === "failed")
+  const groupRunning = !groupFailed && stepVisuals.some((entry) => entry.visual.kind === "running")
+  const interruptedInGroup = isDecisionGatedStatus(task?.status) && (
+    (task?.interruption?.phase !== undefined && stagedGraphPhases.includes(task.interruption.phase as typeof stagedGraphPhases[number]))
+    || (task?.lastPhase !== undefined && stagedGraphPhases.includes(task.lastPhase as typeof stagedGraphPhases[number]))
+  )
+  const showGroupHandle = stepVisuals.some((entry) => entry.visual.showHandle) || groupFailed && isDecisionGatedStatus(task?.status) || interruptedInGroup
+  const groupCss = done ? "done" : groupFailed || interruptedInGroup ? "failed" : groupRunning ? "current" : ""
+  return <details className={`phase-detail graph-governance-group ${groupCss}`}>
+    <summary className={`phase-row ${groupCss}`}>
       <UiTooltip label={uiTooltipRich("分步治理世界图", "graph_governance")} rich>
-        <span className="phase-icon">{done ? <Check size={13} /> : active === undefined ? <Circle size={10} /> : <span className="phase-spinner" aria-hidden="true" />}</span>
+        <span className="phase-icon"><PhaseStatusIcon state={done ? "done" : groupFailed || interruptedInGroup ? "failed" : groupRunning ? "running" : "idle"} /></span>
       </UiTooltip>
       <span className="phase-row-copy">
         <strong>分步治理世界图</strong>
         <small>graph_governance</small>
       </span>
-      <PhaseMetricRings runs={runs} />
+      <span className="phase-row-trailing">
+        {showGroupHandle
+          ? <button type="button" className="phase-handle-button" data-testid="phase-handle-graph_governance" onClick={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onOpenCheckpoint()
+          }}>处理</button>
+          : null}
+        <PhaseMetricRings runs={runs} />
+      </span>
     </summary>
-    <div className="governance-step-list">{steps.map((step) => {
-      const phaseRuns = step.kind === "ai" ? runs.filter((run) => run.phase === step.id) : []
-      const latest = phaseRuns.at(-1)
-      const mechanicalComplete = step.id === "graph_capacity_assessment"
-        ? completed.has("graph_structure_plan")
-        : completed.has("graph_structure_plan") && (capacityRuns.length === 0 || completed.has("graph_capacity_rewrite"))
-      const stepDone = step.kind === "mechanical" ? mechanicalComplete : latest?.status === "completed"
-      const stepCurrent = latest?.status === "running" || latest?.status === "failed"
-      return <details className={`governance-step ${stepDone ? "done" : stepCurrent ? "current" : ""}`} key={step.id}>
+    <div className="governance-step-list">{stepVisuals.map(({ step, phaseRuns, latest, mechanicalComplete, visual }) => (
+      <details className={`governance-step ${visual.css}`} key={step.id}>
         <summary>
           <UiTooltip label={uiTooltipRich(step.label, step.id)} rich>
-            <span className="governance-step-icon">{stepDone ? <Check size={12} /> : stepCurrent ? <span className="phase-spinner phase-spinner-sm" aria-hidden="true" /> : <Circle size={9} />}</span>
+            <span className="governance-step-icon"><PhaseStatusIcon state={visual.kind} size="sm" /></span>
           </UiTooltip>
           <strong className="governance-step-copy">{step.label}</strong>
-          <PhaseMetricRings runs={phaseRuns} />
+          <span className="phase-row-trailing">
+            {visual.showHandle
+              ? <button type="button" className="phase-handle-button" data-testid={`phase-handle-${step.id}`} onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                onOpenCheckpoint()
+              }}>处理</button>
+              : null}
+            <PhaseMetricRings runs={phaseRuns} />
+          </span>
         </summary>
         {step.kind === "mechanical"
           ? <CapacityRunDetails rewriteCount={capacityRuns.length} complete={mechanicalComplete} />
-          : latest?.result === undefined ? <PhasePending latestStatus={latest?.status} /> : <PhaseDetails result={latest.result} />}
+          : latest?.result === undefined
+            ? <PhasePending latestStatus={latest?.status} visualKind={visual.kind} />
+            : <PhaseDetails result={latest.result} />}
       </details>
-    })}</div>
+    ))}</div>
   </details>
 }
 
@@ -437,11 +539,76 @@ function CapacityRunDetails({ rewriteCount, complete }: { rewriteCount: number; 
   </div>
 }
 
-function PhasePending({ latestStatus }: { latestStatus: string | undefined }): React.JSX.Element {
-  if (latestStatus === "running") {
+type PhaseVisualKind = "done" | "running" | "failed" | "idle"
+
+type PhaseVisualState = Readonly<{
+  kind: PhaseVisualKind
+  css: string
+  showHandle: boolean
+}>
+
+function PhasePending({
+  latestStatus,
+  visualKind,
+}: {
+  latestStatus: string | undefined
+  visualKind?: PhaseVisualKind | undefined
+}): React.JSX.Element {
+  if (visualKind === "failed" || latestStatus === "failed") {
+    return <p className="phase-empty">该阶段未能完成，可点击「处理」打开恢复弹窗后重试或继续。</p>
+  }
+  if (latestStatus === "running" || visualKind === "running") {
     return <p className="phase-empty">已向模型发起请求，等待 AI 返回思考记录与正式输出。</p>
   }
   return <p className="phase-empty">尚未进入该阶段；进入后会先显示请求态，返回后再展开 AI 思考与 AI 输出。</p>
+}
+
+function isDecisionGatedStatus(status: string | undefined): boolean {
+  return status === "awaiting_user_decision" || status === "waiting_for_review" || status === "paused"
+}
+
+function checkpointDecisionKey(task: TaskSnapshot | undefined): string | undefined {
+  if (task === undefined || !isDecisionGatedStatus(task.status)) return undefined
+  const taskId = task.handle?.taskId ?? "task"
+  return `${taskId}:${task.status}:${task.interruption?.interruptedAtMs ?? task.interruption?.phase ?? task.lastPhase ?? ""}`
+}
+
+function resolvePhaseVisualState(
+  task: TaskSnapshot | undefined,
+  phaseId: string,
+  latest: PhaseRunSnapshot | undefined,
+): PhaseVisualState {
+  const decisionGated = isDecisionGatedStatus(task?.status)
+  if (latest?.status === "completed") {
+    const showHandle = decisionGated && task?.interruption?.phase === phaseId
+    return { kind: "done", css: "done", showHandle }
+  }
+  if (latest?.status === "failed") {
+    return { kind: "failed", css: "failed", showHandle: decisionGated }
+  }
+  if (latest?.status === "running") {
+    // Task already cannot continue — do not keep a perpetual spinner on the blocked phase.
+    if (decisionGated) {
+      return { kind: "failed", css: "failed", showHandle: true }
+    }
+    return { kind: "running", css: "current", showHandle: false }
+  }
+  if (decisionGated && (task?.interruption?.phase === phaseId || task?.lastPhase === phaseId)) {
+    return { kind: "failed", css: "failed", showHandle: true }
+  }
+  return { kind: "idle", css: "", showHandle: false }
+}
+
+function PhaseStatusIcon({ state, size = "md" }: {
+  state: PhaseVisualKind
+  size?: "md" | "sm"
+}): React.JSX.Element {
+  if (state === "done") return <Check size={size === "sm" ? 12 : 13} />
+  if (state === "failed") return <AlertCircle size={size === "sm" ? 12 : 13} aria-label="失败" />
+  if (state === "running") {
+    return <span className={`phase-spinner${size === "sm" ? " phase-spinner-sm" : ""}`} aria-hidden="true" />
+  }
+  return <Circle size={size === "sm" ? 9 : 10} />
 }
 
 function PhaseDetails({ result }: { result: unknown }): React.JSX.Element {

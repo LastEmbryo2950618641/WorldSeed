@@ -28,9 +28,18 @@ export class ChapterTemporalSourceResolver {
     targetSequence: number
     cursorSequence: number
   }>): Promise<ResolvedChapterTemporalSource | undefined> {
-    if (input.targetSequence < 1 || input.targetSequence >= input.cursorSequence) return undefined
+    if (input.targetSequence < 1 || input.targetSequence > input.cursorSequence) return undefined
 
     const targetIndex = await this.chapterIndex.findBySequence(input.projectId, input.targetSequence)
+    if (input.targetSequence === input.cursorSequence) {
+      if (targetIndex === undefined) return undefined
+      return {
+        sourceId: targetIndex.currentSourceId,
+        publishPath: targetIndex.currentPublishPath,
+        chapterSequence: input.targetSequence,
+        pinned: false,
+      }
+    }
     const pinnedSourceId = await this.resolvePinnedSourceId(input.projectId, input.targetSequence, input.cursorSequence)
     if (pinnedSourceId !== undefined && targetIndex !== undefined) {
       const pinnedFromChapterSequence = await this.findPinSourceChapterSequence(

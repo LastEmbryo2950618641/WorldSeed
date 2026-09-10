@@ -146,6 +146,18 @@ export class SqliteDocumentRepository implements DocumentRepository {
       .executeTakeFirst()
     return row === undefined ? undefined : mapDocumentVersion(row)
   }
+
+  public async ensureActiveDocumentHead(version: DocumentVersion): Promise<void> {
+    await this.database.insertInto("active_document_heads").values({
+      project_id: version.projectId,
+      chapter_id: version.chapterId,
+      document_version_id: version.id,
+      scope_id: version.scopeId,
+    }).onConflict((conflict) => conflict.columns(["project_id", "chapter_id"]).doUpdateSet({
+      document_version_id: version.id,
+      scope_id: version.scopeId,
+    })).execute()
+  }
 }
 
 export async function clearUncommittedSourceUnitsInTransaction(

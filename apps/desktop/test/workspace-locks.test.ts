@@ -31,6 +31,15 @@ describe("workspace locks", () => {
     expect(resolveCreateDestination("表现输出/笔风规则")).toBe("表现输出/笔风规则")
   })
 
+  it("allows markdown but not nested folders under 本作品描写", () => {
+    expect(resolveWorkspaceLockKind("表现输出/本作品描写")).toBe("immutable_scaffold")
+    expect(canCreateMarkdownInDirectory("表现输出/本作品描写")).toBe(true)
+    expect(canCreateFolderInDirectory("表现输出/本作品描写")).toBe(false)
+    expect(canDeleteWorkspacePath("表现输出/本作品描写/压抑氛围.md")).toBe(true)
+    expect(canDeleteWorkspacePath("表现输出/本作品描写")).toBe(false)
+    expect(resolveCreateDestination("表现输出/本作品描写")).toBe("表现输出/本作品描写")
+  })
+
   it("does not mark every top-level directory with a read-only lock badge", () => {
     const html = renderToStaticMarkup(React.createElement(WorkspaceTree, {
       entries: [

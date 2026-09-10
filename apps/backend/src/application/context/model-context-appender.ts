@@ -32,7 +32,7 @@ export class ModelContextAppender {
     const stageProjection = selectChangedStageProjection(input.stageProjection, previousInputs)
     const artifacts = selectChangedPhaseArtifacts(input.artifacts, previousDeltas, request.phase)
     const workspaceCatalogAlreadyVisible = previousInputs.some((previous) => previous.workspaceCatalog !== undefined)
-    const coreInput = firstRequestInTurn ? selectCoreTurnInput(input) : {}
+    const coreInput = firstRequestInTurn ? selectCoreTurnInput(input, previousInputs) : {}
     const deltaInput = {
       ...(input.workspaceCatalog === undefined || workspaceCatalogAlreadyVisible
         ? {}
@@ -84,7 +84,10 @@ function isPresentationEvidence(value: unknown): boolean {
   return asRecord(value).ownerKind === "workspace:presentation"
 }
 
-function selectCoreTurnInput(input: Record<string, unknown>): Record<string, unknown> {
+function selectCoreTurnInput(
+  input: Record<string, unknown>,
+  previousInputs: readonly Record<string, unknown>[],
+): Record<string, unknown> {
   return Object.fromEntries([
     "workflow",
     "userInput",
@@ -92,11 +95,43 @@ function selectCoreTurnInput(input: Record<string, unknown>): Record<string, unk
     "allowWorkspaceChapterReads",
     "presentation",
     "projectSettings",
-    // Assist/discuss sessions are not on the continuous deduction chain; their
-    // envelopes (incl. conversationHistory) must ride the first-turn delta.
-    "synopsisDiscuss",
     "revisionAssist",
-  ].flatMap((key) => input[key] === undefined ? [] : [[key, input[key]]]))
+  ].flatMap((key) => input[key] === undefined ? [] : [[key, input[key]]]).concat(
+    input.synopsisDiscuss === undefined
+      ? []
+      : [["synopsisDiscuss", slimSynopsisDiscuss(input.synopsisDiscuss, previousInputs)]],
+  ))
+}
+
+function slimSynopsisDiscuss(
+  value: unknown,
+  previousInputs: readonly Record<string, unknown>[],
+): Record<string, unknown> {
+  const discuss = { ...asRecord(value) }
+  delete discuss.conversationHistory
+  const previous = previousInputs.map((input) => asRecord(input.synopsisDiscuss))
+  const lastSynopsis = [...previous].reverse().find((item) => typeof item.synopsisMarkdown === "string")
+  const lastOutline = [...previous].reverse().find((item) => typeof item.outlineMarkdown === "string")
+  const lastBody = [...previous].reverse().find((item) => typeof item.chapterBodyMarkdown === "string")
+  if (
+    typeof discuss.synopsisMarkdown === "string"
+    && lastSynopsis?.synopsisMarkdown === discuss.synopsisMarkdown
+  ) {
+    delete discuss.synopsisMarkdown
+  }
+  if (
+    typeof discuss.outlineMarkdown === "string"
+    && lastOutline?.outlineMarkdown === discuss.outlineMarkdown
+  ) {
+    delete discuss.outlineMarkdown
+  }
+  if (
+    typeof discuss.chapterBodyMarkdown === "string"
+    && lastBody?.chapterBodyMarkdown === discuss.chapterBodyMarkdown
+  ) {
+    delete discuss.chapterBodyMarkdown
+  }
+  return discuss
 }
 
 function selectChangedStructuralValue(

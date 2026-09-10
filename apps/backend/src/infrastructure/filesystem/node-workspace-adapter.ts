@@ -20,6 +20,8 @@ import {
   assertUserCanDeleteMarkdown,
   assertVolumeSequenceAvailable,
   assertWorkspaceMutationAllowed,
+  AUTO_DESCRIPTION_RULE_MARKDOWN,
+  AUTO_DESCRIPTION_RULE_PATH,
   digest,
   deriveVolumeDirectoryPath,
   fixedWorkspaceEntries,
@@ -61,6 +63,10 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       encoding: "utf8",
       flag: "wx",
     })
+    await writeFile(resolveInside(root, "世界推演规则/基础规则/content-handling.md"), defaults.contentHandling, {
+      encoding: "utf8",
+      flag: "wx",
+    })
     await writeFile(resolveInside(root, "世界推演规则/基础规则/plot-synopsis-guide.md"), defaults.plotSynopsisGuide, {
       encoding: "utf8",
       flag: "wx",
@@ -78,6 +84,10 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       flag: "wx",
     })
     await writeFile(resolveInside(root, "参考文件/readme.md"), defaults.referencesReadme, {
+      encoding: "utf8",
+      flag: "wx",
+    })
+    await writeFile(resolveInside(root, AUTO_DESCRIPTION_RULE_PATH), AUTO_DESCRIPTION_RULE_MARKDOWN, {
       encoding: "utf8",
       flag: "wx",
     })
@@ -119,6 +129,10 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     const root = await realpath(resolve(workspaceRootRef))
     await mkdir(resolveInside(root, "世界推演规则/基础规则"), { recursive: true })
     await writeFileIfMissing(
+      resolveInside(root, "世界推演规则/基础规则/content-handling.md"),
+      defaults.contentHandling,
+    )
+    await writeFileIfMissing(
       resolveInside(root, "世界推演规则/基础规则/plot-synopsis-guide.md"),
       defaults.plotSynopsisGuide,
     )
@@ -130,6 +144,9 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       resolveInside(root, "世界推演规则/基础规则/settings-revision-guide.md"),
       defaults.settingsRevisionGuide,
     )
+    await mkdir(resolveInside(root, "表现输出/本作品描写"), { recursive: true })
+    await mkdir(resolveInside(root, "表现输出/描写规则"), { recursive: true })
+    await writeFileIfMissing(resolveInside(root, AUTO_DESCRIPTION_RULE_PATH), AUTO_DESCRIPTION_RULE_MARKDOWN)
     await mkdir(resolveInside(root, "暂存区"), { recursive: true })
     await writeFileIfMissing(resolveInside(root, "暂存区/readme.md"), defaults.stagingReadme)
     await writeFileIfMissing(resolveInside(root, "暂存区/本章讨论笔记.md"), defaults.stagingNotes)

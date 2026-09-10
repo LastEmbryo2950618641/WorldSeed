@@ -210,3 +210,29 @@ export const chapterRevisionDecisionSchema = z.object({
   createdAtMs: z.number().int().nonnegative(),
 })
 export type ChapterRevisionDecision = z.infer<typeof chapterRevisionDecisionSchema>
+
+export const revisionDraftVersionSourceSchema = z.enum(["baseline", "agent", "manual", "rollback"])
+export type RevisionDraftVersionSource = z.infer<typeof revisionDraftVersionSourceSchema>
+
+export const revisionDraftVersionSchema = z.object({
+  versionId: idSchema,
+  projectId: idSchema,
+  revisionTaskId: idSchema,
+  parentVersionId: idSchema.optional(),
+  source: revisionDraftVersionSourceSchema,
+  messageId: idSchema.optional(),
+  label: z.string().min(1),
+  heading: z.string().min(1),
+  body: z.string(),
+  bodyDigest: z.string().min(1),
+  createdAtMs: z.number().int().nonnegative(),
+  isLatest: z.boolean(),
+})
+export type RevisionDraftVersion = z.infer<typeof revisionDraftVersionSchema>
+
+export const revisionDraftVersionListResultSchema = z.object({
+  revisionTaskId: idSchema,
+  versions: z.array(revisionDraftVersionSchema),
+})
+export type RevisionDraftVersionListResult = z.infer<typeof revisionDraftVersionListResultSchema>
+

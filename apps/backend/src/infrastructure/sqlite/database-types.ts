@@ -146,6 +146,19 @@ export type CanonicalChapterMessageRow = {
   created_at: Timestamp
 }
 
+export type RevisionDraftVersionRow = {
+  version_id: string
+  project_id: string
+  revision_task_id: string
+  parent_version_id: string | null
+  source: "baseline" | "agent" | "manual" | "rollback"
+  message_id: string | null
+  heading: string
+  body: string
+  body_digest: string
+  created_at_ms: Timestamp
+}
+
 export type ChapterRevisionTaskRow = {
   id: string
   project_id: string
@@ -278,9 +291,30 @@ export type SynopsisConversationSessionRow = {
   turn_bootstrap_input: string | null
   synopsis_confirmed_at_ms: number | null
   last_outline_agent_digest: string | null
+  last_context_synopsis_digest: string | null
+  last_context_outline_digest: string | null
+  last_context_bootstrap_digest: string | null
+  focus_kind: "plot_synopsis" | "plot_outline" | "chapter_body"
   status: "active" | "completed"
   created_at_ms: Timestamp
   updated_at_ms: Timestamp
+}
+
+export type SynopsisDiscussContextMessageRow = {
+  id: string
+  project_id: string
+  session_id: string
+  sequence_no: number
+  role: "system" | "user" | "assistant"
+  kind: string
+  task_id: string | null
+  turn_id: string | null
+  phase: string | null
+  content_text: string
+  content_digest: string
+  token_estimate: number
+  hidden_at: NullableTimestamp
+  created_at_ms: Timestamp
 }
 
 export type SynopsisConversationMessageRow = {
@@ -880,8 +914,10 @@ export type ProjectDatabase = {
   chapter_index: ChapterIndexRow
   chapter_lineage_snapshots: ChapterLineageSnapshotRow
   revision_conversation_messages: RevisionConversationMessageRow
+  revision_draft_versions: RevisionDraftVersionRow
   synopsis_conversation_sessions: SynopsisConversationSessionRow
   synopsis_conversation_messages: SynopsisConversationMessageRow
+  synopsis_discuss_context_messages: SynopsisDiscussContextMessageRow
   synopsis_discuss_usage: SynopsisDiscussUsageRow
   chapter_synopsis: ChapterSynopsisRow
   deduction_goals: DeductionGoalRow

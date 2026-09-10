@@ -1,5 +1,11 @@
 import type { AIPhase, ChapterNarrativeIntent } from "@worldseed/contracts"
 
+import {
+  AUTO_DESCRIPTION_RULE_PATH,
+  DESCRIPTION_RULES_DIR,
+  isAutoDescriptionSelection,
+} from "../../core/workspace/work-description-rules.js"
+
 export const DEFAULT_CHAPTER_NARRATIVE_INTENT: ChapterNarrativeIntent = {
   boundaryPace: "advance_allowed",
   causalityFocus: "auto",
@@ -53,8 +59,19 @@ export function chapterPresentationPhaseAppendix(
     "- 弧大纲中的「节奏与字数」须引用此区间；",
     "- 若情节容量明显超出该区间，应建议拆章 / 先落大纲，而不是暗中提高单章字数。",
   ]
-  if (presentation.descriptionRulePath !== undefined && presentation.descriptionRulePath.length > 0) {
-    lines.push("", `### 描写规则路径：\`${presentation.descriptionRulePath}\``)
+  if (isAutoDescriptionSelection(presentation.descriptionRulePath)) {
+    lines.push(
+      "",
+      "### 描写：自动",
+      `- 已注入 \`${DESCRIPTION_RULES_DIR}/\` 下全部 Markdown；以 \`${AUTO_DESCRIPTION_RULE_PATH}\` 调度，同一章可按场面切换其他场面卡；`,
+      "- 用户若下拉锁定某一描写文件，则只注入该文件，整章遵守，不得再切换。",
+    )
+  } else {
+    lines.push(
+      "",
+      `### 描写规则路径：\`${presentation.descriptionRulePath}\``,
+      "- 本轮锁定该文件，整章遵守，不得改用同目录其他描写规则。",
+    )
   }
   if (presentation.proseStyleRulePath !== undefined && presentation.proseStyleRulePath.length > 0) {
     lines.push("", `### 笔风规则路径：\`${presentation.proseStyleRulePath}\``)
@@ -62,9 +79,10 @@ export function chapterPresentationPhaseAppendix(
   lines.push(
     "",
     "### 表现规则协作",
-    "- 可用 `request_read` + `sourceKinds: [\"rule\"]` 读取 `表现输出/描写规则/` 与 `表现输出/笔风规则/`（可先 `list` 目录再全文/片段读取）；",
-    "- 用户要求修改或新建描写/笔风规则时，在 `artifact.presentationWrites` 给出完整 Markdown 与路径（`mode: create|update`）；系统会立即写入工作区；",
-    "- 路径只能落在 `表现输出/描写规则/*.md` 或 `表现输出/笔风规则/*.md`；这不是设定集，也**不要**放进 `stagingPromote`。",
+    "- 可用 `request_read` + `sourceKinds: [\"rule\"]` 读取 `表现输出/描写规则/`、`表现输出/笔风规则/` 与 `表现输出/本作品描写/`（可先 `list` 再全文/片段）；",
+    "- 下拉选中的描写/笔风是用户预设，**禁止**用 `presentationWrites` 改写；",
+    "- 只把整部作品持续生效的呈现约束写入 `表现输出/本作品描写/*.md`（`mode: create|update`）；系统立即落盘；单文件不超过 4000 字、最多 8 个文件；",
+    "- 单章氛围写梗概/细纲；与选中描写/笔风冲突时以下拉文件为准；不要放进 `stagingPromote`。",
   )
   return lines.join("\n")
 }

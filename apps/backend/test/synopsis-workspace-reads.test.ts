@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   formatSynopsisSearchLabel,
   grepMarkdownContent,
+  listUserRuleMarkdownPaths,
   selectSynopsisWorkspaceEntries,
   sliceMarkdownLines,
 } from "../src/application/chapters/synopsis-workspace-reads.js"
@@ -208,5 +209,17 @@ describe("synopsis workspace reads helpers", () => {
     expect(selected.map((entry) => entry.relativePath)).toEqual([
       "表现输出/笔风规则/默认笔风规则.md",
     ])
+  })
+
+  it("lists nested user-rule markdown for discuss bootstrap", () => {
+    expect(listUserRuleMarkdownPaths([
+      { relativePath: "世界推演规则/用户规则/尺度.md", entryKind: "file" },
+      { relativePath: "世界推演规则/用户规则/人物/出场.md", entryKind: "file" },
+      { relativePath: "世界推演规则/基础规则/content-handling.md", entryKind: "file" },
+      { relativePath: "世界推演规则/用户规则/草稿", entryKind: "directory" },
+    ])).toEqual([
+      "世界推演规则/用户规则/人物/出场.md",
+      "世界推演规则/用户规则/尺度.md",
+    ].sort((left, right) => left.localeCompare(right, "zh-CN")))
   })
 })

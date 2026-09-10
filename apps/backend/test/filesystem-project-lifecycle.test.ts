@@ -1,6 +1,8 @@
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  rmdirSync,
   unlinkSync,
   readFileSync,
   rmSync,
@@ -29,6 +31,7 @@ const temporaryDirectories: string[] = []
 
 const defaults = {
   baseRules: "# Worldseed V1 基础规则\n\n平台只读规则。\n",
+  contentHandling: "# 内容处理规则\n\n平台只读规则。\n",
   plotSynopsisGuide: "# 剧情梗概讨论引导\n\n平台只读引导。\n",
   settingsQueryGuide: "# 设定集默认查询规则\n\n平台只读引导。\n",
   settingsRevisionGuide: "# 设定集修订规则\n\n平台只读引导。\n",
@@ -67,6 +70,8 @@ describe("Node workspace adapter", () => {
       .toHaveLength(6)
     expect(await adapter.readMarkdown(workspaceRoot, "世界推演规则/基础规则/base-rules.md"))
       .toBe(defaults.baseRules)
+    expect(await adapter.readMarkdown(workspaceRoot, "世界推演规则/基础规则/content-handling.md"))
+      .toBe(defaults.contentHandling)
     expect(await adapter.readMarkdown(workspaceRoot, "设定集/readme.md")).toBe(defaults.settingsReadme)
     expect(await adapter.readMarkdown(workspaceRoot, "参考文件/readme.md")).toBe(defaults.referencesReadme)
     expect(await adapter.readMarkdown(workspaceRoot, "暂存区/readme.md")).toBe(defaults.stagingReadme)
@@ -74,6 +79,8 @@ describe("Node workspace adapter", () => {
     expect(await adapter.readMarkdown(workspaceRoot, "暂存区/人物草稿.md")).toBe(defaults.stagingCharacters)
     expect(await adapter.readMarkdown(workspaceRoot, "暂存区/世界与规则草稿.md")).toBe(defaults.stagingWorld)
     expect(await adapter.readMarkdown(workspaceRoot, "暂存区/待落盘清单.md")).toBe(defaults.stagingPromoteIndex)
+    expect(report.inventory.some((entry) => entry.path === "表现输出/本作品描写" && entry.kind === "directory")).toBe(true)
+    expect(await adapter.readMarkdown(workspaceRoot, "表现输出/描写规则/自动.md")).toContain("同一章")
 
     await adapter.saveUserMarkdown(workspaceRoot, "设定集/readme.md", "# 已编辑的设定索引\n")
     expect(await adapter.readMarkdown(workspaceRoot, "设定集/readme.md")).toContain("已编辑")
@@ -257,9 +264,11 @@ describe("project lifecycle", () => {
     try {
       const manifest = (await session.repository.readManifest(projectId))!
       const legacyFixedEntries = manifest.fixedEntries.filter((entry) => (
-        entry.key !== "plot-synopsis-guide"
+        entry.key !== "content-handling"
+        && entry.key !== "plot-synopsis-guide"
         && entry.key !== "settings-query-guide"
         && entry.key !== "settings-revision-guide"
+        && entry.key !== "work-description-rules"
       ))
       const legacyDigest = digest({
         protocolVersion: manifest.protocolVersion,
@@ -277,14 +286,23 @@ describe("project lifecycle", () => {
     }
 
     // Simulate an older on-disk workspace that never received the new platform guides.
+    unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "content-handling.md"))
     unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "plot-synopsis-guide.md"))
     unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "settings-query-guide.md"))
     unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "settings-revision-guide.md"))
+    rmdirSync(join(workspaceRoot, "表现输出", "本作品描写"))
+    unlinkSync(join(workspaceRoot, "表现输出", "描写规则", "自动.md"))
 
     const opened = await lifecycle.openByWorkspace(workspaceRoot, 200, defaults)
+    expect(opened.manifest.fixedEntries.some((entry) => entry.key === "content-handling")).toBe(true)
     expect(opened.manifest.fixedEntries.some((entry) => entry.key === "plot-synopsis-guide")).toBe(true)
     expect(opened.manifest.fixedEntries.some((entry) => entry.key === "settings-query-guide")).toBe(true)
     expect(opened.manifest.fixedEntries.some((entry) => entry.key === "settings-revision-guide")).toBe(true)
+    expect(opened.manifest.fixedEntries.some((entry) => entry.key === "work-description-rules")).toBe(true)
+    expect(existsSync(join(workspaceRoot, "表现输出", "本作品描写"))).toBe(true)
+    expect(existsSync(join(workspaceRoot, "表现输出", "描写规则", "自动.md"))).toBe(true)
+    expect(readFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "content-handling.md"), "utf8"))
+      .toBe(defaults.contentHandling)
     expect(readFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "settings-query-guide.md"), "utf8"))
       .toBe(defaults.settingsQueryGuide)
     expect(readFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "settings-revision-guide.md"), "utf8"))
@@ -309,7 +327,7 @@ describe("project lifecycle", () => {
     const internalStore = new NodeInternalStoreAdapter(appDataRoot)
     const store = await internalStore.prepareProject(projectId, workspaceRoot)
     const database = await openProjectDatabase(store.projectDatabaseRef)
-    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(38)
+    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(45)
     await database.destroy()
   })
 })

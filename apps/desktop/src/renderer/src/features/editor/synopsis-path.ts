@@ -132,3 +132,116 @@ function chapterSequenceGroupKey(path: string): string | undefined {
   const match = stem.match(/^第(\d+|[零一二三四五六七八九十百]+)章(?:\s|$)/u)
   return match?.[1]
 }
+
+export function parseChapterSequenceFromPath(path: string): number | undefined {
+  const normalized = path.replaceAll("\\", "/")
+  const name = normalized.slice(normalized.lastIndexOf("/") + 1)
+  const stem = stripPlanningFilenameSuffix(name.replace(/\.md$/u, ""))
+  return parseChapterSequenceFromLabel(stem)
+}
+
+export function parseChapterSequenceFromLabel(label: string): number | undefined {
+  const trimmed = label.trim()
+  const match = trimmed.match(/^第(\d+)章/u) ?? trimmed.match(/^第([零一二三四五六七八九十百]+)章/u)
+  if (match === null) return undefined
+  const token = match[1]
+  if (token === undefined) return undefined
+  if (/^\d+$/u.test(token)) return Number(token)
+  return parseChineseChapterNumeral(token)
+}
+
+function parseChineseChapterNumeral(value: string): number | undefined {
+  if (value.length === 0) return undefined
+  const digits: Record<string, number> = {
+    零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
+  }
+  if (value === "十") return 10
+  if (value.startsWith("十")) {
+    const rest = value.slice(1)
+    if (rest.length === 0) return 10
+    return digits[rest] === undefined ? undefined : 10 + digits[rest]
+  }
+  if (value.endsWith("十") && value.length === 2) {
+    const tens = digits[value[0] ?? ""]
+    return tens === undefined ? undefined : tens * 10
+  }
+  if (value.includes("十")) {
+    const parts = value.split("十")
+    const tensPart = parts[0] ?? ""
+    const onesPart = parts[1] ?? ""
+    const tens = tensPart.length === 0 ? 1 : digits[tensPart]
+    if (tens === undefined) return undefined
+    if (onesPart.length === 0) return tens * 10
+    const ones = digits[onesPart]
+    return ones === undefined ? undefined : tens * 10 + ones
+  }
+  return digits[value]
+}
+
+export type DiscussFocusChapterOption = Readonly<{
+  sequence: number
+  label: string
+  synopsisPath?: string
+  outlinePath?: string
+  bodyPath?: string
+}>
+
+export function listDiscussFocusChapters(inventoryPaths: readonly string[]): DiscussFocusChapterOption[] {
+  const bySequence = new Map<number, {
+    sequence: number
+    label: string
+    synopsisPath?: string
+    outlinePath?: string
+    bodyPath?: string
+  }>()
+  for (const raw of inventoryPaths) {
+    const path = raw.replaceAll("\\", "/")
+    if (!path.startsWith("章节正文/") || !path.endsWith(".md")) continue
+    const sequence = parseChapterSequenceFromPath(path)
+    if (sequence === undefined) continue
+    const kind = resolveChapterMarkdownKind(path)
+    if (kind === undefined) continue
+    const name = path.slice(path.lastIndexOf("/") + 1)
+    const stem = stripPlanningFilenameSuffix(name.replace(/\.md$/u, ""))
+    const current = bySequence.get(sequence) ?? { sequence, label: stem }
+    if (kind === "plot_synopsis") current.synopsisPath = path
+    if (kind === "plot_outline") current.outlinePath = path
+    if (kind === "chapter_body") {
+      current.bodyPath = path
+      current.label = stem
+    } else if (current.bodyPath === undefined && (current.outlinePath === undefined || kind === "plot_outline")) {
+      current.label = stem
+    }
+    bySequence.set(sequence, current)
+  }
+  return [...bySequence.values()].sort((left, right) => left.sequence - right.sequence)
+}
+
+export function discussFocusOpenLabel(kind: "plot_synopsis" | "plot_outline" | "chapter_body"): string {
+  if (kind === "plot_outline") return "打开细纲文件"
+  if (kind === "chapter_body") return "打开正文文件"
+  return "打开梗概文件"
+}
+
+export function resolveDiscussFocusOpenPath(
+  option: DiscussFocusChapterOption | undefined,
+  kind: "plot_synopsis" | "plot_outline" | "chapter_body",
+): string | undefined {
+  if (option === undefined) return undefined
+  if (kind === "plot_outline") return option.outlinePath ?? option.synopsisPath ?? option.bodyPath
+  if (kind === "chapter_body") return option.bodyPath ?? option.outlinePath ?? option.synopsisPath
+  return option.synopsisPath ?? option.outlinePath ?? option.bodyPath
+}
+
+export function resolveDiscussFocusKindForChapter(
+  option: DiscussFocusChapterOption | undefined,
+  preferred: "plot_synopsis" | "plot_outline" | "chapter_body",
+): "plot_synopsis" | "plot_outline" | "chapter_body" {
+  if (option === undefined) return preferred
+  if (preferred === "chapter_body" && option.bodyPath !== undefined) return "chapter_body"
+  if (preferred === "plot_outline" && option.outlinePath !== undefined) return "plot_outline"
+  if (preferred === "plot_synopsis" && option.synopsisPath !== undefined) return "plot_synopsis"
+  if (option.bodyPath !== undefined) return "chapter_body"
+  if (option.outlinePath !== undefined) return "plot_outline"
+  return "plot_synopsis"
+}

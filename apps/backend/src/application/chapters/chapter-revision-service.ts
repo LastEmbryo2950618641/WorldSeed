@@ -10,6 +10,9 @@ import {
   type ChapterRevisionReadResult,
   type ChapterSummary,
   type ProjectId,
+  type RevisionDraftVersion,
+  type RevisionDraftVersionListResult,
+  type RevisionDraftVersionSource,
 } from "@worldseed/contracts"
 
 import {
@@ -29,6 +32,7 @@ import type { InternalProjectStore, InternalStorePort, WorkspacePort } from "../
 import type { DocumentRepository, RetrievalRepository, ScopeCommitRepository, TaskScopeRepository } from "../turns/index.js"
 import type { ChapterRevisionRepository, StoredChapterRevision } from "./ports/index.js"
 import type { ChapterIndexRecord } from "../../infrastructure/sqlite/repositories/sqlite-chapter-index-repository.js"
+import type { SqliteRevisionDraftVersionRepository } from "../../infrastructure/sqlite/repositories/sqlite-revision-draft-version-repository.js"
 
 export type ChapterRevisionServiceDependencies = Readonly<{
   taskScopes: TaskScopeRepository
@@ -36,6 +40,7 @@ export type ChapterRevisionServiceDependencies = Readonly<{
   retrieval: RetrievalRepository
   commit: ScopeCommitRepository
   revisions: ChapterRevisionRepository
+  draftVersions: SqliteRevisionDraftVersionRepository
   chapterIndex: {
     list(projectId: ProjectId): Promise<readonly ChapterIndexRecord[]>
     find(projectId: ProjectId, chapterId: string): Promise<ChapterIndexRecord | undefined>
@@ -154,7 +159,10 @@ export class ChapterRevisionService {
       throw new RevisionConflictError("The chapter changed while it was being edited")
     }
     const existing = await this.dependencies.revisions.findActive(input.projectId, input.chapterId, input.baseSourceId)
-    if (existing !== undefined) return toPublicRevision(existing)
+    if (existing !== undefined) {
+      await this.ensureBaselineDraft(existing.revisionTaskId)
+      return toPublicRevision(existing)
+    }
 
     const revisionTaskId = this.dependencies.createId()
     const scopeId = this.dependencies.createId()
@@ -201,7 +209,85 @@ export class ChapterRevisionService {
       baseContentDigest: digest(baseContent),
     }
     await this.dependencies.revisions.create(record)
+    await this.ensureBaselineDraft(revisionTaskId)
     return toPublicRevision(record)
+  }
+
+  public async listDraftVersions(revisionTaskId: string): Promise<RevisionDraftVersionListResult> {
+    await this.requireRevision(revisionTaskId)
+    const versions = await this.ensureBaselineDraft(revisionTaskId)
+    return { revisionTaskId, versions: [...versions] }
+  }
+
+  public async readDraftVersion(versionId: string): Promise<RevisionDraftVersion> {
+    const version = await this.dependencies.draftVersions.find(versionId)
+    if (version === undefined) throw new RevisionNotFoundError("Draft version not found")
+    await this.requireRevision(version.revisionTaskId)
+    return version
+  }
+
+  public async appendDraftVersion(input: Readonly<{
+    revisionTaskId: string
+    source: RevisionDraftVersionSource
+    heading: string
+    body: string
+    parentVersionId?: string
+    messageId?: string
+  }>): Promise<RevisionDraftVersion> {
+    if (input.source === "baseline") {
+      throw new RevisionInvalidStateError("Baseline draft versions are created when the revision starts")
+    }
+    const revision = await this.requireRevision(input.revisionTaskId)
+    assertEditable(revision)
+    const listed = await this.ensureBaselineDraft(input.revisionTaskId)
+    const parentVersionId = input.parentVersionId ?? listed.at(-1)?.versionId
+    if (input.parentVersionId !== undefined) {
+      const parent = listed.find((item) => item.versionId === input.parentVersionId)
+      if (parent === undefined) throw new RevisionInvalidStateError("Parent draft version is not in this revision")
+    }
+    const stored = await this.dependencies.draftVersions.append({
+      versionId: this.dependencies.createId(),
+      projectId: revision.projectId,
+      revisionTaskId: input.revisionTaskId,
+      ...(parentVersionId === undefined ? {} : { parentVersionId }),
+      source: input.source,
+      ...(input.messageId === undefined ? {} : { messageId: input.messageId }),
+      heading: normalizeChapterHeading(input.heading),
+      body: input.body,
+      createdAtMs: this.dependencies.now(),
+    })
+    await this.update(input.revisionTaskId, stored.heading, stored.body)
+    return (await this.dependencies.draftVersions.find(stored.versionId)) ?? stored
+  }
+
+  public async restoreDraftVersion(revisionTaskId: string, versionId: string): Promise<RevisionDraftVersion> {
+    const version = await this.readDraftVersion(versionId)
+    if (version.revisionTaskId !== revisionTaskId) {
+      throw new RevisionInvalidStateError("Draft version does not belong to this revision")
+    }
+    return this.appendDraftVersion({
+      revisionTaskId,
+      source: "rollback",
+      heading: version.heading,
+      body: version.body,
+    })
+  }
+
+  private async ensureBaselineDraft(revisionTaskId: string): Promise<readonly RevisionDraftVersion[]> {
+    const listed = await this.dependencies.draftVersions.list(revisionTaskId)
+    if (listed.length > 0) return listed
+    const revision = await this.requireRevision(revisionTaskId)
+    const detail = await this.readRevision(revisionTaskId)
+    await this.dependencies.draftVersions.append({
+      versionId: this.dependencies.createId(),
+      projectId: revision.projectId,
+      revisionTaskId,
+      source: "baseline",
+      heading: revision.heading,
+      body: detail.proposedBody,
+      createdAtMs: revision.createdAtMs,
+    })
+    return this.dependencies.draftVersions.list(revisionTaskId)
   }
 
   public async update(revisionTaskId: string, heading: string, body: string): Promise<ChapterRevision> {

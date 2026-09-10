@@ -6,10 +6,22 @@ import type {
   SynopsisConversationThinkingRound,
 } from "@worldseed/contracts"
 
+export type DiscussResultField = Readonly<{
+  id: string
+  label: string
+  present: boolean
+}>
+
 export type AgentTimelineSegment =
   | Readonly<{ kind: "thinking"; round: number; text: string }>
   | Readonly<{ kind: "searching"; round: number; items: readonly SynopsisConversationStreamSearch[] }>
   | Readonly<{ kind: "editing"; items: readonly SynopsisConversationStreamEdit[] }>
+  | Readonly<{
+    kind: "resulting"
+    active: boolean
+    receivedChars: number
+    fields: readonly DiscussResultField[]
+  }>
   | Readonly<{ kind: "final"; content: string }>
 
 type TimelineSource = Readonly<{

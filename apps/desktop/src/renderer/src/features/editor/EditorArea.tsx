@@ -1,10 +1,10 @@
 import { Editor, type Monaco } from "@monaco-editor/react"
 import { useEffect, useRef, useState } from "react"
 import type { editor } from "monaco-editor"
-import type { ChapterNarrativeIntent, ChapterRevision, ChapterRevisionConversationMessage, SynopsisConversationMessage, SynopsisConversationSession, SynopsisConversationStreamSnapshot, SynopsisStagingPromoteProposal } from "@worldseed/contracts"
+import type { ChapterNarrativeIntent, ChapterRevision, ChapterRevisionConversationMessage, DiscussFocusKind, SynopsisConversationMessage, SynopsisConversationSession, SynopsisConversationStreamSnapshot, SynopsisStagingPromoteProposal } from "@worldseed/contracts"
 import { WORLDSEED_EDITOR_THEME, ensureWorldseedEditorTheme } from "../../monaco.js"
 import { SynopsisConversationComposer } from "./SynopsisConversationComposer.js"
-import { isChapterPlanningMarkdownPath } from "./synopsis-path.js"
+import { isChapterPlanningMarkdownPath, type DiscussFocusChapterOption } from "./synopsis-path.js"
 import { AlertTriangle, BookOpenText, RotateCcw, Save, Sparkles } from "lucide-react"
 import { ChapterDraftDiffView } from "./ChapterDraftDiffView.js"
 import { ChapterDraftVersionsPrototype, type DraftDisplayMode } from "./ChapterDraftVersionsPrototype.js"
@@ -112,6 +112,8 @@ type Props = Readonly<{
   onPromoteStaging(): Promise<void>
   onRejectStagingPromote?(proposalIds: readonly string[]): Promise<void>
   onOpenSynopsisFile(path: string): void
+  onSetFocus?(sequence: number, focusKind: DiscussFocusKind): void
+  focusChapters?: readonly DiscussFocusChapterOption[]
   onOpenSettingsLineage?(): void
   synopsisTokenMetrics?: Readonly<{
     kvRate?: number
@@ -159,6 +161,8 @@ export function EditorArea(props: Props): React.JSX.Element {
           : { onRejectStagingPromote: props.onRejectStagingPromote })}
         onStartTurn={props.onRun}
         onOpenSynopsisFile={props.onOpenSynopsisFile}
+        {...(props.onSetFocus === undefined ? {} : { onSetFocus: props.onSetFocus })}
+        {...(props.focusChapters === undefined ? {} : { focusChapters: props.focusChapters })}
         {...(props.onOpenSettingsLineage === undefined
           ? {}
           : { onOpenSettingsLineage: props.onOpenSettingsLineage })}

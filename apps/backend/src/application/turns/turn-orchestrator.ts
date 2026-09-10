@@ -35,6 +35,7 @@ import {
   graphRetrievalDesignArtifactSchema,
   graphSpacetimeSettlementArtifactSchema,
   graphStructurePlanArtifactSchema,
+  inspectPhaseFictionDelivery,
   internalDraftArtifactSchema,
   parsePhaseArtifact,
   ruleAssemblyArtifactSchema,
@@ -54,6 +55,14 @@ import {
   inheritContextReads,
   recordContextRead,
   normalizeChapterHeading,
+  DEFAULT_PROSE_STYLE_RULE_PATH,
+  formatDescriptionRuleEvidence,
+  formatWorkDescriptionRuleEvidence,
+  isAutoDescriptionSelection,
+  isDescriptionRuleMarkdownPath,
+  isWorkDescriptionRulePath,
+  listWorkDescriptionRuleFiles,
+  resolveDescriptionRulePaths,
   type GraphRevision,
 } from "../../core/index.js"
 import type {
@@ -1893,8 +1902,8 @@ export class TurnOrchestrator {
           }
         }
         // Mark the turn completed before post-commit synopsis handoff analysis so
-        // the desktop can open 正文 while analysis still runs (handoff remains awaited
-        // so evolution / execute settlement stay serialized after it).
+        // the desktop can return to 创作台 while analysis still runs (handoff remains
+        // awaited so evolution / execute settlement stay serialized after it).
         this.log("debug", "turn.finalization.step.started", {
           taskId: current.taskId,
           finalizationId: current.finalizationId,
@@ -2862,27 +2871,39 @@ export class TurnOrchestrator {
     input: TurnOrchestratorInput,
     catalogSnapshot: WorkspaceCatalogSnapshot,
   ): Promise<{ context: TurnContext; evidence: readonly TurnReadEvidence[] }> {
-    const selectedPresentationPaths = resolveSelectedPresentationPaths(input.presentation)
-    const requiredEntries = catalogSnapshot.entries.filter((entry) => (
-      isMandatoryWorkspaceEntry(entry)
-      || selectedPresentationPaths.includes(entry.relativePath)
-    ))
+    const selectedPresentationPaths = resolveSelectedPresentationPaths(
+      input.presentation,
+      catalogSnapshot.entries,
+    )
+    const overlayEntries = listWorkDescriptionRuleFiles(catalogSnapshot.entries)
+    const autoDescription = isAutoDescriptionSelection(input.presentation?.descriptionRulePath)
+    const selectedEntries = selectedPresentationPaths.map((selectedPath) => {
+      const selectedEntry = catalogSnapshot.entries.find((entry) => entry.relativePath === selectedPath)
+      if (selectedEntry?.entryKind !== "file") {
+        throw new Error(`Selected presentation rule is missing: ${selectedPath}`)
+      }
+      return selectedEntry
+    })
+    const requiredEntries = [
+      ...catalogSnapshot.entries.filter((entry) => isMandatoryWorkspaceEntry(entry)),
+      ...selectedEntries,
+      ...overlayEntries,
+    ]
     const requiredPaths = new Set(requiredEntries.map((entry) => entry.relativePath))
     for (const requiredPath of ["设定集/readme.md", "参考文件/readme.md"]) {
       if (!requiredPaths.has(requiredPath)) {
         throw new Error(`Required workspace index is missing: ${requiredPath}`)
       }
     }
-    for (const selectedPath of selectedPresentationPaths) {
-      const selectedEntry = catalogSnapshot.entries.find((entry) => entry.relativePath === selectedPath)
-      if (selectedEntry?.entryKind !== "file") {
-        throw new Error(`Selected presentation rule is missing: ${selectedPath}`)
-      }
-    }
     const returned: Array<{ readId: string; reason: string; segment: TurnContext["segments"][number] }> = []
     const evidence: TurnReadEvidence[] = []
     for (const entry of requiredEntries) {
       const content = await this.dependencies.workspace.readMarkdown(input.workspaceRootRef, entry.relativePath)
+      const evidenceText = isWorkDescriptionRulePath(entry.relativePath)
+        ? formatWorkDescriptionRuleEvidence(entry.relativePath, content)
+        : isDescriptionRuleMarkdownPath(entry.relativePath)
+          ? formatDescriptionRuleEvidence(entry.relativePath, content, autoDescription)
+          : content
       const evidenceId = await this.nextPersistentId(input.projectId, "evidence")
       const storedEvidence = await this.dependencies.evidence.writeImmutable({
         evidenceId,
@@ -2897,7 +2918,7 @@ export class TurnOrchestrator {
         readReason: "Mandatory turn workspace context",
         createdAtMs: this.dependencies.now(),
       })
-      const tokenEstimate = estimateTokens(content)
+      const tokenEstimate = estimateTokens(evidenceText)
       returned.push({
         readId: storedEvidence.evidenceId,
         reason: "Mandatory turn workspace context",
@@ -2911,7 +2932,7 @@ export class TurnOrchestrator {
           sequence: context.segments.length + returned.length,
         },
       })
-      evidence.push(workspaceTurnEvidence(storedEvidence.evidenceId, entry, content))
+      evidence.push(workspaceTurnEvidence(storedEvidence.evidenceId, entry, evidenceText))
     }
     const requestId = this.dependencies.createId()
     this.log("debug", "workspace.required_evidence.loaded", {
@@ -3295,7 +3316,10 @@ export class TurnOrchestrator {
           continue
         }
         const content = await this.dependencies.workspace.readMarkdown(workspaceRootRef, entry.relativePath)
-        const workspaceEvidence = workspaceTurnEvidence("budget-preview", entry, content)
+        const evidenceText = isWorkDescriptionRulePath(entry.relativePath)
+          ? formatWorkDescriptionRuleEvidence(entry.relativePath, content)
+          : content
+        const workspaceEvidence = workspaceTurnEvidence("budget-preview", entry, evidenceText)
         const tokenEstimate = estimateRetrievalEvidenceTokens(workspaceEvidence)
         if (evidenceTokens + tokenEstimate > evidenceTokenLimit) {
           evidenceBudgetTruncated = true
@@ -3331,7 +3355,7 @@ export class TurnOrchestrator {
             sequence: context.segments.length + returned.length,
           },
         })
-        evidence.push(workspaceTurnEvidence(storedEvidence.evidenceId, entry, content))
+        evidence.push(workspaceTurnEvidence(storedEvidence.evidenceId, entry, evidenceText))
         requestReadRefs.add(storedEvidence.evidenceId)
       }
       if (
@@ -3967,14 +3991,15 @@ export class TurnOrchestrator {
   ): void {
     if (phase !== "draft") return
     const draft = internalDraftArtifactSchema.parse(artifact)
-    const content = draft.contentMarkdown.trim()
-    const placeholderPattern = /等待读取|尚未开始(?:撰写|生成)|无法(?:撰写|生成)(?:正文)?|不能(?:撰写|生成)(?:正文)?|待补充(?:资料|设定)/u
-    if (!placeholderPattern.test(content)) return
+    const inspection = inspectPhaseFictionDelivery("draft", draft)
+    if (inspection.ok) return
     this.log("error", "draft.placeholder_rejected", {
       taskId,
       phase,
       phaseRunId,
-      contentLength: content.length,
+      contentLength: draft.contentMarkdown.trim().length,
+      verdict: inspection.verdict,
+      matched: inspection.matched,
       reason: "Draft contains a waiting or refusal placeholder instead of substantive prose",
     })
     throw new Error("Draft content is a waiting/refusal placeholder; the model must write substantive prose even when old evidence is missing")
@@ -4699,19 +4724,16 @@ function filterInheritedModelEvidence(
 
 function resolveSelectedPresentationPaths(
   presentation: TurnOrchestratorInput["presentation"],
+  catalogEntries: readonly WorkspaceCatalogEntry[],
 ): readonly string[] {
   if (presentation === undefined) return []
-  if (presentation.descriptionRulePath !== undefined
-    && !presentation.descriptionRulePath.startsWith("表现输出/描写规则/")) {
-    throw new Error(`Description rule must be inside 表现输出/描写规则: ${presentation.descriptionRulePath}`)
-  }
   if (presentation.proseStyleRulePath !== undefined
     && !presentation.proseStyleRulePath.startsWith("表现输出/笔风规则/")) {
     throw new Error(`Prose style rule must be inside 表现输出/笔风规则: ${presentation.proseStyleRulePath}`)
   }
   return [
-    presentation.descriptionRulePath ?? "表现输出/描写规则/默认描写规则.md",
-    presentation.proseStyleRulePath ?? "表现输出/笔风规则/默认笔风规则.md",
+    ...resolveDescriptionRulePaths(presentation.descriptionRulePath, catalogEntries),
+    presentation.proseStyleRulePath ?? DEFAULT_PROSE_STYLE_RULE_PATH,
   ]
 }
 
@@ -5073,9 +5095,9 @@ function readBlockedMetrics(error: unknown): readonly ("model_calls" | "input_to
 }
 
 function readInterruptionTimestamp(error: unknown): number {
-  if (typeof error !== "object" || error === null || !("interruptedAtMs" in error)) return Number.MAX_SAFE_INTEGER
+  if (typeof error !== "object" || error === null || !("interruptedAtMs" in error)) return 0
   const value = error.interruptedAtMs
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : Number.MAX_SAFE_INTEGER
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0
 }
 
 function readGraphCapacityFeedback(error: unknown): GraphCapacityFeedback | undefined {

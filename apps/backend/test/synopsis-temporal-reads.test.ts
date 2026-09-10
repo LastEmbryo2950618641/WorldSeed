@@ -31,5 +31,15 @@ describe("synopsis temporal reads", () => {
     expect(validateTemporalChapterSequence({ asOfChapterSequence: 3, sessionChapterSequence: 12 })).toBe(true)
     expect(validateTemporalChapterSequence({ asOfChapterSequence: 12, sessionChapterSequence: 12 })).toBe(false)
     expect(validateTemporalChapterSequence({ asOfChapterSequence: 0, sessionChapterSequence: 5 })).toBe(false)
+    expect(validateTemporalChapterSequence({
+      asOfChapterSequence: 1,
+      sessionChapterSequence: 1,
+      purpose: "past_chapter_text",
+    })).toBe(true)
+    expect(validateTemporalChapterSequence({
+      asOfChapterSequence: 1,
+      sessionChapterSequence: 1,
+      purpose: "as_of_chapter",
+    })).toBe(false)
   })
 })

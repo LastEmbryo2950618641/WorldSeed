@@ -43,7 +43,7 @@ describe("resolveDiscussBusyPhase", () => {
 describe("discuss labels", () => {
   it("keeps Stop-era preview from looking finished", () => {
     expect(discussFinalOutputHeader("previewing", true)).toBe("正式输出（生成中）")
-    expect(discussBusyPhaseLabel("previewing")).toContain("仍可停止")
+    expect(discussBusyPhaseLabel("previewing")).toContain("结构化输出仍在生成")
   })
 
   it("names the post-complete persist window", () => {

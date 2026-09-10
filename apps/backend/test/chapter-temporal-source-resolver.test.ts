@@ -137,4 +137,43 @@ describe("ChapterTemporalSourceResolver", () => {
       await database.destroy()
     })
   })
+
+  it("resolves the focused chapter head when target equals cursor", async () => {
+    await withHarness(async (harness) => {
+      const store = await harness.container.internalStore.prepareProject(
+        harness.projectId,
+        harness.workspaceRootRef,
+      )
+      const database = await openProjectDatabase(store.projectDatabaseRef)
+      const chapterIndex = new SqliteChapterIndexRepository(database)
+      const resolver = new ChapterTemporalSourceResolver(database, chapterIndex)
+
+      const chapter1Id = randomUUID()
+      const headSource1 = randomUUID()
+      const now = Date.now()
+
+      await database.insertInto("chapter_index").values({
+        project_id: harness.projectId,
+        chapter_id: chapter1Id,
+        sequence: 1,
+        current_source_id: headSource1,
+        current_publish_path: "章节正文/第1章.md",
+        assigned_at_ms: now,
+      }).execute()
+
+      const resolved = await resolver.resolve({
+        projectId: harness.projectId,
+        targetSequence: 1,
+        cursorSequence: 1,
+      })
+
+      expect(resolved).toEqual({
+        sourceId: headSource1,
+        publishPath: "章节正文/第1章.md",
+        chapterSequence: 1,
+        pinned: false,
+      })
+      await database.destroy()
+    })
+  })
 })

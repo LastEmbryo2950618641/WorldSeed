@@ -16,6 +16,12 @@ describe("isConfirmSynopsisUserMessage", () => {
     expect(isConfirmSynopsisUserMessage("开始写细纲")).toBe(true)
   })
 
+  it("accepts rewrite-outline confirmations that mean the same gate", () => {
+    expect(isConfirmSynopsisUserMessage("按这份梗概重写细纲")).toBe(true)
+    expect(isConfirmSynopsisUserMessage("直接按照梗概重写整个细纲")).toBe(true)
+    expect(isConfirmSynopsisUserMessage("按照梗概重写整个细纲")).toBe(true)
+  })
+
   it("rejects unrelated discuss messages", () => {
     expect(isConfirmSynopsisUserMessage("再改一改基调")).toBe(false)
     expect(isConfirmSynopsisUserMessage("确认落盘到设定集与目标")).toBe(false)

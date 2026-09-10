@@ -40,6 +40,18 @@ describe("chapter narrative intent policy", () => {
     expect(appendix).toContain("2000–3000")
     expect(appendix).toContain("不得改用自拟")
     expect(appendix).toContain("吞心萌动.md")
+    expect(appendix).toContain("描写：自动")
+    expect(appendix).toContain("自动.md")
+    expect(appendix).toContain("本作品描写")
+    expect(appendix).toContain("presentationWrites")
+    const locked = chapterPresentationPhaseAppendix({
+      minimumWordCount: 2000,
+      maximumWordCount: 3000,
+      descriptionRulePath: "表现输出/描写规则/近景跟随.md",
+    }, "synopsis_discuss")
+    expect(locked).toContain("近景跟随.md")
+    expect(locked).toContain("本轮锁定")
+    expect(locked).not.toContain("描写：自动")
     expect(chapterPresentationPhaseAppendix({
       minimumWordCount: 2000,
       maximumWordCount: 3000,

@@ -1079,4 +1079,148 @@ export const projectMigrations = Object.freeze([
   defineSqlMigration<ProjectDatabase>(44, "044_synopsis_message_thinking_rounds", [
     "ALTER TABLE synopsis_conversation_messages ADD COLUMN thinking_rounds_json TEXT",
   ]),
+  defineSqlMigration<ProjectDatabase>(45, "045_synopsis_discuss_context_chain", [
+    "ALTER TABLE synopsis_conversation_sessions ADD COLUMN last_context_synopsis_digest TEXT",
+    "ALTER TABLE synopsis_conversation_sessions ADD COLUMN last_context_outline_digest TEXT",
+    "ALTER TABLE synopsis_conversation_sessions ADD COLUMN last_context_bootstrap_digest TEXT",
+    `CREATE TABLE synopsis_discuss_context_messages (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      session_id TEXT NOT NULL REFERENCES synopsis_conversation_sessions(session_id) ON DELETE CASCADE,
+      sequence_no INTEGER NOT NULL CHECK (sequence_no >= 0),
+      role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant')),
+      kind TEXT NOT NULL,
+      task_id TEXT,
+      turn_id TEXT,
+      phase TEXT,
+      content_text TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      token_estimate INTEGER NOT NULL CHECK (token_estimate >= 0),
+      hidden_at INTEGER,
+      created_at_ms INTEGER NOT NULL,
+      UNIQUE(session_id, sequence_no)
+    )`,
+    "CREATE INDEX synopsis_discuss_context_messages_visible ON synopsis_discuss_context_messages(session_id, sequence_no) WHERE hidden_at IS NULL",
+  ]),
+  defineSqlMigration<ProjectDatabase>(46, "046_revision_draft_versions", [
+    `CREATE TABLE revision_draft_versions (
+      version_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      revision_task_id TEXT NOT NULL REFERENCES chapter_revision_tasks(id) ON DELETE CASCADE,
+      parent_version_id TEXT REFERENCES revision_draft_versions(version_id),
+      source TEXT NOT NULL CHECK (source IN ('baseline', 'agent', 'manual', 'rollback')),
+      message_id TEXT,
+      heading TEXT NOT NULL,
+      body TEXT NOT NULL,
+      body_digest TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL
+    )`,
+    "CREATE INDEX revision_draft_versions_revision ON revision_draft_versions(revision_task_id, created_at_ms ASC)",
+  ]),
+  defineSqlMigration<ProjectDatabase>(47, "047_synopsis_session_one_active_focus", [
+    `CREATE TABLE synopsis_conversation_sessions_new (
+      session_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      chapter_sequence INTEGER NOT NULL,
+      synopsis_path TEXT NOT NULL,
+      title TEXT NOT NULL,
+      last_agent_digest TEXT,
+      turn_bootstrap_input TEXT,
+      status TEXT NOT NULL CHECK (status IN ('active', 'completed')),
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      synopsis_confirmed_at_ms INTEGER,
+      last_outline_agent_digest TEXT,
+      last_context_synopsis_digest TEXT,
+      last_context_outline_digest TEXT,
+      last_context_bootstrap_digest TEXT
+    )`,
+    `INSERT INTO synopsis_conversation_sessions_new (
+      session_id, project_id, chapter_sequence, synopsis_path, title,
+      last_agent_digest, turn_bootstrap_input, status, created_at_ms, updated_at_ms,
+      synopsis_confirmed_at_ms, last_outline_agent_digest,
+      last_context_synopsis_digest, last_context_outline_digest, last_context_bootstrap_digest
+    )
+    SELECT
+      session_id, project_id, chapter_sequence, synopsis_path, title,
+      last_agent_digest, turn_bootstrap_input, status, created_at_ms, updated_at_ms,
+      synopsis_confirmed_at_ms, last_outline_agent_digest,
+      last_context_synopsis_digest, last_context_outline_digest, last_context_bootstrap_digest
+    FROM synopsis_conversation_sessions`,
+    `CREATE TABLE synopsis_conversation_messages_new (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      session_id TEXT NOT NULL REFERENCES synopsis_conversation_sessions_new(session_id),
+      role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+      content_text TEXT NOT NULL,
+      choices_json TEXT,
+      created_at_ms INTEGER NOT NULL,
+      reasoning_content TEXT,
+      searching_json TEXT,
+      hidden INTEGER NOT NULL DEFAULT 0,
+      editing_json TEXT,
+      thinking_rounds_json TEXT
+    )`,
+    `INSERT INTO synopsis_conversation_messages_new (
+      id, project_id, session_id, role, content_text, choices_json, created_at_ms,
+      reasoning_content, searching_json, hidden, editing_json, thinking_rounds_json
+    )
+    SELECT
+      id, project_id, session_id, role, content_text, choices_json, created_at_ms,
+      reasoning_content, searching_json, hidden, editing_json, thinking_rounds_json
+    FROM synopsis_conversation_messages`,
+    `CREATE TABLE synopsis_discuss_context_messages_new (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      session_id TEXT NOT NULL REFERENCES synopsis_conversation_sessions_new(session_id) ON DELETE CASCADE,
+      sequence_no INTEGER NOT NULL CHECK (sequence_no >= 0),
+      role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant')),
+      kind TEXT NOT NULL,
+      task_id TEXT,
+      turn_id TEXT,
+      phase TEXT,
+      content_text TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      token_estimate INTEGER NOT NULL CHECK (token_estimate >= 0),
+      hidden_at INTEGER,
+      created_at_ms INTEGER NOT NULL,
+      UNIQUE(session_id, sequence_no)
+    )`,
+    `INSERT INTO synopsis_discuss_context_messages_new (
+      id, project_id, session_id, sequence_no, role, kind, task_id, turn_id, phase,
+      content_text, content_digest, token_estimate, hidden_at, created_at_ms
+    )
+    SELECT
+      id, project_id, session_id, sequence_no, role, kind, task_id, turn_id, phase,
+      content_text, content_digest, token_estimate, hidden_at, created_at_ms
+    FROM synopsis_discuss_context_messages`,
+    "DROP TABLE synopsis_discuss_context_messages",
+    "DROP TABLE synopsis_conversation_messages",
+    "DROP TABLE synopsis_conversation_sessions",
+    "ALTER TABLE synopsis_conversation_sessions_new RENAME TO synopsis_conversation_sessions",
+    "ALTER TABLE synopsis_conversation_messages_new RENAME TO synopsis_conversation_messages",
+    "ALTER TABLE synopsis_discuss_context_messages_new RENAME TO synopsis_discuss_context_messages",
+    "CREATE INDEX synopsis_conversation_sessions_project ON synopsis_conversation_sessions(project_id, status, updated_at_ms DESC)",
+    `UPDATE synopsis_conversation_sessions
+      SET status = 'completed'
+      WHERE status = 'active'
+        AND EXISTS (
+          SELECT 1 FROM synopsis_conversation_sessions AS newer
+          WHERE newer.project_id = synopsis_conversation_sessions.project_id
+            AND newer.status = 'active'
+            AND (
+              newer.updated_at_ms > synopsis_conversation_sessions.updated_at_ms
+              OR (
+                newer.updated_at_ms = synopsis_conversation_sessions.updated_at_ms
+                AND newer.session_id > synopsis_conversation_sessions.session_id
+              )
+            )
+        )`,
+    "CREATE UNIQUE INDEX synopsis_conversation_sessions_one_active ON synopsis_conversation_sessions(project_id) WHERE status = 'active'",
+    "CREATE INDEX synopsis_conversation_messages_session ON synopsis_conversation_messages(session_id, created_at_ms)",
+    "CREATE INDEX synopsis_discuss_context_messages_visible ON synopsis_discuss_context_messages(session_id, sequence_no) WHERE hidden_at IS NULL",
+  ]),
+  defineSqlMigration<ProjectDatabase>(48, "048_synopsis_session_focus_kind", [
+    "ALTER TABLE synopsis_conversation_sessions ADD COLUMN focus_kind TEXT NOT NULL DEFAULT 'plot_synopsis'",
+  ]),
 ])

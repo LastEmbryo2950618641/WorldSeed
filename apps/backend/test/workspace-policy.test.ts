@@ -81,6 +81,7 @@ describe("workspace policy", () => {
 
   it("allows creating user markdown and blocks platform / immutable deletes", () => {
     expect(assertUserCanCreateMarkdown("设定集/人物/顾青衡.md")).toBe("设定集/人物/顾青衡.md")
+    expect(assertUserCanCreateMarkdown("表现输出/本作品描写/压抑氛围.md")).toBe("表现输出/本作品描写/压抑氛围.md")
     expect(assertUserCanDeleteMarkdown("设定集/人物/顾青衡.md")).toBe("设定集/人物/顾青衡.md")
     expect(() => assertUserCanDeleteMarkdown("设定集/readme.md")).toThrow(/固定脚手架/)
     expect(() => assertUserCanDeleteMarkdown("世界推演规则/基础规则/base-rules.md")).toThrow(/平台只读/)
@@ -96,6 +97,7 @@ describe("workspace policy", () => {
     expect(assertUserCanCreateDirectory("章节正文/第一卷 潮水退去时")).toBe("章节正文/第一卷 潮水退去时")
     expect(() => assertUserCanCreateDirectory("设定集")).toThrow(/固定脚手架/)
     expect(() => assertUserCanCreateDirectory("暂存区/子目录")).toThrow(/不允许/)
+    expect(() => assertUserCanCreateDirectory("表现输出/本作品描写/子目录")).toThrow(/不允许/)
     expect(() => assertUserCanCreateDirectory("世界推演规则/基础规则/extra")).toThrow(/平台只读/)
   })
 

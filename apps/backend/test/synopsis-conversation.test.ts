@@ -362,4 +362,58 @@ describe("synopsis conversation", () => {
       ))).toBe(true)
     })
   }, 20_000)
+
+  it("setFocus changes chapter without creating a new session", async () => {
+    await withHarness(async (harness) => {
+      const started = await invoke<{ session: { sessionId: string; chapterSequence: number } }>(
+        harness,
+        "synopsis.conversation.start",
+        {
+          projectId: harness.projectId,
+          workspaceRootRef: harness.workspaceRootRef,
+        },
+      )
+      await invoke(harness, "synopsis.conversation.send", {
+        projectId: harness.projectId,
+        workspaceRootRef: harness.workspaceRootRef,
+        message: "这一章从雨夜站台开始",
+      })
+      const focused = await invoke<{
+        session: { sessionId: string; chapterSequence: number; focusKind: string }
+        messages: Array<{ role: string; content: string }>
+      }>(harness, "synopsis.conversation.setFocus", {
+        projectId: harness.projectId,
+        workspaceRootRef: harness.workspaceRootRef,
+        chapterSequence: 2,
+      })
+      expect(focused.session.sessionId).toBe(started.session.sessionId)
+      expect(focused.session.chapterSequence).toBe(2)
+      expect(focused.session.focusKind).toBe("plot_synopsis")
+      expect(focused.messages.some((message) => message.role === "user" && message.content.includes("雨夜站台"))).toBe(true)
+
+      const kinded = await invoke<{
+        session: { sessionId: string; chapterSequence: number; focusKind: string }
+      }>(harness, "synopsis.conversation.setFocus", {
+        projectId: harness.projectId,
+        workspaceRootRef: harness.workspaceRootRef,
+        chapterSequence: 2,
+        focusKind: "plot_outline",
+      })
+      expect(kinded.session.sessionId).toBe(started.session.sessionId)
+      expect(kinded.session.chapterSequence).toBe(2)
+      expect(kinded.session.focusKind).toBe("plot_outline")
+
+      const sent = await invoke<{
+        session: { sessionId: string; chapterSequence: number }
+        messages: Array<{ role: string }>
+      }>(harness, "synopsis.conversation.send", {
+        projectId: harness.projectId,
+        workspaceRootRef: harness.workspaceRootRef,
+        message: "下一章改从港口开始",
+      })
+      expect(sent.session.sessionId).toBe(started.session.sessionId)
+      expect(sent.session.chapterSequence).toBe(2)
+      expect(sent.messages.filter((message) => message.role === "user")).toHaveLength(2)
+    })
+  }, 20_000)
 })

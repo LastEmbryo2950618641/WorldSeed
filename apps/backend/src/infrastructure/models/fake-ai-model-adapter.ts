@@ -36,7 +36,7 @@ export class FakeAiModelAdapter implements AIModelPort {
     const startedAt = Date.now()
     const input = request.input as TurnPhaseInput
     const synopsisReads = request.phase === "synopsis_discuss"
-      ? this.createSynopsisBootstrapReads(input)
+      ? this.createSynopsisBootstrapReads(input, options?.contextMessages)
       : []
     const requestedReads = synopsisReads.length > 0
       ? synopsisReads
@@ -481,7 +481,12 @@ export class FakeAiModelAdapter implements AIModelPort {
     }))
   }
 
-  private createSynopsisBootstrapReads(input: TurnPhaseInput): PhaseResultEnvelope["requestedReads"] {
+  private createSynopsisBootstrapReads(
+    input: TurnPhaseInput,
+    contextMessages?: ModelExecutionOptions["contextMessages"],
+  ): PhaseResultEnvelope["requestedReads"] {
+    const chainAlreadyStarted = (contextMessages ?? []).some((message) => message.kind === "phase_request")
+    if (chainAlreadyStarted) return []
     const hasSettingsCatalog = (input.workspaceCatalog?.entries ?? [])
       .some((entry) => entry.entryKind === "file" && entry.role === "settings")
     if (!hasSettingsCatalog) return []
@@ -707,7 +712,7 @@ export class FakeAiModelAdapter implements AIModelPort {
     const chapterLabel = formatChapterSequenceLabel(chapterSequence)
     const heading = discuss?.heading ?? chapterLabel
     const chapterTitle = heading.replace(/^第(?:\d+|[零一二三四五六七八九十百]+)章(?:\s+)?/u, "").trim() || "世界种子"
-    const existing = discuss?.synopsisMarkdown.trim() ?? ""
+    const existing = discuss?.synopsisMarkdown?.trim() ?? ""
     const synopsisHeading = `${chapterLabel} ${chapterTitle}`
     const settingsIndexEvidence = input.readEvidence.find((item) => (
       item.ownerKind === "workspace:settings"

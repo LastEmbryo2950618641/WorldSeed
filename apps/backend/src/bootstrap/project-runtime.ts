@@ -16,6 +16,7 @@ import {
   ChapterRevisionConversationService,
   ChapterResolveService,
   ChapterSynopsisService,
+  ChapterBodyRematerializeService,
   DeductionGoalsService,
   SettingsExtractionService,
   SettingsLineageService,
@@ -38,6 +39,7 @@ import { IsomorphicGitHistoryAdapter } from "../infrastructure/history-git/index
 import {
   SqliteDocumentRepository,
   SqliteChapterRevisionRepository,
+  SqliteRevisionDraftVersionRepository,
   SqliteRevisionConversationRepository,
   SqliteSynopsisConversationRepository,
   SqliteChapterSynopsisRepository,
@@ -438,6 +440,7 @@ export class ProjectRuntime {
       retrieval: new SqliteRetrievalRepository(this.database),
       commit: new SqliteScopeCommitRepository(this.database),
       revisions: new SqliteChapterRevisionRepository(this.database),
+      draftVersions: new SqliteRevisionDraftVersionRepository(this.database),
       chapterIndex,
       recordLineageSnapshot: async (input) => {
         await this.database.insertInto("chapter_lineage_snapshots").values({
@@ -575,6 +578,27 @@ export class ProjectRuntime {
       conversation: new SqliteSynopsisConversationRepository(this.database),
       workspace: this.workspace,
       now: Date.now,
+    })
+  }
+
+  public createChapterBodyRematerializeService(): ChapterBodyRematerializeService {
+    return new ChapterBodyRematerializeService({
+      chapterIndex: new SqliteChapterIndexRepository(this.database),
+      documents: new SqliteDocumentRepository(this.database),
+      internalStore: this.internalStorePort,
+      workspace: this.workspace,
+      chapterSynopsis: this.createChapterSynopsisService(),
+    })
+  }
+
+  /**
+   * Restore formal chapter .md files that chapter_index still points at but are missing on disk,
+   * using immutable contentRef. Safe to call on project open and workspace refresh.
+   */
+  public async rematerializeMissingPublishedBodies(): Promise<Awaited<ReturnType<ChapterBodyRematerializeService["rematerializeMissingBodies"]>>> {
+    return this.createChapterBodyRematerializeService().rematerializeMissingBodies({
+      projectId: this.projectId,
+      workspaceRootRef: this.workspaceRootRef,
     })
   }
 

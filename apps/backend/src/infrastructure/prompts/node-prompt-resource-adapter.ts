@@ -4,6 +4,7 @@ import { resolve } from "node:path"
 import type { AIPhase } from "@worldseed/contracts"
 import {
   BASE_RULES_RESOURCE,
+  CONTENT_HANDLING_RESOURCE,
   PLOT_SYNOPSIS_GUIDE_RESOURCE,
   PROMPT_CONTRACT_VERSION,
   SETTINGS_QUERY_GUIDE_RESOURCE,
@@ -21,6 +22,10 @@ export class NodePromptResourceAdapter implements PromptResourcePort {
 
   public async loadBaseRules(): Promise<PromptResource> {
     return this.load(BASE_RULES_RESOURCE)
+  }
+
+  public async loadContentHandling(): Promise<PromptResource> {
+    return this.load(CONTENT_HANDLING_RESOURCE)
   }
 
   public async loadPlotSynopsisGuide(): Promise<PromptResource> {

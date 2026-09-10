@@ -124,9 +124,20 @@ describe("synopsis rematerialize after return previous round", () => {
         workspaceRootRef: harness.workspaceRootRef,
         chapterId: randomUUID(),
         chapterSequence: started.session.chapterSequence,
-        chapterPath: "章节正文/第一章 世界种子.md",
+        chapterPath: "章节正文/第一卷 待命名/第一章 世界种子.md",
       })
-      expect(existsSync(absolute)).toBe(false)
+      expect(existsSync(absolute)).toBe(true)
+      expect(readFileSync(absolute, "utf8")).toContain("尚无灵根")
+
+      const listed = await invoke<{ session?: { sessionId: string; status: string } }>(
+        harness,
+        "synopsis.conversation.list",
+        {
+          projectId: harness.projectId,
+          workspaceRootRef: harness.workspaceRootRef,
+        },
+      )
+      expect(listed.session?.status).toBe("active")
 
       const captured = await service.captureSynopsisForRematerialize({
         projectId: harness.projectId,

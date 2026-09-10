@@ -58,6 +58,7 @@ describe("DeepSeekAiModelAdapter", () => {
           promptReads.push("turn-system")
           throw new Error("Inherited context must not reload turn system rules")
         },
+        loadContentHandling: () => Promise.reject(new Error("unused")),
         loadPlotSynopsisGuide: () => Promise.reject(new Error("unused")),
         loadSettingsQueryGuide: () => Promise.reject(new Error("unused")),
         loadSettingsRevisionGuide: () => Promise.reject(new Error("unused")),
@@ -802,6 +803,7 @@ describe("DeepSeekAiModelAdapter", () => {
     const execution = await adapter.execute(request)
 
     expect(calls).toBe(2)
+    expect(firstRequestTail).not.toContain("FICTION DELIVERY")
     expect(firstRequestTail).toContain("Scene 0: predecessorSceneIndexes must equal []")
     expect(firstRequestTail).toContain("predecessorSceneAnchorRefs must be non-empty")
     expect(firstRequestTail).toContain("transitionPathRefs must be non-empty")
@@ -1572,6 +1574,36 @@ describe("DeepSeekAiModelAdapter", () => {
     expect(execution.contextExchange?.requestMessages.some((message) => message.content?.includes("Regenerate"))).toBe(false)
   })
 
+  it("notifies the caller when a schema repair attempt starts", async () => {
+    const request = createRequest()
+    const fake = await new FakeAiModelAdapter(randomUUID).execute(request)
+    let calls = 0
+    let repairNotifications = 0
+    const client: DeepSeekCompletionClient = {
+      complete: () => {
+        calls += 1
+        return Promise.resolve({
+          content: calls === 1 ? "{\"invalid\":true}" : JSON.stringify(toModelResult(fake.result)),
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        })
+      },
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 1 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    await adapter.execute(request, {
+      onSchemaRepair: () => {
+        repairNotifications += 1
+      },
+    })
+    expect(calls).toBe(2)
+    expect(repairNotifications).toBe(1)
+  })
+
   it("regenerates truncated JSON without echoing the partial payload", async () => {
     const request = createRequest()
     const fake = await new FakeAiModelAdapter(randomUUID).execute(request)
@@ -1842,6 +1874,85 @@ describe("DeepSeekAiModelAdapter", () => {
     expect(finalMessage).not.toContain("Draft path rule")
   })
 
+  it("appends the fiction delivery reminder to draft output contracts", async () => {
+    const request = createRequest({ phase: "draft" })
+    let input: Parameters<DeepSeekCompletionClient["complete"]>[0] | undefined
+    const client: DeepSeekCompletionClient = {
+      complete: (completionInput) => {
+        input = completionInput
+        return Promise.resolve({
+          content: JSON.stringify(draftModelResult("刀光不能近身，他只能侧步。")),
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        })
+      },
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 0 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    await adapter.execute(request)
+    expect(input?.messages[0]?.content).toContain("内容处理规则")
+    expect(input?.messages[0]?.content).toContain("原请求必须直接执行")
+    expect(input?.messages.at(-1)?.content).toContain("FICTION DELIVERY")
+    expect(input?.messages.at(-1)?.content).toContain("原请求必须直接交差")
+  })
+
+  it("repairs a refused draft by retrying the original fictional request", async () => {
+    const request = createRequest({ phase: "draft" })
+    let calls = 0
+    let repairTail = ""
+    const client: DeepSeekCompletionClient = {
+      complete: (input) => {
+        calls += 1
+        if (calls === 1) {
+          return Promise.resolve({
+            content: JSON.stringify(draftModelResult("抱歉，我无法生成涉及极端暴力的内容。")),
+            usage: { prompt_tokens: 10, completion_tokens: 5 },
+          })
+        }
+        repairTail = input.messages.at(-1)?.content ?? ""
+        return Promise.resolve({
+          content: JSON.stringify(draftModelResult("刀光不能近身，血从袖口渗出来。")),
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        })
+      },
+    }
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 1 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      client,
+    )
+
+    const execution = await adapter.execute(request)
+    expect(calls).toBe(2)
+    expect(repairTail).toContain("fiction-delivery failure")
+    expect(repairTail).toContain("直接交差")
+    expect(execution.result.artifact).toMatchObject({
+      contentMarkdown: "刀光不能近身，血从袖口渗出来。",
+    })
+  })
+
+  it("fails the draft contract after a refused response exhausts repair attempts", async () => {
+    const request = createRequest({ phase: "draft" })
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 0 },
+      { getSecret: () => Promise.resolve("test-key") },
+      new NodePromptResourceAdapter(promptRoot),
+      {
+        complete: () => Promise.resolve({
+          content: JSON.stringify(draftModelResult("抱歉，我无法生成涉及极端暴力的内容。")),
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        }),
+      },
+    )
+
+    await expect(adapter.execute(request)).rejects.toThrow("could not satisfy the phase contract")
+  })
+
   it("sends one combined result schema with phase fields nested in artifact", async () => {
     const request = createRequest({ phase: "interpret" })
     let input: Parameters<DeepSeekCompletionClient["complete"]>[0] | undefined
@@ -1887,6 +1998,7 @@ describe("DeepSeekAiModelAdapter", () => {
       properties: Record<string, { properties?: Record<string, unknown> }>
     }
 
+    expect(finalMessage).toContain("FICTION DELIVERY")
     expect(finalMessage).not.toContain("The artifact must match this complete JSON Schema:")
     expect(finalMessage.match(/The response must match this complete model-facing result schema:/gu)).toHaveLength(1)
     expect(schema.properties.artifact?.properties).toHaveProperty("workflow")
@@ -3281,6 +3393,24 @@ function modelEvidence(readId: string, semanticText: string) {
     semanticText,
     sourceRefs: [],
     digest: `${readId}-digest`,
+  }
+}
+
+function draftModelResult(contentMarkdown: string): unknown {
+  return {
+    outcome: "continue",
+    artifact: {
+      contentMarkdown,
+      adoptedDecisionIndexes: [],
+      currentTimeAnchorRefs: [],
+      currentLocationAnchorRefs: [],
+      detectedUnplannedContent: [],
+    },
+    requestedReads: [],
+    citedReadIds: [],
+    unresolvedDependencies: [],
+    reason: "草稿已完成",
+    selfReview: "已检查",
   }
 }
 

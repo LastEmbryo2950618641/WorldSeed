@@ -40,4 +40,10 @@ export interface DocumentRepository {
   findStoredVersion(projectId: ProjectId, sourceId: string): Promise<DocumentVersion | undefined>
   findCurrentChapter(projectId: ProjectId, chapterId: string): Promise<DocumentVersion | undefined>
   listCommittedChapters(projectId: ProjectId): Promise<readonly DocumentVersion[]>
+  /**
+   * Re-upsert active_document_heads for a committed document version.
+   * Used when chapter_index still points at a chapter whose head row was lost
+   * (e.g. partial history checkout) while document_versions + contentRef remain.
+   */
+  ensureActiveDocumentHead(version: DocumentVersion): Promise<void>
 }

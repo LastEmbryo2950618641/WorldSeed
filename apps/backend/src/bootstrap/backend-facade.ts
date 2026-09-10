@@ -1,3 +1,5 @@
+import { resolve } from "node:path"
+
 import {
   PROTOCOL_VERSION,
   backendErrorSchema,
@@ -44,11 +46,16 @@ import {
   chapterReviewRevisionPayloadSchema,
   chapterSubmitRevisionPayloadSchema,
   chapterRetireRevisionPayloadSchema,
+  chapterDraftVersionListPayloadSchema,
+  chapterDraftVersionReadPayloadSchema,
+  chapterDraftVersionAppendPayloadSchema,
+  chapterDraftVersionRestorePayloadSchema,
   chapterRevisionConversationApplyPayloadSchema,
   chapterRevisionConversationListPayloadSchema,
   chapterRevisionConversationSendPayloadSchema,
   synopsisConversationStartPayloadSchema,
   synopsisConversationListPayloadSchema,
+  synopsisConversationSetFocusPayloadSchema,
   synopsisConversationSendPayloadSchema,
   synopsisConversationRefreshChoicesPayloadSchema,
   synopsisConversationDiscardLastUserTurnPayloadSchema,
@@ -348,6 +355,14 @@ export class BackendFacade {
       }
       case "workspace.list": {
         const payload = projectWorkspacePayloadSchema.parse(request.payload)
+        const runtime = this.container.getCurrentRuntime()
+        if (
+          runtime !== undefined
+          && !runtime.isClosed()
+          && resolve(runtime.workspaceRootRef) === resolve(payload.workspaceRootRef)
+        ) {
+          await runtime.rematerializeMissingPublishedBodies()
+        }
         return this.container.validateProject(payload.workspaceRootRef)
       }
       case "workspace.read": {
@@ -522,6 +537,33 @@ export class BackendFacade {
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
         return runtime.createChapterRevisionService().retire(payload.revisionTaskId)
       }
+      case "chapter.revision.draftVersion.list": {
+        const payload = chapterDraftVersionListPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().listDraftVersions(payload.revisionTaskId)
+      }
+      case "chapter.revision.draftVersion.read": {
+        const payload = chapterDraftVersionReadPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().readDraftVersion(payload.versionId)
+      }
+      case "chapter.revision.draftVersion.append": {
+        const payload = chapterDraftVersionAppendPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().appendDraftVersion({
+          revisionTaskId: payload.revisionTaskId,
+          source: payload.source,
+          heading: payload.heading,
+          body: payload.body,
+          ...(payload.parentVersionId === undefined ? {} : { parentVersionId: payload.parentVersionId }),
+          ...(payload.messageId === undefined ? {} : { messageId: payload.messageId }),
+        })
+      }
+      case "chapter.revision.draftVersion.restore": {
+        const payload = chapterDraftVersionRestorePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().restoreDraftVersion(payload.revisionTaskId, payload.versionId)
+      }
       case "chapter.revision.conversation.list": {
         const payload = chapterRevisionConversationListPayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
@@ -560,6 +602,17 @@ export class BackendFacade {
         return runtime.createSynopsisConversationService().list({
           projectId: payload.projectId,
           workspaceRootRef: payload.workspaceRootRef,
+        })
+      }
+      case "synopsis.conversation.setFocus": {
+        const payload = synopsisConversationSetFocusPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSynopsisConversationService().setFocus({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          ...(payload.chapterSequence === undefined ? {} : { chapterSequence: payload.chapterSequence }),
+          ...(payload.relativePath === undefined ? {} : { relativePath: payload.relativePath }),
+          ...(payload.focusKind === undefined ? {} : { focusKind: payload.focusKind }),
         })
       }
       case "synopsis.conversation.send": {
@@ -1335,17 +1388,46 @@ export class BackendFacade {
       this.automaticEvolutionTasks.add(payload.taskId)
       this.activeAutomaticEvolutionByProject.set(record.turnInput.projectId, payload.taskId)
     }
-    if (payload.resetMetricIds.length > 0) {
-      await runtime.resetRuntimeMetrics(payload.taskId, payload.resetMetricIds, this.container.now())
+    const storedBeforeReset = await runtime.taskScopes.findTask(payload.taskId)
+    const resetAtMs = this.container.now()
+    const runtimeMetrics = await runtime.readRuntimeMetrics(payload.taskId, resetAtMs)
+    const resetMetricIds = uniqueResettableMetricIds([
+      ...payload.resetMetricIds,
+      ...readFacadeBlockedMetrics(storedBeforeReset?.error),
+      ...inferBlockedMetricsFromInterruption(storedBeforeReset?.error),
+      ...runtimeMetrics.metrics
+        .filter((metric) => (
+          (metric.metricId === "model_calls"
+            || metric.metricId === "input_tokens"
+            || metric.metricId === "output_tokens"
+            || metric.metricId === "wall_time")
+          && metric.resettable
+          && (metric.state === "exhausted" || metric.blocking)
+        ))
+        .map((metric) => metric.metricId as "model_calls" | "input_tokens" | "output_tokens" | "wall_time"),
+    ])
+    if (resetMetricIds.length > 0) {
+      await runtime.resetRuntimeMetrics(payload.taskId, resetMetricIds, resetAtMs)
+      runtimeLog("info", "backend-facade", "turn.resume.metrics_reset", {
+        taskId: payload.taskId,
+        resetMetricIds,
+        resetAtMs,
+      })
     }
     const storedTask = await runtime.taskScopes.findTask(payload.taskId)
     if (storedTask?.status !== "waiting_for_review") {
-      const blockedMetrics = readFacadeBlockedMetrics(storedTask?.error)
+      const blockedMetrics = uniqueResettableMetricIds([
+        ...readFacadeBlockedMetrics(storedTask?.error),
+        ...inferBlockedMetricsFromInterruption(storedTask?.error),
+      ])
+      // Metrics reset in this same resume request already satisfy the gate.
+      const stillRequired = blockedMetrics.filter((metricId) => !resetMetricIds.includes(metricId))
       const interruptedAtMs = readFacadeInterruptionTimestamp(storedTask?.error)
-      if (!await runtime.wereRuntimeMetricsResetAfter(payload.taskId, blockedMetrics, interruptedAtMs)) {
+      if (stillRequired.length > 0
+        && !await runtime.wereRuntimeMetricsResetAfter(payload.taskId, stillRequired, interruptedAtMs)) {
         throw new FacadeOperationError(
           "budget_exhausted",
-          `Explicit budget reset required before resume: ${blockedMetrics.join(", ")}`,
+          `Explicit budget reset required before resume: ${stillRequired.join(", ")}`,
           true,
         )
       }
@@ -1355,7 +1437,8 @@ export class BackendFacade {
       ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
       ...(payload.deadlineMs === undefined ? {} : { deadlineMs: payload.deadlineMs }),
       ...(payload.maxRetrievalRounds === undefined ? {} : { maxRetrievalRounds: payload.maxRetrievalRounds }),
-      resetMetricIds: [],
+      // Facade already applied the reset window; keep ids so orchestrator gate also sees a fresh reset.
+      resetMetricIds,
     }
     const handle: TaskHandle = { ...record.handle, status: "running" }
     const abortController = new AbortController()
@@ -1390,12 +1473,21 @@ export class BackendFacade {
         }
         const backendError = this.errorFrom(error)
         const stored = await runtime.taskScopes.findTask(payload.taskId)
-        await runtime.persistenceUpdateTask(payload.taskId, "awaiting_user_decision", stored?.lastPhase, backendError)
-        this.tasks.set(payload.taskId, { ...record, handle: { ...handle, status: "awaiting_user_decision" }, status: "awaiting_user_decision", error: backendError, abortController })
+        const interruptedAtMs = this.container.now()
+        const interruption = createResumeInterruptionRecord(error, stored?.lastPhase, interruptedAtMs)
+        await runtime.persistenceUpdateTask(payload.taskId, "awaiting_user_decision", stored?.lastPhase, interruption)
+        this.tasks.set(payload.taskId, {
+          ...record,
+          handle: { ...handle, status: "awaiting_user_decision" },
+          status: "awaiting_user_decision",
+          error: { ...backendError, ...interruption },
+          abortController,
+        })
         runtimeLog("warn", "backend-facade", "turn.resume.failed", {
           taskId: payload.taskId,
           error: errorDetails(error),
           backendError,
+          interruption,
         })
         this.handleAutomaticEvolutionStopped(record.turnInput.projectId, payload.taskId, false)
       },
@@ -1813,10 +1905,53 @@ function readFacadeBlockedMetrics(error: unknown): readonly ("model_calls" | "in
   ))
 }
 
+function inferBlockedMetricsFromInterruption(
+  error: unknown,
+): readonly ("model_calls" | "input_tokens" | "output_tokens" | "wall_time")[] {
+  const message = readStringProperty(error, "message")?.toLowerCase() ?? ""
+  if (message.includes("turn deadline exceeded") || message.includes("wall_time") || message.includes("wall time")) {
+    return ["wall_time"]
+  }
+  if (message.includes("model call budget")) return ["model_calls"]
+  if (message.includes("input token budget")) return ["input_tokens"]
+  if (message.includes("output token budget")) return ["output_tokens"]
+  const kind = readStringProperty(error, "kind")
+  if (kind === "limit_exhausted") {
+    const blocked = readFacadeBlockedMetrics(error)
+    return blocked.length > 0 ? blocked : ["wall_time"]
+  }
+  return []
+}
+
+function createResumeInterruptionRecord(
+  error: unknown,
+  phase: string | undefined,
+  interruptedAtMs: number,
+): Readonly<Record<string, unknown>> {
+  const message = error instanceof Error ? error.message : String(error)
+  const blockedMetrics = error instanceof TurnBudgetExceededError
+    ? [error.metric] as const
+    : inferBlockedMetricsFromInterruption({ message })
+  return {
+    kind: blockedMetrics.length === 0 ? "execution_error" : "limit_exhausted",
+    message,
+    recoverable: true,
+    blockedMetrics,
+    ...(phase === undefined ? {} : { phase }),
+    interruptedAtMs,
+  }
+}
+
+function uniqueResettableMetricIds(
+  metricIds: readonly ("model_calls" | "input_tokens" | "output_tokens" | "wall_time")[],
+): readonly ("model_calls" | "input_tokens" | "output_tokens" | "wall_time")[] {
+  return [...new Set(metricIds)]
+}
+
 function readFacadeInterruptionTimestamp(error: unknown): number {
-  if (typeof error !== "object" || error === null || !("interruptedAtMs" in error)) return Number.MAX_SAFE_INTEGER
+  if (typeof error !== "object" || error === null || !("interruptedAtMs" in error)) return 0
   const value = error.interruptedAtMs
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : Number.MAX_SAFE_INTEGER
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0
 }
 
 function readRecoverablePhaseInput(value: unknown): {

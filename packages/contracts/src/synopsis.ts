@@ -16,6 +16,9 @@ export const chapterSynopsisSourceSchema = z.enum([
 ])
 export type ChapterSynopsisSource = z.infer<typeof chapterSynopsisSourceSchema>
 
+export const discussFocusKindSchema = z.enum(["plot_synopsis", "plot_outline", "chapter_body"])
+export type DiscussFocusKind = z.infer<typeof discussFocusKindSchema>
+
 export const synopsisConversationChoiceSchema = z.object({
   label: z.string().min(1),
   action: z.enum([
@@ -24,7 +27,9 @@ export const synopsisConversationChoiceSchema = z.object({
     "promote_staging",
     "confirm_arc_plan",
     "confirm_synopsis",
+    "set_focus",
   ]),
+  chapterSequence: z.number().int().positive().optional(),
 })
 export type SynopsisConversationChoice = z.infer<typeof synopsisConversationChoiceSchema>
 
@@ -95,6 +100,7 @@ export const synopsisConversationSessionSchema = z.object({
   lastOutlineAgentDigest: z.string().min(1).optional(),
   turnBootstrapInput: z.string().optional(),
   synopsisConfirmedAtMs: z.number().int().nonnegative().optional(),
+  focusKind: discussFocusKindSchema.default("plot_synopsis"),
   status: z.enum(["active", "completed"]),
   createdAtMs: z.number().int().nonnegative(),
   updatedAtMs: z.number().int().nonnegative(),

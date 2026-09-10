@@ -16,7 +16,7 @@ export function resolveDiscussBusyPhase(input: Readonly<{
 
 export function discussBusyPhaseLabel(phase: DiscussBusyPhase): string | undefined {
   if (phase === "generating") return "讨论进行中 · 生成回复"
-  if (phase === "previewing") return "讨论进行中 · 预览未定稿，仍可停止"
+  if (phase === "previewing") return "讨论进行中 · 预览未定稿，结构化输出仍在生成"
   if (phase === "finalizing") return "回复已就绪 · 正在写入文件与消息"
   return undefined
 }

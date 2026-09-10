@@ -54,4 +54,17 @@ describe("synopsis conversation stream hub thinking rounds", () => {
     }, 3)
     expect(synopsisConversationStreamHub.peek(projectId).searching).toHaveLength(2)
   })
+
+  it("clears streamed resulting content when schema repair starts", () => {
+    const projectId = "project-schema-repair-reset"
+    synopsisConversationStreamHub.clear(projectId)
+    synopsisConversationStreamHub.resetCumulativeUsage(projectId)
+    synopsisConversationStreamHub.begin(projectId, "session-1", 1)
+    synopsisConversationStreamHub.appendContent(projectId, "{\"assistantMessage\":\"partial", 2)
+    expect(synopsisConversationStreamHub.peek(projectId).content.length).toBeGreaterThan(0)
+
+    synopsisConversationStreamHub.beginSchemaRepair(projectId, 3)
+    expect(synopsisConversationStreamHub.peek(projectId).content).toBe("")
+    expect(synopsisConversationStreamHub.peek(projectId).status).toBe("running")
+  })
 })

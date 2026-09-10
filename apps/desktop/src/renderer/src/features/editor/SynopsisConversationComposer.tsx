@@ -1,8 +1,9 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react"
-import { Bot, ChevronDown, Ellipsis, FileText, Globe, Play, RefreshCw, Send, Settings2, Sparkles, Square, UserRound } from "lucide-react"
+import { Bot, ChevronDown, Ellipsis, FileText, Globe, Loader2, Play, RefreshCw, Send, Settings2, Sparkles, Square, UserRound } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type {
+  DiscussFocusKind,
   SynopsisConversationMessage,
   SynopsisConversationSession,
   SynopsisConversationStreamSnapshot,
@@ -27,11 +28,16 @@ import {
   type DiscussBusyPhase,
 } from "./discuss-busy-phase.js"
 import {
+  formatDiscussReceivedChars,
+  inspectDiscussStreamPayload,
+} from "./discuss-stream-progress.js"
+import {
   timelineFromMessage,
   toAgentTimeline,
   type AgentTimelineSegment,
 } from "./agent-timeline.js"
-import { isOutlineMarkdownPath } from "./synopsis-path.js"
+import { CreationDeskFocusBar } from "./CreationDeskFocusBar.js"
+import { type DiscussFocusChapterOption } from "./synopsis-path.js"
 import { useDeductionGoals } from "./use-deduction-goals.js"
 
 type PresentationProps = Readonly<{
@@ -89,6 +95,9 @@ type Props = Readonly<{
   onRejectStagingPromote?(proposalIds: readonly string[]): Promise<void>
   onStartTurn(): void
   onOpenSynopsisFile?(path: string): void
+  onSetFocus?(sequence: number, focusKind: DiscussFocusKind): void
+  focusChapters?: readonly DiscussFocusChapterOption[]
+  focusLocked?: boolean
   onOpenSettingsLineage?(): void
   tokenMetrics?: Readonly<{
     kvRate?: number
@@ -273,10 +282,12 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
                   busy={props.busy}
                   choicesRefreshing={choicesRefreshing}
                   isLatestChoiceMessage={message.messageId === latestChoiceMessageId}
+                  focusLocked={props.focusLocked === true}
                   onSend={sendMessage}
                   onPromoteStaging={props.onPromoteStaging}
                   onStartTurn={props.onStartTurn}
                   onRefreshChoices={refreshChoices}
+                  {...(props.onSetFocus === undefined ? {} : { onSetFocus: props.onSetFocus })}
                   {...(props.pendingStagingPromotes === undefined
                     ? {}
                     : { pendingStagingPromotes: props.pendingStagingPromotes })}
@@ -293,7 +304,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
                       <div className="creation-desk-message-body">
                         <header>Agent{discussPhase === "finalizing" ? " · 收尾中" : " · 进行中"}</header>
                         <AgentStructuredBody
-                          segments={buildLiveTimeline(props.stream, streamPreview)}
+                          segments={buildLiveTimeline(props.stream, streamPreview, discussPhase)}
                           mode="live"
                           streaming
                           discussPhase={discussPhase}
@@ -321,15 +332,17 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
       </div>
 
       <footer className="creation-desk-footer">
-        {props.session !== undefined
+        {props.session !== undefined && props.onSetFocus !== undefined
+          ? <CreationDeskFocusBar
+              session={props.session}
+              chapters={props.focusChapters ?? []}
+              onSelectChapter={props.onSetFocus}
+              onOpenFile={(path) => { props.onOpenSynopsisFile?.(path); }}
+            />
+          : props.session !== undefined
           ? <div className="creation-desk-session-bar">
               <FileText size={13} aria-hidden="true" />
               <span>{props.session.synopsisPath}</span>
-              {props.onOpenSynopsisFile === undefined
-                ? null
-                : <button type="button" className="synopsis-open-file" onClick={() => { props.onOpenSynopsisFile?.(props.session!.synopsisPath); }}>
-                    {isOutlineMarkdownPath(props.session.synopsisPath) ? "打开纲要文件" : "打开梗概文件"}
-                  </button>}
             </div>
           : null}
         {goals.error !== undefined
@@ -674,15 +687,20 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
   busy: boolean
   choicesRefreshing: boolean
   isLatestChoiceMessage: boolean
+  focusLocked: boolean
   pendingStagingPromotes?: readonly SynopsisStagingPromoteProposal[]
   onSend(message: string): Promise<void>
   onPromoteStaging(): Promise<void>
   onRejectStagingPromote?(proposalIds: readonly string[]): Promise<void>
   onStartTurn(): void
+  onSetFocus?(sequence: number, focusKind: DiscussFocusKind): void
   onRefreshChoices(messageId: string): Promise<void>
   onOpenSettingsLineage?(): void
 }>): React.JSX.Element {
   const { message } = props
+  const choices = (message.choices ?? []).filter((choice) => (
+    !props.focusLocked || choice.action !== "set_focus"
+  ))
   return <article className={`creation-desk-message ${message.role}`}>
     <div className="creation-desk-message-avatar" aria-hidden="true">
       {message.role === "user" ? <UserRound size={16} /> : <Bot size={16} />}
@@ -705,9 +723,9 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
               : { onOpenSettingsLineage: props.onOpenSettingsLineage })}
           />
         : <p>{message.content}</p>}
-      {message.role === "assistant" && message.choices !== undefined && message.choices.length > 0
+      {message.role === "assistant" && choices.length > 0
         ? <div className="synopsis-conversation-choices">
-            {message.choices.map((choice) => <button
+            {choices.map((choice) => <button
               key={choice.label}
               type="button"
               className="synopsis-choice"
@@ -723,6 +741,10 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
                 }
                 if (choice.action === "confirm_synopsis") {
                   void props.onSend("用这份梗概写细纲")
+                  return
+                }
+                if (choice.action === "set_focus" && choice.chapterSequence !== undefined) {
+                  props.onSetFocus?.(choice.chapterSequence, "plot_synopsis")
                   return
                 }
                 if (
@@ -865,6 +887,33 @@ const AgentStructuredBody = memo(function AgentStructuredBody({
           </ul>
         </details>
       }
+      if (segment.kind === "resulting") {
+        const noun = segment.active ? "resulting" : "resulted"
+        const present = segment.fields.filter((field) => field.present)
+        return <details
+          key={`resulting-${String(index)}`}
+          className={`agent-stream-block resulting${segment.active ? " is-live" : ""}`}
+          open
+        >
+          <summary>
+            <ChevronDown size={14} aria-hidden="true" />
+            {segment.active
+              ? <Loader2 size={13} aria-hidden="true" className="agent-stream-spinner" />
+              : <FileText size={13} aria-hidden="true" />}
+            {noun}
+            <span className="agent-stream-count">{formatDiscussReceivedChars(segment.receivedChars)}</span>
+            {streaming ? <em>{segment.active ? "生成中" : "已收齐"}</em> : null}
+          </summary>
+          {present.length === 0
+            ? <p className="agent-stream-resulting-empty">回复正文之后的结构化字段仍在输出（梗概、细纲、描写等），字数会继续增加。</p>
+            : <ul>
+                {present.map((field) => <li key={field.id}>
+                  <strong>{field.label}</strong>
+                  <small>{segment.active ? "已出现，仍可能继续变长" : "已收齐"}</small>
+                </li>)}
+              </ul>}
+        </details>
+      }
       const finalHeader = discussFinalOutputHeader(discussPhase, streaming)
       return <div
         key={`final-${String(index)}`}
@@ -897,6 +946,7 @@ const AgentStructuredBody = memo(function AgentStructuredBody({
 function buildLiveTimeline(
   stream: SynopsisConversationStreamSnapshot | undefined,
   contentPreview: string | undefined,
+  discussPhase: DiscussBusyPhase,
 ): AgentTimelineSegment[] {
   if (stream === undefined) return []
   const thinkingRounds = stream.thinkingRounds
@@ -906,7 +956,7 @@ function buildLiveTimeline(
     }))
     .filter((round) => round.text.trim().length > 0)
   const liveThinking = resolveThinkingDisplay(stream.thinking, stream.content)
-  return toAgentTimeline({
+  const segments = toAgentTimeline({
     thinking: liveThinking,
     thinkingRounds: thinkingRounds.length > 0
       ? thinkingRounds
@@ -919,6 +969,21 @@ function buildLiveTimeline(
       ? undefined
       : stream.content),
   })
+  const progress = inspectDiscussStreamPayload(stream.content)
+  const showResulting = discussPhase !== "idle" && (
+    progress.receivedChars > 0
+    || discussPhase === "previewing"
+    || discussPhase === "finalizing"
+  )
+  if (showResulting) {
+    segments.push({
+      kind: "resulting",
+      active: discussPhase === "generating" || discussPhase === "previewing",
+      receivedChars: progress.receivedChars,
+      fields: progress.fields,
+    })
+  }
+  return segments
 }
 
 function resolveThinkingDisplay(thinking: string | undefined, phaseJson?: string): string | undefined {

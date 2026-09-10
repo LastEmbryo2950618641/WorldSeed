@@ -95,6 +95,21 @@ describe("synopsis discuss missing artifact recovery", () => {
       searching?: unknown
       choices?: unknown
     }> = []
+    const discussContext: Array<{
+      messageId: string
+      chainId: string
+      projectId: string
+      sequence: number
+      role: "system" | "user" | "assistant"
+      kind: "system_rules" | "phase_request" | "phase_response" | "phase_instruction" | "phase_protocol"
+      content: string
+      contentDigest: string
+      tokenEstimate: number
+      createdAtMs: number
+      taskId?: string
+      turnId?: string
+      phase?: "synopsis_discuss"
+    }> = []
     const conversation = {
       async findActiveSession() {
         return {
@@ -133,6 +148,56 @@ describe("synopsis discuss missing artifact recovery", () => {
           updatedAtMs: 1,
         }
       },
+      async loadDiscussUsage() {
+        return undefined
+      },
+      async saveDiscussUsage() {
+        return undefined
+      },
+      async listDiscussContextMessages() {
+        return [...discussContext]
+      },
+      async appendDiscussContextMessages(input: {
+        sessionId: string
+        projectId: string
+        createdAtMs: number
+        messages: Array<{
+          role: "system" | "user" | "assistant"
+          kind: "system_rules" | "phase_request" | "phase_response" | "phase_instruction" | "phase_protocol"
+          content?: string
+          taskId?: string
+          turnId?: string
+          phase?: "synopsis_discuss"
+        }>
+      }) {
+        for (const message of input.messages) {
+          if (message.content === undefined) continue
+          discussContext.push({
+            messageId: randomUUID(),
+            chainId: input.sessionId,
+            projectId: input.projectId,
+            sequence: discussContext.length,
+            role: message.role,
+            kind: message.kind,
+            content: message.content,
+            contentDigest: "d",
+            tokenEstimate: 1,
+            createdAtMs: input.createdAtMs,
+            ...(message.taskId === undefined ? {} : { taskId: message.taskId }),
+            ...(message.turnId === undefined ? {} : { turnId: message.turnId }),
+            ...(message.phase === undefined ? {} : { phase: message.phase }),
+          })
+        }
+      },
+      async hideDiscussContextMessages() {
+        return undefined
+      },
+      async readDiscussContextDigests() {
+        return {}
+      },
+      async saveDiscussContextDigests() {
+        return undefined
+      },
     }
     const workspace: WorkspacePort = {
       async validate() {
@@ -165,6 +230,11 @@ describe("synopsis discuss missing artifact recovery", () => {
       chapters: {
         async nextChapterSequence() {
           return 1
+        },
+      },
+      chapterSynopsis: {
+        async detectTitleAlignmentIssue() {
+          return undefined
         },
       },
       conversation,

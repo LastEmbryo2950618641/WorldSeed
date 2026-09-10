@@ -604,13 +604,13 @@ export const synopsisStagingPromoteArtifactSchema = z.object({
   reason: z.string().max(1_000).optional(),
 })
 
-/** Immediate create/update for 描写规则 / 笔风规则 during synopsis discuss. */
+/** Immediate create/update for this-work overlay (`表现输出/本作品描写`). User presets are read-only to AI. */
 export const synopsisPresentationWriteSchema = z.object({
   relativePath: z.string().regex(
-    /^表现输出\/(?:描写规则|笔风规则)\/[^/][^\n]*\.md$/u,
-    "presentationWrites 路径必须位于 表现输出/描写规则/ 或 表现输出/笔风规则/ 下",
+    /^表现输出\/本作品描写\/[^/]+\.md$/u,
+    "presentationWrites 路径必须位于 表现输出/本作品描写/ 下",
   ),
-  markdown: z.string().min(1).max(80_000),
+  markdown: z.string().min(1).max(4_000),
   mode: z.enum(["create", "update"]),
 })
 
@@ -636,7 +636,10 @@ export const synopsisDiscussArtifactSchema = z.object({
    * Applied via project.rename when present.
    */
   workDisplayName: z.string().trim().min(1).max(200).optional(),
-  synopsisBody: z.string().min(1).optional(),
+  synopsisBody: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().min(1).optional(),
+  ),
   /** Full chapter outline markdown (`…[剧情细纲].md`); preferred turn bootstrap when present. */
   outlineBody: z.string().min(1).optional(),
   /**
@@ -659,13 +662,15 @@ export const synopsisDiscussArtifactSchema = z.object({
       "promote_staging",
       "confirm_arc_plan",
       "confirm_synopsis",
+      "set_focus",
     ]),
+    chapterSequence: z.number().int().positive().optional(),
   })).optional(),
   goalProposals: z.array(synopsisDiscussGoalProposalSchema).optional(),
   stagingDelta: synopsisStagingDeltaSchema.optional(),
   stagingPromote: synopsisStagingPromoteArtifactSchema.optional(),
-  /** Create or overwrite 描写/笔风规则 Markdown; applied immediately (not 设定集 promote). */
-  presentationWrites: z.array(synopsisPresentationWriteSchema).min(1).max(20).optional(),
+  /** Create or overwrite 本作品描写 Markdown; applied immediately (not 设定集 promote). */
+  presentationWrites: z.array(synopsisPresentationWriteSchema).min(1).max(8).optional(),
   arcPlan: z.object({
     markdown: z.string().min(1).max(20_000),
     estimatedChapterCount: z.number().int().positive().max(50).optional(),

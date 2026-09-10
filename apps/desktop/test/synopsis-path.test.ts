@@ -4,6 +4,8 @@ import {
   resolveChapterArtifactRelations,
   resolveChapterArtifactRelationsWithInventory,
   chapterArtifactStageLabel,
+  listDiscussFocusChapters,
+  discussFocusOpenLabel,
 } from "../src/renderer/src/features/editor/synopsis-path.js"
 
 describe("chapter artifact relations", () => {
@@ -41,5 +43,34 @@ describe("chapter artifact relations", () => {
     )
     expect(relations?.outlinePath).toBe("章节正文/第一卷 王旗未立/第三章 北地来的信使 [剧情细纲].md")
     expect(relations?.bodyPath).toBe("章节正文/第一卷 王旗未立/第三章 秤与约.md")
+  })
+})
+
+describe("discuss focus chapters", () => {
+  it("groups planning and body files by chapter sequence", () => {
+    const chapters = listDiscussFocusChapters([
+      "章节正文/第一卷 王旗未立/第一章 潮水退去时 [剧情梗概].md",
+      "章节正文/第一卷 王旗未立/第一章 潮水退去时 [剧情细纲].md",
+      "章节正文/第一卷 王旗未立/第一章 潮水退去时.md",
+      "章节正文/第一卷 王旗未立/第二章 盐与账本 [剧情梗概].md",
+      "设定集/人物.md",
+    ])
+    expect(chapters).toEqual([
+      {
+        sequence: 1,
+        label: "第一章 潮水退去时",
+        synopsisPath: "章节正文/第一卷 王旗未立/第一章 潮水退去时 [剧情梗概].md",
+        outlinePath: "章节正文/第一卷 王旗未立/第一章 潮水退去时 [剧情细纲].md",
+        bodyPath: "章节正文/第一卷 王旗未立/第一章 潮水退去时.md",
+      },
+      {
+        sequence: 2,
+        label: "第二章 盐与账本",
+        synopsisPath: "章节正文/第一卷 王旗未立/第二章 盐与账本 [剧情梗概].md",
+      },
+    ])
+    expect(discussFocusOpenLabel("plot_synopsis")).toBe("打开梗概文件")
+    expect(discussFocusOpenLabel("plot_outline")).toBe("打开细纲文件")
+    expect(discussFocusOpenLabel("chapter_body")).toBe("打开正文文件")
   })
 })

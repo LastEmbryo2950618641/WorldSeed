@@ -1,12 +1,13 @@
 import { z } from "zod"
 
-import { resolvedChapterSchema } from "./chapter.js"
+import { resolvedChapterSchema, revisionDraftVersionSourceSchema } from "./chapter.js"
 import {
   deductionGoalNarrativeKindSchema,
   deductionGoalScaleSchema,
   turnDeductionGoalBundleSchema,
 } from "./deduction-goals.js"
 import { projectSettingsSchema } from "./project-settings.js"
+import { discussFocusKindSchema } from "./synopsis.js"
 
 import { idSchema } from "./ids.js"
 import { graphObjectIdSchema } from "./persistent-id.js"
@@ -273,6 +274,29 @@ export type ChapterUpdateRevisionPayload = z.infer<typeof chapterUpdateRevisionP
 export type ChapterReviewRevisionPayload = z.infer<typeof chapterReviewRevisionPayloadSchema>
 export type ChapterSubmitRevisionPayload = z.infer<typeof chapterSubmitRevisionPayloadSchema>
 export type ChapterRetireRevisionPayload = z.infer<typeof chapterRetireRevisionPayloadSchema>
+
+export const chapterDraftVersionListPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  revisionTaskId: idSchema,
+})
+export const chapterDraftVersionReadPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  versionId: idSchema,
+})
+export const chapterDraftVersionAppendPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  revisionTaskId: idSchema,
+  source: revisionDraftVersionSourceSchema,
+  heading: z.string().min(1),
+  body: z.string(),
+  parentVersionId: idSchema.optional(),
+  messageId: idSchema.optional(),
+})
+export const chapterDraftVersionRestorePayloadSchema = projectSettingsReadPayloadSchema.extend({
+  revisionTaskId: idSchema,
+  versionId: idSchema,
+})
+export type ChapterDraftVersionListPayload = z.infer<typeof chapterDraftVersionListPayloadSchema>
+export type ChapterDraftVersionReadPayload = z.infer<typeof chapterDraftVersionReadPayloadSchema>
+export type ChapterDraftVersionAppendPayload = z.infer<typeof chapterDraftVersionAppendPayloadSchema>
+export type ChapterDraftVersionRestorePayload = z.infer<typeof chapterDraftVersionRestorePayloadSchema>
 export type ChapterRevisionConversationListPayload = z.infer<typeof chapterRevisionConversationListPayloadSchema>
 export type ChapterRevisionConversationSendPayload = z.infer<typeof chapterRevisionConversationSendPayloadSchema>
 export type ChapterRevisionConversationApplyPayload = z.infer<typeof chapterRevisionConversationApplyPayloadSchema>
@@ -281,6 +305,20 @@ export const synopsisConversationStartPayloadSchema = projectSettingsReadPayload
   title: z.string().max(200).optional(),
 })
 export const synopsisConversationListPayloadSchema = projectSettingsReadPayloadSchema
+export const synopsisConversationSetFocusPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  chapterSequence: z.number().int().positive().optional(),
+  relativePath: z.string().min(1).optional(),
+  focusKind: discussFocusKindSchema.optional(),
+}).superRefine((payload, context) => {
+  if (payload.chapterSequence === undefined && payload.relativePath === undefined) {
+    context.addIssue({
+      code: "custom",
+      message: "chapterSequence or relativePath is required",
+      path: ["chapterSequence"],
+    })
+  }
+})
+export type SynopsisConversationSetFocusPayload = z.infer<typeof synopsisConversationSetFocusPayloadSchema>
 export const synopsisConversationSendPayloadSchema = projectSettingsReadPayloadSchema.extend({
   message: z.string().trim().min(1).max(8_000),
   presentation: turnStartPayloadSchema.shape.presentation,
@@ -614,11 +652,16 @@ export const backendPayloadSchemas = {
   "chapter.reviewRevision": chapterReviewRevisionPayloadSchema,
   "chapter.submitRevision": chapterSubmitRevisionPayloadSchema,
   "chapter.retireRevision": chapterRetireRevisionPayloadSchema,
+  "chapter.revision.draftVersion.list": chapterDraftVersionListPayloadSchema,
+  "chapter.revision.draftVersion.read": chapterDraftVersionReadPayloadSchema,
+  "chapter.revision.draftVersion.append": chapterDraftVersionAppendPayloadSchema,
+  "chapter.revision.draftVersion.restore": chapterDraftVersionRestorePayloadSchema,
   "chapter.revision.conversation.list": chapterRevisionConversationListPayloadSchema,
   "chapter.revision.conversation.send": chapterRevisionConversationSendPayloadSchema,
   "chapter.revision.conversation.apply": chapterRevisionConversationApplyPayloadSchema,
   "synopsis.conversation.start": synopsisConversationStartPayloadSchema,
   "synopsis.conversation.list": synopsisConversationListPayloadSchema,
+  "synopsis.conversation.setFocus": synopsisConversationSetFocusPayloadSchema,
   "synopsis.conversation.send": synopsisConversationSendPayloadSchema,
   "synopsis.conversation.refreshChoices": synopsisConversationRefreshChoicesPayloadSchema,
   "synopsis.conversation.discardLastUserTurn": synopsisConversationDiscardLastUserTurnPayloadSchema,

@@ -78,7 +78,7 @@ describe("TurnOrchestrator", () => {
     const fake = new FakeAiModelAdapter(randomUUID)
     let interpretInput: TurnPhaseInput | undefined
     const model: AIModelPort = {
-      info: fake.info,
+      info: { ...fake.info, contextWindowTokens: 1_000_000 },
       execute: (request) => {
         if (request.phase === "interpret") interpretInput = request.input as TurnPhaseInput
         return fake.execute(request)
@@ -108,18 +108,29 @@ describe("TurnOrchestrator", () => {
     expect(interpretInput?.readEvidence.find((evidence) => evidence.ownerId.endsWith("角色出场.md"))?.semanticText)
       .toContain("用户指定的角色出场规则")
     expect(interpretInput?.presentation).toMatchObject({ minimumWordCount: 2000, maximumWordCount: 3000 })
-    expect(interpretInput?.readEvidence.find((evidence) => evidence.ownerId === "表现输出/描写规则/近景跟随.md")?.semanticText)
-      .toContain("保持贴近当前行动主体")
+    const descriptionEvidence = interpretInput?.readEvidence.find((evidence) => (
+      evidence.ownerId === "表现输出/描写规则/近景跟随.md"
+    ))
+    expect(descriptionEvidence?.semanticText).toContain("保持贴近当前行动主体")
+    expect(descriptionEvidence?.semanticText).toContain("【描写·本轮锁定】")
+    const ownerIds = interpretInput?.readEvidence.map((evidence) => evidence.ownerId) ?? []
+    expect(ownerIds).not.toContain("表现输出/描写规则/默认描写规则.md")
+    expect(ownerIds).not.toContain("表现输出/描写规则/自动.md")
     const context = await fixture.persistence.findContext((await fixture.database.selectFrom("turn_contexts").select("id").executeTakeFirstOrThrow()).id)
     expect(context?.segments.some((segment) => segment.kind === "presentation_rules")).toBe(true)
   })
 
   it("loads default presentation rules when automatic presentation is selected", async () => {
     const fixture = await createFixture()
+    await fixture.workspace.saveUserMarkdown(
+      fixture.workspaceRoot,
+      "表现输出/描写规则/近景跟随.md",
+      "# 近景跟随\n\n保持贴近当前行动主体的观察距离。\n",
+    )
     const fake = new FakeAiModelAdapter(randomUUID)
     let interpretInput: TurnPhaseInput | undefined
     const model: AIModelPort = {
-      info: fake.info,
+      info: { ...fake.info, contextWindowTokens: 1_000_000 },
       execute: async (request) => {
         if (request.phase === "interpret") interpretInput = request.input as TurnPhaseInput
         return fake.execute(request)
@@ -138,12 +149,90 @@ describe("TurnOrchestrator", () => {
       },
     })
 
-    expect(interpretInput?.readEvidence.map((evidence) => evidence.ownerId)).toEqual(expect.arrayContaining([
+    const autoOwnerIds = interpretInput?.readEvidence.map((evidence) => evidence.ownerId) ?? []
+    expect(autoOwnerIds).toEqual(expect.arrayContaining([
+      "表现输出/描写规则/自动.md",
       "表现输出/描写规则/默认描写规则.md",
+      "表现输出/描写规则/近景跟随.md",
       "表现输出/笔风规则/默认笔风规则.md",
     ]))
+    expect(interpretInput?.readEvidence.find((evidence) => evidence.ownerId === "表现输出/描写规则/自动.md")?.semanticText)
+      .toContain("【描写·自动调度】")
+    expect(interpretInput?.readEvidence.find((evidence) => evidence.ownerId === "表现输出/描写规则/近景跟随.md")?.semanticText)
+      .toContain("【描写场面卡】")
     expect(interpretInput?.readEvidence.find((evidence) => evidence.ownerId === "表现输出/描写规则/默认描写规则.md")?.ownerKind)
       .toBe("workspace:presentation")
+  })
+
+  it("injects this-work description overlay after selected presentation rules", async () => {
+    const fixture = await createFixture()
+    await fixture.workspace.saveUserMarkdown(
+      fixture.workspaceRoot,
+      "表现输出/本作品描写/压抑氛围.md",
+      "# 压抑氛围\n\n整部作品保持持续的压抑空气。\n",
+    )
+    const fake = new FakeAiModelAdapter(randomUUID)
+    let interpretInput: TurnPhaseInput | undefined
+    const model: AIModelPort = {
+      info: fake.info,
+      execute: (request) => {
+        if (request.phase === "interpret") interpretInput = request.input as TurnPhaseInput
+        return fake.execute(request)
+      },
+    }
+
+    await fixture.createOrchestrator(model, fixture.commit).execute({
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "开始第一章。",
+      chapterSequence: 1,
+      presentation: {
+        descriptionRulePath: "表现输出/描写规则/默认描写规则.md",
+        minimumWordCount: 2000,
+        maximumWordCount: 3000,
+      },
+    })
+
+    const ownerIds = interpretInput?.readEvidence.map((evidence) => evidence.ownerId) ?? []
+    expect(ownerIds).toEqual(expect.arrayContaining([
+      "表现输出/描写规则/默认描写规则.md",
+      "表现输出/笔风规则/默认笔风规则.md",
+      "表现输出/本作品描写/压抑氛围.md",
+    ]))
+    const overlay = interpretInput?.readEvidence.find((evidence) => evidence.ownerId === "表现输出/本作品描写/压抑氛围.md")
+    expect(overlay?.semanticText).toContain("【本作品描写·附加层】")
+    expect(overlay?.semanticText).toContain("以选中文件为准")
+    expect(overlay?.semanticText).toContain("整部作品保持持续的压抑空气")
+    const dropdownIndex = ownerIds.indexOf("表现输出/描写规则/默认描写规则.md")
+    const overlayIndex = ownerIds.indexOf("表现输出/本作品描写/压抑氛围.md")
+    expect(dropdownIndex).toBeGreaterThanOrEqual(0)
+    expect(overlayIndex).toBeGreaterThan(dropdownIndex)
+  })
+
+  it("fails visibly when this-work description overlay exceeds the file cap", async () => {
+    const fixture = await createFixture()
+    for (let index = 0; index < 9; index += 1) {
+      await fixture.workspace.saveUserMarkdown(
+        fixture.workspaceRoot,
+        `表现输出/本作品描写/约束${String(index)}.md`,
+        `# 约束${String(index)}\n`,
+      )
+    }
+    const fake = new FakeAiModelAdapter(randomUUID)
+    const orchestrator = fixture.createOrchestrator(fake, fixture.commit)
+
+    await expect(orchestrator.execute({
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "开始第一章。",
+      chapterSequence: 1,
+      presentation: {
+        minimumWordCount: 2000,
+        maximumWordCount: 3000,
+      },
+    })).rejects.toThrow(/最多 8 个文件/)
   })
 
   it("rejects an existing graph reference that was not read in the current turn", async () => {
@@ -1175,6 +1264,48 @@ describe("TurnOrchestrator", () => {
     const interruptedTaskId = events.find((event) => event.event === "turn.interrupted")?.fields?.taskId
     expect(typeof interruptedTaskId).toBe("string")
     expect((await fixture.taskScopes.findTask(String(interruptedTaskId)))?.status).toBe("awaiting_user_decision")
+  })
+
+  it("rejects a moral refusal draft instead of publishing it", async () => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    const events: Array<{ event: string; fields?: Readonly<Record<string, unknown>> }> = []
+    const model: AIModelPort = {
+      info: fake.info,
+      execute: async (request) => {
+        const execution = await fake.execute(request)
+        if (request.phase !== "draft") return execution
+        return {
+          ...execution,
+          result: {
+            ...execution.result,
+            artifact: {
+              ...(execution.result.artifact as Record<string, unknown>),
+              contentMarkdown: "抱歉，我无法生成涉及极端暴力的内容。",
+            },
+          },
+        }
+      },
+    }
+
+    await expect(fixture.createOrchestrator(model, fixture.commit, {
+      log: (_level, event, fields) => events.push({ event, fields }),
+    }).execute({
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "写一场血腥的比武。",
+      chapterSequence: 1,
+    })).rejects.toThrow("Draft content is a waiting/refusal placeholder")
+
+    expect(events).toContainEqual(expect.objectContaining({
+      event: "draft.placeholder_rejected",
+      fields: expect.objectContaining({
+        phase: "draft",
+        verdict: "refusal",
+        matched: "我无法生成",
+      }),
+    }))
   })
 
   it("keeps the pending scope and does not publish when the model fails", async () => {
@@ -4221,6 +4352,7 @@ async function createFixture() {
     workspaceRootRef: workspaceRoot,
     defaults: {
       baseRules: "# base\n",
+      contentHandling: "# content handling\n",
       plotSynopsisGuide: "# synopsis guide\n",
       settingsQueryGuide: "# settings query guide\n",
       settingsRevisionGuide: "# settings revision guide\n",

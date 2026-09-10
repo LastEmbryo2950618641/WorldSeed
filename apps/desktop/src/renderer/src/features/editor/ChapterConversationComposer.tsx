@@ -80,9 +80,11 @@ export function ChapterConversationComposer(props: Props): React.JSX.Element {
           }
         }}
       />
-      <button className="run-command" disabled={props.busy || draft.trim().length === 0} onClick={() => { void submit(); }}>
-        <Send size={15} aria-hidden="true" />{props.busy ? "处理中" : "发送"}
-      </button>
+      <div className="chapter-conversation-input-actions">
+        <button type="button" className="run-command" disabled={props.busy || draft.trim().length === 0} onClick={() => { void submit(); }}>
+          <Send size={15} aria-hidden="true" />{props.busy ? "处理中" : "发送"}
+        </button>
+      </div>
     </div>
   </div>
 }

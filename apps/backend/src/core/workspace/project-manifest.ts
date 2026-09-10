@@ -69,6 +69,16 @@ export const fixedWorkspaceEntries: readonly FixedWorkspaceEntry[] = Object.free
     allowUserMarkdown: false,
   },
   {
+    key: "content-handling",
+    role: "base_rules",
+    relativePath: "世界推演规则/基础规则/content-handling.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: false,
+  },
+  {
     key: "plot-synopsis-guide",
     role: "base_rules",
     relativePath: "世界推演规则/基础规则/plot-synopsis-guide.md",
@@ -186,6 +196,16 @@ export const fixedWorkspaceEntries: readonly FixedWorkspaceEntry[] = Object.free
     immutablePath: true,
     allowedExtensions: [".md"],
     allowUserFolders: true,
+    allowUserMarkdown: true,
+  },
+  {
+    key: "work-description-rules",
+    role: "presentation",
+    relativePath: "表现输出/本作品描写",
+    entryKind: "directory",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
     allowUserMarkdown: true,
   },
   {

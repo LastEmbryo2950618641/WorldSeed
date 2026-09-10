@@ -163,19 +163,22 @@ export class BackendContainer {
       this.workspace,
     )
     await this.currentRuntime.ensureSettingsLineageSeeded()
+    await this.currentRuntime.rematerializeMissingPublishedBodies()
   }
 
   private async resolveWorkspaceDefaults(): Promise<WorkspaceDefaultDocuments> {
     if (this.workspaceDefaults !== undefined) return this.workspaceDefaults
     const prompts = new NodePromptResourceAdapter(this.promptPackageRoot)
-    const [baseRules, plotSynopsisGuide, settingsQueryGuide, settingsRevisionGuide] = await Promise.all([
+    const [baseRules, contentHandling, plotSynopsisGuide, settingsQueryGuide, settingsRevisionGuide] = await Promise.all([
       prompts.loadBaseRules(),
+      prompts.loadContentHandling(),
       prompts.loadPlotSynopsisGuide(),
       prompts.loadSettingsQueryGuide(),
       prompts.loadSettingsRevisionGuide(),
     ])
     return {
       baseRules: baseRules.text,
+      contentHandling: contentHandling.text,
       plotSynopsisGuide: plotSynopsisGuide.text,
       settingsQueryGuide: settingsQueryGuide.text,
       settingsRevisionGuide: settingsRevisionGuide.text,

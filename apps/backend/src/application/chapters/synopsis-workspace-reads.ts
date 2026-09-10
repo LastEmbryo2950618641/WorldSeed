@@ -5,7 +5,11 @@ import type {
   WorkspaceCatalogSnapshot,
 } from "@worldseed/contracts"
 
-import { digest } from "../../core/index.js"
+import {
+  assertWorkDescriptionCharLimit,
+  digest,
+  isWorkDescriptionRulePath,
+} from "../../core/index.js"
 import type { TurnReadEvidence } from "../turns/ports/ai-model-port.js"
 import type { WorkspacePort } from "../workspace/index.js"
 
@@ -60,6 +64,9 @@ export async function executeSynopsisWorkspaceReads(input: Readonly<{
     )
     for (const entry of entries) {
       const content = await input.workspace.readMarkdown(input.workspaceRootRef, entry.relativePath)
+      if (isWorkDescriptionRulePath(entry.relativePath)) {
+        assertWorkDescriptionCharLimit(entry.relativePath, content)
+      }
       if (mode === "grep") {
         const snippets = grepMarkdownContent({
           content,
@@ -347,7 +354,7 @@ function synopsisRolesForRequest(
   return roles
 }
 
-/** True when the read query explicitly targets 描写/笔风规则 paths or labels. */
+/** True when the read query explicitly targets 描写/笔风/本作品描写 paths or labels. */
 export function requestMentionsPresentationRules(
   request: PhaseResultEnvelope["requestedReads"][number],
 ): boolean {
@@ -357,12 +364,28 @@ export function requestMentionsPresentationRules(
       normalized.startsWith("表现输出/")
       || normalized.includes("描写规则")
       || normalized.includes("笔风规则")
+      || normalized.includes("本作品描写")
     )
   })
 }
 
-/** Validate agent presentation rule write paths (描写/笔风 only). */
+/** User-rule markdown under `世界推演规则/用户规则/` (nested folders allowed). */
+export function isUserRuleMarkdownPath(path: string): boolean {
+  const normalized = path.trim().replace(/\\/gu, "/")
+  return normalized.startsWith("世界推演规则/用户规则/") && normalized.endsWith(".md")
+}
+
+export function listUserRuleMarkdownPaths(
+  entries: readonly Readonly<{ relativePath: string; entryKind: string }>[],
+): string[] {
+  return entries
+    .filter((entry) => entry.entryKind === "file" && isUserRuleMarkdownPath(entry.relativePath))
+    .map((entry) => entry.relativePath.trim().replace(/\\/gu, "/"))
+    .sort((left, right) => left.localeCompare(right, "zh-CN"))
+}
+
+/** User-selected 描写/笔风 dropdown files (not the this-work overlay). */
 export function isPresentationRuleMarkdownPath(path: string): boolean {
   const normalized = path.trim().replace(/\\/gu, "/")
-  return /^表现输出\/(?:描写规则|笔风规则)\/[^/][^\n]*\.md$/u.test(normalized)
+  return /^表现输出\/(?:描写规则|笔风规则)\/[^/]+\.md$/u.test(normalized)
 }

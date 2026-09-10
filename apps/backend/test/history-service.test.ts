@@ -794,6 +794,7 @@ async function createFixture() {
   const workspace = new NodeWorkspaceAdapter()
   await workspace.createLayout(workspaceRoot, {
     baseRules: "# 基础规则\n",
+    contentHandling: "# 内容处理规则\n",
     plotSynopsisGuide: "# 剧情梗概讨论引导\n",
     settingsQueryGuide: "# 设定集默认查询规则\n",
     settingsRevisionGuide: "# 设定集修订规则\n",

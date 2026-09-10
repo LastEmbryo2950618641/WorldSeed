@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url"
 
 import { PROTOCOL_VERSION } from "@worldseed/contracts"
 
+import type { AIModelPort } from "../../src/application/turns/ports/ai-model-port.js"
 import {
   BackendContainer,
   BackendFacade,
@@ -22,7 +23,10 @@ export type ChapterHarness = Readonly<{
   facade: BackendFacade
 }>
 
-export async function openChapterHarness(displayName = "Conversation Test"): Promise<ChapterHarness> {
+export async function openChapterHarness(
+  displayName = "Conversation Test",
+  options?: Readonly<{ model?: AIModelPort }>,
+): Promise<ChapterHarness> {
   const root = mkdtempSync(join(tmpdir(), "worldseed-chapter-harness-"))
   const workspaceRootRef = join(root, "workspace")
   const applicationDataRoot = join(root, "application-data")
@@ -31,7 +35,7 @@ export async function openChapterHarness(displayName = "Conversation Test"): Pro
   const container = await BackendContainer.open({
     applicationDataRoot,
     promptPackageRoot,
-    model: new FakeAiModelAdapter(randomUUID),
+    model: options?.model ?? new FakeAiModelAdapter(randomUUID),
   })
   const facade = new BackendFacade(container)
   await facade.handle({

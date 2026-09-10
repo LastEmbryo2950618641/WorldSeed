@@ -195,28 +195,28 @@ export class ChapterSynopsisService {
     }
 
     const session = await this.dependencies.conversation.findBySequence(input.projectId, input.chapterSequence)
-    if (session === undefined) return
+    const synopsisMarkdown = session === undefined
+      ? await this.resolveArchiveMarkdownForSequence(input.workspaceRootRef, input.chapterSequence)
+      : await this.resolveArchiveMarkdown(input.workspaceRootRef, session)
+    if (synopsisMarkdown.trim().length === 0) return
 
-    const synopsisMarkdown = await this.resolveArchiveMarkdown(input.workspaceRootRef, session)
-    if (synopsisMarkdown.trim().length === 0) {
-      // Keep workspace planning files; only complete the discussion session.
-      await this.completeSession(session.sessionId)
-      return
-    }
-
-    const source = await this.resolveArchiveSource(input.workspaceRootRef, session)
+    const source = session === undefined
+      ? "synopsis_file" as const
+      : await this.resolveArchiveSource(input.workspaceRootRef, session)
+    const originalSynopsisPath = session?.synopsisPath
+      ?? (await this.listPlanningFilesForSequence(input.workspaceRootRef, input.chapterSequence)
+        .then((files) => files.find((entry) => entry.kind === "synopsis")?.path))
     await this.dependencies.synopsis.upsert(input.projectId, {
       chapterId: input.chapterId,
       chapterSequence: input.chapterSequence,
       chapterPath: input.chapterPath,
       synopsisMarkdown,
       source,
-      originalSynopsisPath: session.synopsisPath,
-      ...(session.turnBootstrapInput === undefined ? {} : { turnBootstrapInput: session.turnBootstrapInput }),
+      ...(originalSynopsisPath === undefined ? {} : { originalSynopsisPath }),
+      ...(session?.turnBootstrapInput === undefined ? {} : { turnBootstrapInput: session.turnBootstrapInput }),
       linkedAtMs: this.dependencies.now(),
     })
-    // Design 2026-09-02: keep [剧情梗概]/[剧情细纲] on disk; tree folds under body.
-    await this.completeSession(session.sessionId)
+    // Discuss session stays active across chapters; publish only archives markdown.
     runtimeLog("debug", "chapter-synopsis", "linked", {
       projectId: input.projectId,
       chapterId: input.chapterId,
@@ -355,6 +355,16 @@ export class ChapterSynopsisService {
     })
   }
 
+  private async resolveArchiveMarkdownForSequence(
+    workspaceRootRef: string,
+    chapterSequence: number,
+  ): Promise<string> {
+    const files = await this.listPlanningFilesForSequence(workspaceRootRef, chapterSequence)
+    const synopsis = files.find((entry) => entry.kind === "synopsis")
+    if (synopsis === undefined) return ""
+    return this.readPlanningFile(workspaceRootRef, synopsis.path)
+  }
+
   private async resolveArchiveMarkdown(
     workspaceRootRef: string,
     session: NonNullable<Awaited<ReturnType<SqliteSynopsisConversationRepository["findBySequence"]>>>,
@@ -389,14 +399,6 @@ export class ChapterSynopsisService {
     const messages = await this.dependencies.conversation.listMessages(session.sessionId)
     if (messages.length > 0) return "conversation"
     return "turn_input"
-  }
-
-  private async completeSession(sessionId: string): Promise<void> {
-    await this.dependencies.conversation.updateSession({
-      sessionId,
-      status: "completed",
-      updatedAtMs: this.dependencies.now(),
-    })
   }
 
   private async findBodyForSequence(

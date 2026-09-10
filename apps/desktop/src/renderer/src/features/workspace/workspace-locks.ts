@@ -7,6 +7,9 @@ import {
 
 export { isSynopsisMarkdownPath }
 
+/** Dropdown「自动」maps to this file; hide it from the selectable list. */
+export const AUTO_DESCRIPTION_RULE_PATH = "表现输出/描写规则/自动.md"
+
 const BASE_RULES_PREFIX = "世界推演规则/基础规则"
 
 /** Fixed scaffold files: content editable, path not deletable. */
@@ -19,6 +22,7 @@ const IMMUTABLE_FILE_PATHS = new Set([
   "暂存区/世界与规则草稿.md",
   "暂存区/待落盘清单.md",
   "世界推演规则/基础规则/base-rules.md",
+  "世界推演规则/基础规则/content-handling.md",
   "世界推演规则/基础规则/plot-synopsis-guide.md",
   "世界推演规则/基础规则/settings-query-guide.md",
   "世界推演规则/基础规则/settings-revision-guide.md",
@@ -34,6 +38,7 @@ const IMMUTABLE_DIRECTORY_PATHS = new Set([
   "表现输出",
   "表现输出/描写规则",
   "表现输出/笔风规则",
+  "表现输出/本作品描写",
   "暂存区",
 ])
 
@@ -136,6 +141,7 @@ export const USER_WRITABLE_CREATE_ROOTS = [
   "参考文件",
   "表现输出/描写规则",
   "表现输出/笔风规则",
+  "表现输出/本作品描写",
   "暂存区",
 ] as const
 

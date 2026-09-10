@@ -194,6 +194,15 @@ export class SynopsisConversationStreamHub {
     current.updatedAtMs = nowMs
   }
 
+  /** Clear streamed resulting JSON so a schema-repair pass does not look frozen. */
+  public beginSchemaRepair(projectId: string, nowMs: number): void {
+    const current = this.byProject.get(projectId)
+    if (current === undefined || current.status === "failed") return
+    if (current.status !== "running") return
+    current.content = ""
+    current.updatedAtMs = nowMs
+  }
+
   public setThinking(projectId: string, thinking: string, nowMs: number): void {
     const current = this.byProject.get(projectId)
     if (current === undefined || current.status === "failed") return

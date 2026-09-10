@@ -6,6 +6,7 @@ import {
   type ProjectId,
   type ProjectSettings,
   type ChapterNarrativeIntent,
+  type DiscussFocusKind,
   type SynopsisConversationListResult,
   type SynopsisConversationMessage,
   type SynopsisConversationSendResult,
@@ -26,6 +27,10 @@ import { synopsisDiscussArtifactSchema } from "@worldseed/prompt-contracts"
 import { defaultProjectSettings } from "@worldseed/config"
 
 import {
+  ContextWindowManager,
+  estimateModelMessageTokens,
+} from "../context/index.js"
+import {
   assembleSynopsisPlaceholderDocument,
   assertUniqueVolumeSequence,
   DEFAULT_VOLUME_FOLDER_NAME,
@@ -38,12 +43,22 @@ import {
   formatChapterSequenceLabel,
   digest,
   pickPreferredVolumeFolderName,
+  parseChapterSequenceFromLabel,
+  parseOutlineMarkdownPath,
+  parseSynopsisMarkdownPath,
   parseSynopsisTitleFromLabel,
   remapPathVolumeFolder,
   siblingPlanningMarkdownPath,
+  isChapterBodyMarkdownPath,
+  isOutlineMarkdownPath,
+  isSynopsisMarkdownPath,
   validateSynopsisMarkdownPath,
   validateVolumeFolderName,
   assertWorkspaceMutationAllowed,
+  assertWorkDescriptionWriteBatch,
+  isAutoDescriptionSelection,
+  listDescriptionRuleFiles,
+  listWorkDescriptionRuleFiles,
 } from "../../core/index.js"
 import type { GoalProposalPayload } from "@worldseed/contracts"
 import type { AIModelPort, PromptResourcePort, TurnReadEvidence, TurnRetrievalGap } from "../turns/ports/ai-model-port.js"
@@ -61,6 +76,10 @@ import { ChapterTemporalSourceResolver } from "./chapter-temporal-source-resolve
 import type { SqliteSynopsisConversationRepository } from "../../infrastructure/sqlite/repositories/sqlite-synopsis-conversation-repository.js"
 import { runtimeLog } from "../../infrastructure/diagnostics/index.js"
 import { synopsisConversationStreamHub } from "./synopsis-conversation-stream-hub.js"
+import {
+  computeDiscussBootstrapDigest,
+  toVisibleDiscussContextMessages,
+} from "./discuss-session-context.js"
 import {
   clearSynopsisSendCancellation,
   isSynopsisSendCancelled,
@@ -81,6 +100,7 @@ import {
   executeSynopsisWorkspaceReads,
   formatSynopsisSearchLabel,
   isPresentationRuleMarkdownPath,
+  listUserRuleMarkdownPaths,
 } from "./synopsis-workspace-reads.js"
 import {
   executeSynopsisTemporalReads,
@@ -135,6 +155,8 @@ export type SynopsisConversationServiceDependencies = Readonly<{
 }>
 
 export class SynopsisConversationService {
+  private readonly contextWindow = new ContextWindowManager()
+
   public constructor(private readonly dependencies: SynopsisConversationServiceDependencies) {}
 
   public async list(input: Readonly<{
@@ -214,6 +236,106 @@ export class SynopsisConversationService {
     }
   }
 
+  public async setFocus(input: Readonly<{
+    projectId: ProjectId
+    workspaceRootRef: string
+    chapterSequence?: number
+    relativePath?: string
+    focusKind?: DiscussFocusKind
+  }>): Promise<SynopsisConversationStartResult> {
+    const chapterSequence = this.resolveFocusChapterSequence(input)
+    const session = await this.ensureActiveSession(input.projectId, input.workspaceRootRef)
+    const focusKind = input.focusKind
+      ?? this.resolveFocusKindFromPath(input.relativePath)
+      ?? session.focusKind
+      ?? "plot_synopsis"
+    if (session.chapterSequence === chapterSequence && session.focusKind === focusKind) {
+      const usage = await this.hydrateDiscussUsage(input.projectId)
+      const messages = await this.dependencies.conversation.listMessagesForProject(input.projectId)
+      const reconciled = await this.reconcileSessionSynopsisPath(input.workspaceRootRef, session)
+      return {
+        session: reconciled,
+        messages: [...messages],
+        ...(usage === undefined ? {} : { usage }),
+      }
+    }
+    if (session.chapterSequence === chapterSequence) {
+      await this.dependencies.conversation.updateSession({
+        sessionId: session.sessionId,
+        focusKind,
+        updatedAtMs: this.dependencies.now(),
+      })
+      const usage = await this.hydrateDiscussUsage(input.projectId)
+      const messages = await this.dependencies.conversation.listMessagesForProject(input.projectId)
+      const focused = await this.dependencies.conversation.findSession(session.sessionId)
+      const reconciled = await this.reconcileSessionSynopsisPath(
+        input.workspaceRootRef,
+        focused ?? { ...session, focusKind },
+      )
+      return {
+        session: reconciled,
+        messages: [...messages],
+        ...(usage === undefined ? {} : { usage }),
+      }
+    }
+    const claimed = await this.findExistingSynopsisForSequence(input.workspaceRootRef, chapterSequence)
+    const existingVolumes = await this.dependencies.workspace.listVolumeFolderNames(input.workspaceRootRef)
+    const preferredVolume = extractVolumeFolderNameFromPath(claimed?.path ?? session.synopsisPath)
+      ?? pickPreferredVolumeFolderName(existingVolumes)
+      ?? DEFAULT_VOLUME_FOLDER_NAME
+    const title = claimed?.title?.trim()
+      || ""
+    const synopsisPath = claimed?.path
+      ?? deriveSynopsisMarkdownPath(
+        chapterSequence,
+        title,
+        preferredVolume,
+      )
+    if (claimed === undefined) {
+      const placeholder = assembleSynopsisPlaceholderDocument(chapterSequence, title)
+      await this.dependencies.workspace.saveSynopsisMarkdown(input.workspaceRootRef, synopsisPath, placeholder)
+    }
+    const nowMs = this.dependencies.now()
+    await this.dependencies.conversation.updateSession({
+      sessionId: session.sessionId,
+      chapterSequence,
+      synopsisPath,
+      title: title.length === 0 ? formatChapterSequenceLabel(chapterSequence) : title,
+      focusKind,
+      lastAgentDigest: null,
+      lastOutlineAgentDigest: null,
+      synopsisConfirmedAtMs: null,
+      updatedAtMs: nowMs,
+    })
+    await this.dependencies.conversation.saveDiscussContextDigests({
+      sessionId: session.sessionId,
+      synopsisDigest: null,
+      outlineDigest: null,
+      bootstrapDigest: null,
+      updatedAtMs: nowMs,
+    })
+    runtimeLog("debug", "synopsis-conversation", "set_focus", {
+      projectId: input.projectId,
+      sessionId: session.sessionId,
+      fromSequence: session.chapterSequence,
+      chapterSequence,
+      focusKind,
+      synopsisPath,
+    })
+    const usage = await this.hydrateDiscussUsage(input.projectId)
+    const messages = await this.dependencies.conversation.listMessagesForProject(input.projectId)
+    const focused = await this.dependencies.conversation.findSession(session.sessionId)
+    const reconciled = await this.reconcileSessionSynopsisPath(
+      input.workspaceRootRef,
+      focused ?? { ...session, chapterSequence, synopsisPath, focusKind },
+    )
+    return {
+      session: reconciled,
+      messages: [...messages],
+      ...(usage === undefined ? {} : { usage }),
+    }
+  }
+
   public peekStream(projectId: ProjectId, sessionId?: string): SynopsisConversationStreamSnapshot {
     const snapshot = synopsisConversationStreamHub.peek(projectId, sessionId)
     const budgetAdvisory = peekSynopsisModelBudgetAdvisory(projectId)
@@ -253,7 +375,6 @@ export class SynopsisConversationService {
     const streamStartedAtMs = this.dependencies.now()
     synopsisConversationStreamHub.begin(input.projectId, session.sessionId, streamStartedAtMs)
     try {
-      const priorMessages = await this.dependencies.conversation.listMessages(session.sessionId)
       const synopsisMarkdown = await this.readSynopsisFile(input.workspaceRootRef, session.synopsisPath)
       const synopsisDigest = digest(synopsisMarkdown)
       const userEditedSinceAgent = session.lastAgentDigest !== undefined && session.lastAgentDigest !== synopsisDigest
@@ -265,6 +386,11 @@ export class SynopsisConversationService {
         )
       const outlineMarkdown = await this.readSynopsisFile(input.workspaceRootRef, outlinePathForRead)
       const outlineDigest = outlineMarkdown.trim().length === 0 ? undefined : digest(outlineMarkdown)
+      const chapterBodyMarkdown = await this.readFocusedCommittedBody(
+        input.projectId,
+        input.workspaceRootRef,
+        session.chapterSequence,
+      )
       const userEditedOutlineSinceAgent = session.lastOutlineAgentDigest !== undefined
         && outlineDigest !== undefined
         && session.lastOutlineAgentDigest !== outlineDigest
@@ -313,15 +439,12 @@ export class SynopsisConversationService {
         chapterSequence: session.chapterSequence,
         synopsisMarkdown,
         outlineMarkdown,
+        ...(chapterBodyMarkdown === undefined ? {} : { chapterBodyMarkdown }),
         ...(outlineDigest === undefined ? {} : { outlineDigest }),
         userEditedSinceAgent,
         userEditedOutlineSinceAgent,
         synopsisConfirmed,
         ...(currentWorkDisplayName === undefined ? {} : { currentWorkDisplayName }),
-        conversationHistory: priorMessages.map((message) => ({
-          role: message.role === "assistant" ? "assistant" as const : "user" as const,
-          content: message.content,
-        })),
         activeGoals,
         chapterProgress,
         model: input.model,
@@ -835,6 +958,7 @@ export class SynopsisConversationService {
       : await this.dependencies.conversation.findSession(input.sessionId)
     if (session !== undefined && session.projectId === input.projectId) {
       await this.dependencies.conversation.deleteLastVisibleUserTurn(session.sessionId)
+      await this.dependencies.conversation.deleteLastDiscussContextTurn(session.sessionId)
     }
     synopsisConversationStreamHub.fail(input.projectId, "用户停止对话", this.dependencies.now())
     synopsisConversationStreamHub.clear(input.projectId)
@@ -898,6 +1022,11 @@ export class SynopsisConversationService {
       )
     const outlineMarkdown = await this.readSynopsisFile(input.workspaceRootRef, outlinePathForRefresh)
     const outlineDigest = outlineMarkdown.trim().length === 0 ? undefined : digest(outlineMarkdown)
+    const chapterBodyMarkdown = await this.readFocusedCommittedBody(
+      input.projectId,
+      input.workspaceRootRef,
+      session.chapterSequence,
+    )
     const userEditedOutlineSinceAgent = session.lastOutlineAgentDigest !== undefined
       && outlineDigest !== undefined
       && session.lastOutlineAgentDigest !== outlineDigest
@@ -910,14 +1039,11 @@ export class SynopsisConversationService {
       chapterSequence: session.chapterSequence,
       synopsisMarkdown,
       outlineMarkdown,
+      ...(chapterBodyMarkdown === undefined ? {} : { chapterBodyMarkdown }),
       ...(outlineDigest === undefined ? {} : { outlineDigest }),
       userEditedSinceAgent,
       userEditedOutlineSinceAgent,
       synopsisConfirmed: session.synopsisConfirmedAtMs !== undefined,
-      conversationHistory: priorMessages.map((message) => ({
-        role: message.role === "assistant" ? "assistant" as const : "user" as const,
-        content: message.content,
-      })),
       activeGoals,
       chapterProgress,
       model: input.model,
@@ -1164,12 +1290,12 @@ export class SynopsisConversationService {
     chapterSequence: number
     synopsisMarkdown: string
     outlineMarkdown: string
+    chapterBodyMarkdown?: string
     outlineDigest?: string
     userEditedSinceAgent: boolean
     userEditedOutlineSinceAgent: boolean
     currentWorkDisplayName?: string
     synopsisConfirmed?: boolean
-    conversationHistory: readonly Readonly<{ role: "user" | "assistant"; content: string }>[]
     activeGoals: readonly DeductionGoal[]
     chapterProgress: readonly Readonly<{ goalId: string; chapterSequence: number; summary: string; status: "planned" | "achieved" | "partial" | "missed" | "superseded" }>[]
     model: AIModelPort
@@ -1261,12 +1387,36 @@ export class SynopsisConversationService {
       workspaceRootRef: input.workspaceRootRef,
       chapterSequence: input.chapterSequence,
     })
-    let readEvidence: TurnReadEvidence[] = [...await this.bootstrapSynopsisEvidence({
-      projectId: input.projectId,
-      workspaceRootRef: input.workspaceRootRef,
+    const storedDigests = await this.dependencies.conversation.readDiscussContextDigests(input.sessionId)
+    const bootstrapDigest = computeDiscussBootstrapDigest({
       catalog,
       ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
-    })]
+    })
+    let storedContext = await this.dependencies.conversation.listDiscussContextMessages(input.sessionId)
+    if (storedContext.length === 0) {
+      await this.dependencies.conversation.appendDiscussContextMessages({
+        sessionId: input.sessionId,
+        projectId: input.projectId,
+        createdAtMs: nowMs,
+        messages: [{
+          role: "system",
+          kind: "system_rules",
+          content: systemRules.text,
+        }],
+      })
+      storedContext = [...await this.dependencies.conversation.listDiscussContextMessages(input.sessionId)]
+    }
+    const skipBootstrap = storedDigests.bootstrap === bootstrapDigest
+    let readEvidence: TurnReadEvidence[] = skipBootstrap
+      ? []
+      : [...await this.bootstrapSynopsisEvidence({
+        projectId: input.projectId,
+        workspaceRootRef: input.workspaceRootRef,
+        catalog,
+        ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
+      })]
+    const sendTurnId = this.dependencies.createId()
+    const contextId = this.dependencies.createId()
     let retrievalGaps: TurnRetrievalGap[] = []
     let remainingCalls = maxModelCalls
     let budgetGraceUsed = false
@@ -1324,8 +1474,8 @@ export class SynopsisConversationService {
         envelopeId: this.dependencies.createId(),
         projectId: input.projectId,
         taskId: input.sessionId,
-        turnId: this.dependencies.createId(),
-        contextId: this.dependencies.createId(),
+        turnId: sendTurnId,
+        contextId,
         scopeId: input.sessionId,
         phase: "synopsis_discuss",
         protocolVersion: PROTOCOL_VERSION,
@@ -1354,6 +1504,7 @@ export class SynopsisConversationService {
             chapterSequence: input.chapterSequence,
             synopsisMarkdown: input.synopsisMarkdown,
             outlineMarkdown: input.outlineMarkdown,
+            ...(input.chapterBodyMarkdown === undefined ? {} : { chapterBodyMarkdown: input.chapterBodyMarkdown }),
             ...(input.outlineDigest === undefined ? {} : { outlineDigest: input.outlineDigest }),
             userEditedSinceAgent: input.userEditedSinceAgent,
             userEditedOutlineSinceAgent: input.userEditedOutlineSinceAgent,
@@ -1361,7 +1512,6 @@ export class SynopsisConversationService {
             ...(input.currentWorkDisplayName === undefined
               ? {}
               : { currentWorkDisplayName: input.currentWorkDisplayName }),
-            conversationHistory: input.conversationHistory,
             activeGoals: input.activeGoals.map((goal) => ({
               goalId: goal.goalId,
               content: goal.content,
@@ -1387,18 +1537,35 @@ export class SynopsisConversationService {
           },
         },
       })
+      storedContext = [...await this.dependencies.conversation.listDiscussContextMessages(input.sessionId)]
+      const compaction = this.contextWindow.plan({
+        messages: storedContext,
+        currentTurnId: sendTurnId,
+        contextWindowTokens: input.model.info?.contextWindowTokens ?? 64_000,
+        triggerRatio: settings?.execution.contextCompactionThresholdRatio
+          ?? defaultProjectSettings.execution.contextCompactionThresholdRatio,
+        targetRatio: settings?.execution.contextCompressionTargetRatio
+          ?? defaultProjectSettings.execution.contextCompressionTargetRatio,
+        incomingTokenEstimate: estimateModelMessageTokens(input.userMessage),
+      })
+      if (compaction.blocked) {
+        throw new SynopsisInvalidStateError(
+          compaction.reason ?? "创作台会话链超过模型上下文窗口，请新开会话后再试。",
+        )
+      }
+      if (compaction.hiddenMessageIds.length > 0) {
+        await this.dependencies.conversation.hideDiscussContextMessages(
+          input.sessionId,
+          compaction.hiddenMessageIds,
+          this.dependencies.now(),
+        )
+      }
       const contextMessages = [
-        {
-          messageId: this.dependencies.createId(),
-          sequence: 0,
-          role: "system" as const,
-          kind: "system_rules" as const,
-          content: systemRules.text,
-        },
+        ...toVisibleDiscussContextMessages(compaction.visibleMessages),
         ...(attempt > 0 || readEvidence.length > 0
           ? [{
               messageId: this.dependencies.createId(),
-              sequence: 1,
+              sequence: compaction.visibleMessages.length,
               role: "system" as const,
               kind: "system_rules" as const,
               content: [
@@ -1420,6 +1587,11 @@ export class SynopsisConversationService {
         execution = await input.model.execute(request, {
           phasePrompt,
           forceThinking: true,
+          contextChainId: input.sessionId,
+          onSchemaRepair: () => {
+            streamedContent = ""
+            synopsisConversationStreamHub.beginSchemaRepair(input.projectId, this.dependencies.now())
+          },
           onPartial: (partial) => {
             const stamp = this.dependencies.now()
             if (partial.reasoningDelta !== undefined) {
@@ -1470,6 +1642,24 @@ export class SynopsisConversationService {
           )
         }
         throw error
+      }
+      if (execution.contextExchange !== undefined) {
+        await this.dependencies.conversation.appendDiscussContextMessages({
+          sessionId: input.sessionId,
+          projectId: input.projectId,
+          createdAtMs: this.dependencies.now(),
+          messages: [
+            ...execution.contextExchange.requestMessages,
+            execution.contextExchange.responseMessage,
+          ],
+        })
+        await this.dependencies.conversation.saveDiscussContextDigests({
+          sessionId: input.sessionId,
+          synopsisDigest: digest(input.synopsisMarkdown),
+          outlineDigest: input.outlineDigest ?? null,
+          bootstrapDigest,
+          updatedAtMs: this.dependencies.now(),
+        })
       }
       remainingCalls = Math.max(0, remainingCalls - Math.max(1, execution.usage.modelCalls ?? 1))
       synopsisConversationStreamHub.addUsage(input.projectId, {
@@ -1791,24 +1981,36 @@ export class SynopsisConversationService {
     }>
   }>): Promise<readonly TurnReadEvidence[]> {
     const bootstrapPaths = ["设定集/readme.md", "参考文件/readme.md"]
+    const autoDescription = isAutoDescriptionSelection(input.presentation?.descriptionRulePath)
+    const descriptionPaths = autoDescription
+      ? listDescriptionRuleFiles(input.catalog.entries).map((entry) => entry.relativePath)
+      : [input.presentation?.descriptionRulePath?.trim() ?? ""]
+        .filter((path): path is string => path.length > 0 && isPresentationRuleMarkdownPath(path))
+    const prosePath = input.presentation?.proseStyleRulePath?.trim()
     const presentationPaths = [
-      input.presentation?.descriptionRulePath,
-      input.presentation?.proseStyleRulePath,
+      ...descriptionPaths,
+      ...(prosePath !== undefined && prosePath.length > 0 && isPresentationRuleMarkdownPath(prosePath)
+        ? [prosePath]
+        : []),
     ]
-      .map((path) => path?.trim())
-      .filter((path): path is string => path !== undefined && path.length > 0 && isPresentationRuleMarkdownPath(path))
+    const overlayPaths = listWorkDescriptionRuleFiles(input.catalog.entries).map((entry) => entry.relativePath)
+    const userRulePaths = listUserRuleMarkdownPaths(input.catalog.entries)
+    const bootstrapCap = bootstrapPaths.length
+      + presentationPaths.length
+      + overlayPaths.length
+      + userRulePaths.length
     const bootstrapRequest = {
       requestId: this.dependencies.createId(),
-      reason: "Bootstrap settings, reference indexes, and selected presentation rules for synopsis discuss",
-      expectedEvidence: "设定集/参考索引与本轮描写笔风规则",
+      reason: "Bootstrap settings, reference indexes, user rules, and selected presentation rules for synopsis discuss",
+      expectedEvidence: "设定集/参考索引、用户规则与本轮描写笔风规则",
       query: {
-        exactKeys: [...bootstrapPaths, ...presentationPaths],
-        semanticTexts: ["设定集索引", "参考文件索引", ...presentationPaths],
+        exactKeys: [...bootstrapPaths, ...presentationPaths, ...overlayPaths, ...userRulePaths],
+        semanticTexts: ["设定集索引", "参考文件索引", ...presentationPaths, ...overlayPaths, ...userRulePaths],
         anchorIds: [] as string[],
         directions: ["both" as const],
-        maxCandidates: 8,
+        maxCandidates: bootstrapCap,
         maxDepth: 1,
-        sourceKinds: presentationPaths.length === 0
+        sourceKinds: presentationPaths.length + overlayPaths.length + userRulePaths.length === 0
           ? ["reference" as const]
           : ["reference" as const, "rule" as const],
       },
@@ -1827,7 +2029,7 @@ export class SynopsisConversationService {
         requests: [bootstrapRequest],
         existingEvidence: [],
         createId: this.dependencies.createId,
-        maxCandidates: 8,
+        maxCandidates: bootstrapCap,
         maxRequestsPerRound: 1,
         allowWorkspaceChapterReads: false,
       })
@@ -1863,13 +2065,17 @@ export class SynopsisConversationService {
       mode: "create" | "update"
     }>[]
   }>): Promise<void> {
+    const inventory = (await this.dependencies.workspace.validate(input.workspaceRootRef)).inventory
+    try {
+      assertWorkDescriptionWriteBatch({
+        existingPaths: inventory.filter((entry) => entry.kind === "file").map((entry) => entry.path),
+        writes: input.writes,
+      })
+    } catch (error) {
+      throw new SynopsisInvalidStateError(error instanceof Error ? error.message : String(error))
+    }
     for (const write of input.writes) {
       const path = write.relativePath.trim().replace(/\\/gu, "/")
-      if (!isPresentationRuleMarkdownPath(path)) {
-        throw new SynopsisInvalidStateError(
-          `表现规则写入路径非法（仅允许 表现输出/描写规则|笔风规则/*.md）：${write.relativePath}`,
-        )
-      }
       assertWorkspaceMutationAllowed(path, "file", "user")
       await this.dependencies.workspace.saveUserMarkdown(
         input.workspaceRootRef,
@@ -1952,6 +2158,34 @@ export class SynopsisConversationService {
     return writtenPaths
   }
 
+  private resolveFocusChapterSequence(input: Readonly<{
+    chapterSequence?: number
+    relativePath?: string
+  }>): number {
+    if (input.chapterSequence !== undefined) return input.chapterSequence
+    const relativePath = input.relativePath?.replaceAll("\\", "/")
+    if (relativePath === undefined || relativePath.length === 0) {
+      throw new SynopsisInvalidStateError("setFocus requires chapterSequence or relativePath")
+    }
+    const synopsis = parseSynopsisMarkdownPath(relativePath)
+    if (synopsis?.sequence !== undefined) return synopsis.sequence
+    const outline = parseOutlineMarkdownPath(relativePath)
+    if (outline?.sequence !== undefined) return outline.sequence
+    const filename = relativePath.slice(relativePath.lastIndexOf("/") + 1).replace(/\.md$/u, "")
+    const sequence = parseChapterSequenceFromLabel(filename)
+    if (sequence !== undefined) return sequence
+    throw new SynopsisInvalidStateError(`无法从路径解析章序号：${relativePath}`)
+  }
+
+  private resolveFocusKindFromPath(relativePath: string | undefined): DiscussFocusKind | undefined {
+    if (relativePath === undefined || relativePath.length === 0) return undefined
+    const normalized = relativePath.replaceAll("\\", "/")
+    if (isSynopsisMarkdownPath(normalized)) return "plot_synopsis"
+    if (isOutlineMarkdownPath(normalized)) return "plot_outline"
+    if (isChapterBodyMarkdownPath(normalized)) return "chapter_body"
+    return undefined
+  }
+
   private async findExistingSynopsisForSequence(
     workspaceRootRef: string,
     chapterSequence: number,
@@ -1993,9 +2227,16 @@ export class SynopsisConversationService {
       content: formatTurnHandoffSystemMessage(input.brief),
       createdAtMs: nowMs,
     })
-    if (input.runAutoAnalysis === false) return
+    if (input.runAutoAnalysis === false) {
+      await this.setFocus({
+        projectId: input.projectId,
+        workspaceRootRef: input.workspaceRootRef,
+        chapterSequence: input.brief.chapterSequence + 1,
+        focusKind: "plot_synopsis",
+      })
+      return
+    }
 
-    const priorMessages = await this.dependencies.conversation.listMessagesForProject(input.projectId)
     const synopsisMarkdown = await this.readSynopsisFile(input.workspaceRootRef, session.synopsisPath)
     const outlinePathForHandoff = siblingPlanningMarkdownPath(session.synopsisPath, "outline")
       ?? deriveOutlineMarkdownPath(
@@ -2005,6 +2246,11 @@ export class SynopsisConversationService {
       )
     const outlineMarkdown = await this.readSynopsisFile(input.workspaceRootRef, outlinePathForHandoff)
     const outlineDigest = outlineMarkdown.trim().length === 0 ? undefined : digest(outlineMarkdown)
+    const chapterBodyMarkdown = await this.readFocusedCommittedBody(
+      input.projectId,
+      input.workspaceRootRef,
+      session.chapterSequence,
+    )
     const userEditedOutlineSinceAgent = session.lastOutlineAgentDigest !== undefined
       && outlineDigest !== undefined
       && session.lastOutlineAgentDigest !== outlineDigest
@@ -2027,14 +2273,11 @@ export class SynopsisConversationService {
       chapterSequence: session.chapterSequence,
       synopsisMarkdown,
       outlineMarkdown,
+      ...(chapterBodyMarkdown === undefined ? {} : { chapterBodyMarkdown }),
       ...(outlineDigest === undefined ? {} : { outlineDigest }),
       userEditedSinceAgent: false,
       userEditedOutlineSinceAgent,
       synopsisConfirmed: session.synopsisConfirmedAtMs !== undefined,
-      conversationHistory: priorMessages.map((message) => ({
-        role: message.role === "assistant" ? "assistant" as const : "user" as const,
-        content: message.content,
-      })),
       activeGoals,
       chapterProgress,
       model: input.model,
@@ -2083,6 +2326,12 @@ export class SynopsisConversationService {
       ...(assist.reasoningContent === undefined ? {} : { reasoningContent: assist.reasoningContent }),
       ...(assist.choices === undefined ? {} : { choices: assist.choices }),
       createdAtMs: this.dependencies.now(),
+    })
+    await this.setFocus({
+      projectId: input.projectId,
+      workspaceRootRef: input.workspaceRootRef,
+      chapterSequence: input.brief.chapterSequence + 1,
+      focusKind: "plot_synopsis",
     })
   }
 
@@ -2202,6 +2451,33 @@ export class SynopsisConversationService {
       return await this.dependencies.workspace.readMarkdown(workspaceRootRef, synopsisPath)
     } catch {
       return ""
+    }
+  }
+
+  private async readFocusedCommittedBody(
+    projectId: ProjectId,
+    workspaceRootRef: string,
+    sequence: number,
+  ): Promise<string | undefined> {
+    const indexed = await this.dependencies.chapterIndex.findBySequence(projectId, sequence)
+    if (indexed === undefined) return undefined
+    const version = await this.dependencies.documents.findStoredVersion(projectId, indexed.currentSourceId)
+    if (version !== undefined) {
+      try {
+        const content = await this.dependencies.internalStore.readDocument(version.contentRef)
+        if (content.trim().length > 0) return content
+      } catch {
+        // Fall through to the published workspace file the user can already open.
+      }
+    }
+    try {
+      const published = await this.dependencies.workspace.readMarkdown(
+        workspaceRootRef,
+        indexed.currentPublishPath,
+      )
+      return published.trim().length === 0 ? undefined : published
+    } catch {
+      return undefined
     }
   }
 
@@ -2644,4 +2920,5 @@ export function isConfirmSynopsisUserMessage(message: string): boolean {
     || /确认(?:本章)?梗概/u.test(text)
     || /开始写细纲/u.test(text)
     || /确认梗概[，,]?\s*开始写细纲/u.test(text)
+    || /按(?:照)?(?:这份)?梗概重写(?:整个)?细纲/u.test(text)
 }

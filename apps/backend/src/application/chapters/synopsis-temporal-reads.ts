@@ -46,8 +46,13 @@ export function formatTemporalSearchLabel(request: ReadRequest): string {
 export function validateTemporalChapterSequence(input: Readonly<{
   asOfChapterSequence: number
   sessionChapterSequence: number
+  purpose?: "as_of_chapter" | "past_chapter_text"
 }>): boolean {
-  return input.asOfChapterSequence >= 1 && input.asOfChapterSequence < input.sessionChapterSequence
+  if (input.asOfChapterSequence < 1) return false
+  if (input.purpose === "past_chapter_text") {
+    return input.asOfChapterSequence <= input.sessionChapterSequence
+  }
+  return input.asOfChapterSequence < input.sessionChapterSequence
 }
 
 function clampText(text: string, maxChars: number): string {
@@ -80,6 +85,7 @@ export async function executeSynopsisTemporalReads(input: Readonly<{
     if (!validateTemporalChapterSequence({
       asOfChapterSequence: asOfN,
       sessionChapterSequence: input.sessionChapterSequence,
+      ...(purpose === "past_chapter_text" || purpose === "as_of_chapter" ? { purpose } : {}),
     })) {
       continue
     }

@@ -60,7 +60,7 @@ describe("arc planning continuity and handoff", () => {
 
   it("claims an existing prebuilt synopsis file instead of overwriting", async () => {
     await withHarness(async (harness) => {
-      const prebuilt = "章节正文/第一章 预建航线 [剧情梗概].md"
+      const prebuilt = "章节正文/第一卷 待命名/第一章 预建航线 [剧情梗概].md"
       const absolute = join(harness.workspaceRootRef, prebuilt)
       mkdirSync(dirname(absolute), { recursive: true })
       writeFileSync(absolute, "# 第一章 预建航线 剧情梗概\n\n预建正文不得被覆盖。\n", "utf8")
@@ -123,23 +123,38 @@ describe("arc planning continuity and handoff", () => {
       expect(readFileSync(join(harness.workspaceRootRef, ARC_PLAN_STAGING_PATH), "utf8")).toContain("保留我")
 
       const listed = await invoke<{
-        session?: { chapterSequence: number }
+        session?: { sessionId: string; chapterSequence: number }
         messages: Array<{ role: string; content: string }>
       }>(harness, "synopsis.conversation.list", {
         projectId: harness.projectId,
         workspaceRootRef: harness.workspaceRootRef,
       })
+      expect(listed.session?.sessionId).toBe(started.session.sessionId)
+      expect(listed.session?.chapterSequence).toBe(started.session.chapterSequence)
       expect(listed.messages.some((message) => message.role === "user")).toBe(true)
 
       const next = await invoke<{
-        session: { chapterSequence: number }
+        session: { sessionId: string; chapterSequence: number }
         messages: Array<{ role: string }>
       }>(harness, "synopsis.conversation.start", {
         projectId: harness.projectId,
         workspaceRootRef: harness.workspaceRootRef,
       })
-      expect(next.session.chapterSequence).toBe(started.session.chapterSequence + 1)
+      expect(next.session.sessionId).toBe(started.session.sessionId)
+      expect(next.session.chapterSequence).toBe(started.session.chapterSequence)
       expect(next.messages.some((message) => message.role === "user")).toBe(true)
+
+      const focused = await invoke<{
+        session: { sessionId: string; chapterSequence: number }
+        messages: Array<{ role: string }>
+      }>(harness, "synopsis.conversation.setFocus", {
+        projectId: harness.projectId,
+        workspaceRootRef: harness.workspaceRootRef,
+        chapterSequence: started.session.chapterSequence + 1,
+      })
+      expect(focused.session.sessionId).toBe(started.session.sessionId)
+      expect(focused.session.chapterSequence).toBe(started.session.chapterSequence + 1)
+      expect(focused.messages.some((message) => message.role === "user")).toBe(true)
     })
   })
 
@@ -168,6 +183,7 @@ describe("arc planning continuity and handoff", () => {
       })
 
       const listed = await invoke<{
+        session?: { chapterSequence: number; focusKind?: string }
         messages: Array<{ role: string; content: string; choices?: Array<{ action: string }> }>
       }>(harness, "synopsis.conversation.list", {
         projectId: harness.projectId,
@@ -179,6 +195,8 @@ describe("arc planning continuity and handoff", () => {
       expect(listed.messages.some((message) => (
         message.role === "assistant" && message.content.includes("不会自动开始正式推演")
       ))).toBe(true)
+      expect(listed.session?.chapterSequence).toBe(2)
+      expect(listed.session?.focusKind).toBe("plot_synopsis")
       const assistant = listed.messages.find((message) => message.role === "assistant")
       expect(assistant?.choices?.some((choice) => choice.action === "start_turn")).toBeFalsy()
       expect(existsSync(join(harness.workspaceRootRef, ARC_PLAN_STAGING_PATH))).toBe(true)
