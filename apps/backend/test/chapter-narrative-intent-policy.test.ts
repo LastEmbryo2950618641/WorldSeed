@@ -51,7 +51,11 @@ describe("chapter narrative intent policy", () => {
     }, "synopsis_discuss")
     expect(locked).toContain("近景跟随.md")
     expect(locked).toContain("本轮锁定")
+    expect(locked).toContain("感官描写.md")
+    expect(locked).toContain("去AI味.md")
     expect(locked).not.toContain("描写：自动")
+    expect(appendix).toContain("感官描写.md")
+    expect(appendix).toContain("去AI味.md")
     expect(chapterPresentationPhaseAppendix({
       minimumWordCount: 2000,
       maximumWordCount: 3000,

@@ -9,6 +9,7 @@ import {
   type ModelListResult,
   type ModelProfileDraft,
   type ProjectSettings,
+  type RevisionDraftVersion,
   type RuntimeMetricsSnapshot,
 } from "@worldseed/contracts"
 import { defaultProjectSettings } from "@worldseed/config"
@@ -569,6 +570,18 @@ let demoChapter: ChapterSummary = {
 }
 let demoChapterContent = demoMarkdownByPath[demoChapter.publishPath] ?? "# 第一章 雨夜来信\n\n暂无正文。"
 let demoChapterRevision: ChapterRevisionReadResult | undefined
+let demoDraftVersions: RevisionDraftVersion[] = []
+
+function demoDraftList(revisionTaskId: string): { revisionTaskId: string; versions: RevisionDraftVersion[] } {
+  return {
+    revisionTaskId,
+    versions: demoDraftVersions.map((version, index, all) => ({
+      ...version,
+      label: `v${String(index)}`,
+      isLatest: index === all.length - 1,
+    })),
+  }
+}
 
 const demoPhaseUsage = [
   { phase: "interpret", inputTokens: 1_100, outputTokens: 250, cacheHitInputTokens: 700, cacheMissInputTokens: 400 },
@@ -742,7 +755,75 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
         proposedContent: content,
         proposedBody: body,
       }
+      demoDraftVersions = [{
+        versionId: "11111111-1111-4111-8111-111111111201",
+        projectId: demoChapterRevision.projectId,
+        revisionTaskId: demoChapterRevision.revisionTaskId,
+        source: "baseline",
+        label: "v0",
+        heading,
+        body,
+        bodyDigest: "demo-draft-baseline",
+        createdAtMs: now,
+        isLatest: true,
+      }]
       return structuredClone(demoChapterRevision)
+    }
+    case "chapter.revision.draftVersion.list": {
+      const revisionTaskId = typeof payload === "object" && payload !== null && "revisionTaskId" in payload
+        ? String(payload.revisionTaskId)
+        : demoChapterRevision?.revisionTaskId
+      if (revisionTaskId === undefined) return { revisionTaskId: "demo-revision-1", versions: [] }
+      return demoDraftList(revisionTaskId)
+    }
+    case "chapter.revision.draftVersion.append": {
+      if (demoChapterRevision === undefined) throw new Error("Browser demo has no active chapter revision")
+      const heading = typeof payload === "object" && payload !== null && "heading" in payload ? String(payload.heading) : demoChapterRevision.heading
+      const body = typeof payload === "object" && payload !== null && "body" in payload ? String(payload.body) : demoChapterRevision.proposedBody
+      const source = typeof payload === "object" && payload !== null && "source" in payload
+        ? String(payload.source)
+        : "manual"
+      const parent = demoDraftVersions.at(-1)
+      const createdAtMs = Date.now()
+      demoDraftVersions = [...demoDraftVersions, {
+        versionId: crypto.randomUUID(),
+        projectId: demoChapterRevision.projectId,
+        revisionTaskId: demoChapterRevision.revisionTaskId,
+        ...(parent === undefined ? {} : { parentVersionId: parent.versionId }),
+        source: source === "agent" || source === "rollback" || source === "baseline" ? source : "manual",
+        label: `v${String(demoDraftVersions.length)}`,
+        heading,
+        body,
+        bodyDigest: `demo-draft-${String(createdAtMs)}`,
+        createdAtMs,
+        isLatest: true,
+      }]
+      return structuredClone(demoDraftList(demoChapterRevision.revisionTaskId).versions.at(-1))
+    }
+    case "chapter.revision.draftVersion.restore": {
+      if (demoChapterRevision === undefined) throw new Error("Browser demo has no active chapter revision")
+      const versionId = typeof payload === "object" && payload !== null && "versionId" in payload
+        ? String(payload.versionId)
+        : undefined
+      const source = demoDraftVersions.find((version) => version.versionId === versionId)
+      if (source === undefined) throw new Error("Browser demo draft version not found")
+      const parent = demoDraftVersions.at(-1)
+      const createdAtMs = Date.now()
+      const restored: RevisionDraftVersion = {
+        versionId: crypto.randomUUID(),
+        projectId: demoChapterRevision.projectId,
+        revisionTaskId: demoChapterRevision.revisionTaskId,
+        ...(parent === undefined ? {} : { parentVersionId: parent.versionId }),
+        source: "rollback",
+        label: `v${String(demoDraftVersions.length)}`,
+        heading: source.heading,
+        body: source.body,
+        bodyDigest: `demo-draft-restore-${String(createdAtMs)}`,
+        createdAtMs,
+        isLatest: true,
+      }
+      demoDraftVersions = [...demoDraftVersions, restored]
+      return structuredClone(restored)
     }
     case "chapter.updateRevision": {
       if (demoChapterRevision === undefined) throw new Error("Browser demo has no active chapter revision")

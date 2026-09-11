@@ -6,7 +6,6 @@ export const FICTION_DELIVERY_PHASES = Object.freeze([
   "interpret",
   "emergence_planning",
   "draft",
-  "revision_assist",
   "synopsis_discuss",
 ] as const)
 
@@ -96,11 +95,6 @@ function collectPhaseProse(phase: FictionDeliveryPhase, artifact: unknown): read
   switch (phase) {
     case "draft":
       return stringField(record, "contentMarkdown")
-    case "revision_assist":
-      return [
-        ...stringField(record, "proposedBody"),
-        ...stringField(record, "assistantMessage"),
-      ]
     case "synopsis_discuss":
       return [
         ...stringField(record, "assistantMessage"),

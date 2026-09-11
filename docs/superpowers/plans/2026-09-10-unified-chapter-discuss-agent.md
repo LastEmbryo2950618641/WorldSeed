@@ -17,7 +17,9 @@
 - 描写「自动」= inject all description presets.
 - Do not add 享受/自愿 regex.
 - One active discuss session per project; changing chapter updates focus, not session id.
-- Confirm-gated draft append; no renderer auto-`conversation.apply`.
+- Auto-append draft on discuss body edit; confirm only `promote_draft_to_body` → `submitRevision`.
+- Chapter-file rail send is focus-locked (`focusLocked` + `lockedChapterSequence`); ignore `set_focus`.
+- No renderer auto-`conversation.apply` via `revision_assist`.
 - Do not delete `revision_assist` until rail is on discuss and tests pass.
 
 ---
@@ -54,18 +56,18 @@
 - [x] App: opening 正文/梗概/细纲 calls setFocus
 - [x] Test: start ch1, setFocus(2), same sessionId, send still lists prior messages
 
-## Task 3: Confirm-gated draft proposal on discuss
+## Task 3: Auto-append draft proposal on discuss
 
-- [ ] Artifact + choice actions per spec
-- [ ] Confirm IPC applies proposal to focus chapter revision (create revision if needed)
-- [ ] `send` does not write proposedBody
-- [ ] Tests: unconfirmed send leaves body/draft; confirm from body creates draft; confirm from vK parents vK
+- [ ] Artifact `chapterDraftProposal` + choice `promote_draft_to_body`
+- [ ] `send` with proposal: ensure revision, append draft, official file unchanged
+- [ ] `send` without proposal does not append
+- [ ] Tests: body unchanged + new draft; second send parents previous; locked sequence pins chapter
 
 ## Task 4: Right rail uses discuss session
 
 - [ ] `ChapterWorkspaceRail` renders compact discuss UI with same messages/choices
-- [ ] Remove `sendChapterConversation` auto-apply
-- [ ] Keep paper-plane submit / review
+- [ ] Send via `synopsis.conversation.send` with `focusLocked` + `lockedChapterSequence`
+- [ ] Hide/ignore `set_focus`; keep paper-plane submit / review
 
 ## Task 5: 正文 version picker
 
@@ -75,5 +77,5 @@
 
 ## Task 6: Remove revision_assist
 
-- [ ] Delete service, IPC, prompt, composer, tests listed in spec §10
+- [x] Delete service, IPC, prompt, composer, tests listed in spec §10
 - [ ] Drop `revision_conversation_messages` in a later migration

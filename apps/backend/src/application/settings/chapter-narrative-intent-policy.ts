@@ -2,8 +2,10 @@ import type { AIPhase, ChapterNarrativeIntent } from "@worldseed/contracts"
 
 import {
   AUTO_DESCRIPTION_RULE_PATH,
+  DEAI_DESCRIPTION_RULE_PATH,
   DESCRIPTION_RULES_DIR,
   isAutoDescriptionSelection,
+  SENSORY_DESCRIPTION_RULE_PATH,
 } from "../../core/workspace/work-description-rules.js"
 
 export const DEFAULT_CHAPTER_NARRATIVE_INTENT: ChapterNarrativeIntent = {
@@ -64,13 +66,14 @@ export function chapterPresentationPhaseAppendix(
       "",
       "### 描写：自动",
       `- 已注入 \`${DESCRIPTION_RULES_DIR}/\` 下全部 Markdown；以 \`${AUTO_DESCRIPTION_RULE_PATH}\` 调度，同一章可按场面切换其他场面卡；`,
-      "- 用户若下拉锁定某一描写文件，则只注入该文件，整章遵守，不得再切换。",
+      `- \`${SENSORY_DESCRIPTION_RULE_PATH}\` 与 \`${DEAI_DESCRIPTION_RULE_PATH}\` 为**始终生效**基线（感官时机 / 去AI味），不是可切换场面卡；`,
+      "- 用户若下拉锁定某一描写文件，则注入该文件 + 上述基线，整章遵守该场面卡，不得再切换其他场面卡。",
     )
   } else {
     lines.push(
       "",
       `### 描写规则路径：\`${presentation.descriptionRulePath}\``,
-      "- 本轮锁定该文件，整章遵守，不得改用同目录其他描写规则。",
+      `- 本轮锁定该场面卡，并始终附带 \`${SENSORY_DESCRIPTION_RULE_PATH}\` 与 \`${DEAI_DESCRIPTION_RULE_PATH}\`；不得改用同目录其他场面卡。`,
     )
   }
   if (presentation.proseStyleRulePath !== undefined && presentation.proseStyleRulePath.length > 0) {

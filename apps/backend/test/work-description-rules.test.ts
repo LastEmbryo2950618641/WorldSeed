@@ -4,6 +4,7 @@ import {
   AUTO_DESCRIPTION_RULE_PATH,
   assertWorkDescriptionCharLimit,
   assertWorkDescriptionWriteBatch,
+  DEAI_DESCRIPTION_RULE_PATH,
   formatDescriptionRuleEvidence,
   formatWorkDescriptionRuleEvidence,
   isAutoDescriptionSelection,
@@ -13,6 +14,7 @@ import {
   listDescriptionRuleFiles,
   listWorkDescriptionRuleFiles,
   resolveDescriptionRulePaths,
+  SENSORY_DESCRIPTION_RULE_PATH,
   WORK_DESCRIPTION_MAX_CHARS,
   WORK_DESCRIPTION_MAX_FILES,
   WORK_DESCRIPTION_RULES_DIR,
@@ -69,10 +71,12 @@ describe("work description overlay rules", () => {
     })).toThrow(/写入后将达到/)
   })
 
-  it("injects every description rule in auto mode and only the locked file otherwise", () => {
+  it("injects every description rule in auto mode and always keeps sensory and de-AI baselines when locked", () => {
     const catalog = [
       { relativePath: "表现输出/描写规则/近景跟随.md", entryKind: "file" },
       { relativePath: AUTO_DESCRIPTION_RULE_PATH, entryKind: "file" },
+      { relativePath: SENSORY_DESCRIPTION_RULE_PATH, entryKind: "file" },
+      { relativePath: DEAI_DESCRIPTION_RULE_PATH, entryKind: "file" },
       { relativePath: "表现输出/描写规则/过场白描.md", entryKind: "file" },
       { relativePath: "表现输出/笔风规则/默认笔风规则.md", entryKind: "file" },
     ]
@@ -83,19 +87,33 @@ describe("work description overlay rules", () => {
     expect(isDescriptionRuleMarkdownPath(AUTO_DESCRIPTION_RULE_PATH)).toBe(true)
     expect(listDescriptionRuleFiles(catalog).map((entry) => entry.relativePath)).toEqual([
       AUTO_DESCRIPTION_RULE_PATH,
+      SENSORY_DESCRIPTION_RULE_PATH,
+      DEAI_DESCRIPTION_RULE_PATH,
       "表现输出/描写规则/过场白描.md",
       "表现输出/描写规则/近景跟随.md",
     ])
     expect(resolveDescriptionRulePaths(undefined, catalog)).toEqual([
       AUTO_DESCRIPTION_RULE_PATH,
+      SENSORY_DESCRIPTION_RULE_PATH,
+      DEAI_DESCRIPTION_RULE_PATH,
       "表现输出/描写规则/过场白描.md",
       "表现输出/描写规则/近景跟随.md",
     ])
     expect(resolveDescriptionRulePaths("表现输出/描写规则/近景跟随.md", catalog)).toEqual([
+      SENSORY_DESCRIPTION_RULE_PATH,
+      DEAI_DESCRIPTION_RULE_PATH,
       "表现输出/描写规则/近景跟随.md",
+    ])
+    expect(resolveDescriptionRulePaths(SENSORY_DESCRIPTION_RULE_PATH, catalog)).toEqual([
+      SENSORY_DESCRIPTION_RULE_PATH,
+      DEAI_DESCRIPTION_RULE_PATH,
     ])
     expect(formatDescriptionRuleEvidence(AUTO_DESCRIPTION_RULE_PATH, "# 自动\n", true))
       .toContain("【描写·自动调度】")
+    expect(formatDescriptionRuleEvidence(SENSORY_DESCRIPTION_RULE_PATH, "# 感官\n", true))
+      .toContain("【描写·感官基线·本轮始终生效】")
+    expect(formatDescriptionRuleEvidence(DEAI_DESCRIPTION_RULE_PATH, "# 去AI味\n", false))
+      .toContain("【描写·去AI味基线·本轮始终生效】")
     expect(formatDescriptionRuleEvidence("表现输出/描写规则/近景跟随.md", "# 近景\n", true))
       .toContain("【描写场面卡】")
     expect(formatDescriptionRuleEvidence("表现输出/描写规则/近景跟随.md", "# 近景\n", false))

@@ -164,7 +164,7 @@
 
 - 默认推荐 **`titleAlignTarget: "body"`**（正式正文已落盘时以正文为准）；
 - 仅当用户明确要以规划标题覆盖正文时用 `"planning"`；
-- 修订助手改标题用 `proposedHeading`（正文侧）；讨论侧修复分叉用 `titleAlignTarget`，二者勿混用场景。
+- 讨论侧修复标题分叉用 `titleAlignTarget`，不要把规划标题和正式正文标题混用。
 
 ## 7. 语气与篇幅
 

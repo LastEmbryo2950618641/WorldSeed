@@ -50,9 +50,6 @@ import {
   chapterDraftVersionReadPayloadSchema,
   chapterDraftVersionAppendPayloadSchema,
   chapterDraftVersionRestorePayloadSchema,
-  chapterRevisionConversationApplyPayloadSchema,
-  chapterRevisionConversationListPayloadSchema,
-  chapterRevisionConversationSendPayloadSchema,
   synopsisConversationStartPayloadSchema,
   synopsisConversationListPayloadSchema,
   synopsisConversationSetFocusPayloadSchema,
@@ -540,7 +537,9 @@ export class BackendFacade {
       case "chapter.revision.draftVersion.list": {
         const payload = chapterDraftVersionListPayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
-        return runtime.createChapterRevisionService().listDraftVersions(payload.revisionTaskId)
+        return runtime.createChapterRevisionService().listDraftVersions(payload.revisionTaskId, {
+          ...(payload.includeChapterHistory === undefined ? {} : { includeChapterHistory: payload.includeChapterHistory }),
+        })
       }
       case "chapter.revision.draftVersion.read": {
         const payload = chapterDraftVersionReadPayloadSchema.parse(request.payload)
@@ -563,29 +562,6 @@ export class BackendFacade {
         const payload = chapterDraftVersionRestorePayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
         return runtime.createChapterRevisionService().restoreDraftVersion(payload.revisionTaskId, payload.versionId)
-      }
-      case "chapter.revision.conversation.list": {
-        const payload = chapterRevisionConversationListPayloadSchema.parse(request.payload)
-        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
-        return runtime.createChapterRevisionConversationService().list(payload.projectId, payload.chapterId)
-      }
-      case "chapter.revision.conversation.send": {
-        const payload = chapterRevisionConversationSendPayloadSchema.parse(request.payload)
-        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
-        return runtime.createChapterRevisionConversationService().send({
-          projectId: payload.projectId,
-          workspaceRootRef: payload.workspaceRootRef,
-          chapterId: payload.chapterId,
-          message: payload.message,
-          model: this.resolveModel(payload.model),
-          ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
-          ...(payload.deadlineMs === undefined ? {} : { deadlineMs: payload.deadlineMs }),
-        })
-      }
-      case "chapter.revision.conversation.apply": {
-        const payload = chapterRevisionConversationApplyPayloadSchema.parse(request.payload)
-        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
-        return runtime.createChapterRevisionConversationService().apply(payload)
       }
       case "synopsis.conversation.start": {
         const payload = synopsisConversationStartPayloadSchema.parse(request.payload)
@@ -627,6 +603,11 @@ export class BackendFacade {
           ...(payload.chapterIntent === undefined ? {} : { chapterIntent: payload.chapterIntent }),
           ...(payload.maxModelCalls === undefined ? {} : { maxModelCalls: payload.maxModelCalls }),
           ...(payload.deadlineMs === undefined ? {} : { deadlineMs: payload.deadlineMs }),
+          ...(payload.focusLocked === undefined ? {} : { focusLocked: payload.focusLocked }),
+          ...(payload.lockedChapterSequence === undefined
+            ? {}
+            : { lockedChapterSequence: payload.lockedChapterSequence }),
+          ...(payload.lockedFocusKind === undefined ? {} : { lockedFocusKind: payload.lockedFocusKind }),
         })
       }
       case "synopsis.conversation.refreshChoices": {

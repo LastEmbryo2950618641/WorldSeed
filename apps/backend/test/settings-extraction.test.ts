@@ -147,7 +147,7 @@ describe("settings extraction", () => {
     })
   })
 
-  it("pauses a turn at settings extraction when the fake fixture emits proposals", { timeout: 120_000 }, async () => {
+  it("completes a turn without pausing at settings extraction", { timeout: 120_000 }, async () => {
     process.env.WORLDSEED_FAKE_SETTINGS_EXTRACTION = "1"
     await withHarness(async (harness) => {
       const handle = await invoke<{ taskId: string }>(harness, "turn.start", {
@@ -162,9 +162,7 @@ describe("settings extraction", () => {
         if (snapshot.status === "waiting_for_review" || snapshot.status === "completed" || snapshot.status === "failed") break
         await new Promise((resolve) => setTimeout(resolve, 250))
       }
-      expect(snapshot?.status).toBe("waiting_for_review")
-      expect(snapshot?.lastPhase).toBe("settings_extraction")
-      expect(snapshot?.interruption?.kind).toBe("settings_extraction_review")
+      expect(snapshot?.status).toBe("completed")
     })
   })
 })

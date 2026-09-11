@@ -72,11 +72,16 @@ export class SqliteScopeCommitRepository implements ScopeCommitRepository {
         .select(["committed_sequence", "active_generation"])
         .where("id", "=", scope.project_id)
         .executeTakeFirstOrThrow()
-      if (project.committed_sequence !== scope.base_committed_sequence) {
-        throw new Error(`Scope was created from stale committed sequence: ${scopeId}`)
-      }
       if (project.active_generation !== scope.base_generation) {
         throw new Error(`Scope was created from stale active generation: ${scopeId}`)
+      }
+      if (project.committed_sequence !== scope.base_committed_sequence) {
+        if (!(await canRebaseRevisionContentScope(transaction, scope))) {
+          throw new Error(`Scope was created from stale committed sequence: ${scopeId}`)
+        }
+        await transaction.updateTable("artifact_scopes").set({
+          base_committed_sequence: project.committed_sequence,
+        }).where("id", "=", scopeId).execute()
       }
 
       await promoteNodeHeads(transaction, scope.project_id, scopeId)
@@ -155,6 +160,24 @@ export class SqliteScopeCommitRepository implements ScopeCommitRepository {
         .executeTakeFirstOrThrow()
     })
   }
+}
+
+async function canRebaseRevisionContentScope(
+  transaction: ProjectTransaction,
+  scope: Readonly<{ id: string; task_id: string; reason: string }>,
+): Promise<boolean> {
+  if (scope.reason !== "chapter_revision_content") return false
+  const task = await transaction.selectFrom("tasks")
+    .select("kind")
+    .where("id", "=", scope.task_id)
+    .executeTakeFirst()
+  if (task?.kind !== "revision") return false
+  const [pendingNode, pendingLink, pendingGraphRevision] = await Promise.all([
+    transaction.selectFrom("nodes").select("id").where("scope_id", "=", scope.id).limit(1).executeTakeFirst(),
+    transaction.selectFrom("links").select("id").where("scope_id", "=", scope.id).limit(1).executeTakeFirst(),
+    transaction.selectFrom("graph_revisions").select("id").where("scope_id", "=", scope.id).limit(1).executeTakeFirst(),
+  ])
+  return pendingNode === undefined && pendingLink === undefined && pendingGraphRevision === undefined
 }
 
 async function promoteNodeHeads(transaction: ProjectTransaction, projectId: string, scopeId: ScopeId): Promise<void> {

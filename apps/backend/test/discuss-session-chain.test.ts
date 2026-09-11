@@ -7,6 +7,7 @@ import { PROTOCOL_VERSION } from "@worldseed/contracts"
 import { afterEach, describe, expect, it } from "vitest"
 
 import {
+  collectDiscussReadEvidenceFromContext,
   FakeAiModelAdapter,
   MODEL_CONTEXT_DELTA_HEADER,
   SqliteProjectRepository,
@@ -187,6 +188,67 @@ async function invoke<T>(
   if (!response.ok) throw new Error(JSON.stringify(response.error))
   return response.data as T
 }
+
+describe("collectDiscussReadEvidenceFromContext", () => {
+  it("collects unique readEvidence objects from JSON discuss context messages", () => {
+    const evidence = collectDiscussReadEvidenceFromContext([{
+      messageId: "m1",
+      sequence: 0,
+      role: "assistant",
+      kind: "phase_result",
+      content: JSON.stringify({
+        input: {
+          readEvidence: [{
+            readId: "evidence_1",
+            visibility: "committed",
+            ownerKind: "workspace",
+            ownerId: "设定集/readme.md",
+            exactKeys: ["readme"],
+            semanticText: "设定集索引",
+            sourceRefs: [],
+            digest: "d1",
+          }],
+        },
+      }),
+    }, {
+      messageId: "m2",
+      sequence: 1,
+      role: "assistant",
+      kind: "phase_result",
+      content: JSON.stringify({
+        nested: {
+          readEvidence: [{
+            readId: "evidence_1",
+            visibility: "committed",
+            ownerKind: "workspace",
+            ownerId: "设定集/readme.md",
+            exactKeys: ["readme"],
+            semanticText: "设定集索引",
+            sourceRefs: [],
+            digest: "d1",
+          }, {
+            readId: "evidence_2",
+            visibility: "pending",
+            ownerKind: "node",
+            ownerId: "node_1",
+            exactKeys: ["钥匙"],
+            semanticText: "旧铜钥匙",
+            sourceRefs: [],
+            digest: "d2",
+          }],
+        },
+      }),
+    }, {
+      messageId: "m3",
+      sequence: 2,
+      role: "user",
+      kind: "phase_request",
+      content: "not json",
+    }])
+
+    expect(evidence.map((item) => item.readId)).toEqual(["evidence_1", "evidence_2"])
+  })
+})
 
 describe("discuss session chain store", () => {
   it("stores visible discuss context messages per session without touching model_context_chains", async () => {

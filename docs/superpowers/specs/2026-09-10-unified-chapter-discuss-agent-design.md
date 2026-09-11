@@ -1,10 +1,10 @@
 # 统一章节讨论 Agent（创作台 + 右栏）
 
-> **状态：** 已确认（2026-09-10）  
+> **状态：** 已确认（2026-09-10；同日修订：改正文自动落草稿）  
 > **范围：** 创作台讨论与右栏「Agent 对话」合并为同一 Agent；草稿版本落库；正式正文仅用户提交后变更。  
 > **关联：** [剧情梗概讨论](./2026-08-27-plot-synopsis-discussion-design.md) · [草稿版本](./2026-08-26-chapter-draft-versions-design.md) · [章节修改协同](../../chapter-modification-coordination.md) · [正文修订与用户最高权限](../../chapter-revision-and-user-authority.md) · [暂存区](./2026-08-30-synopsis-staging-area-design.md)
 
-本文 **取代** 2026-08-27 §2「讨论 / 修订两个 Agent」的分工，以及 2026-08-26 中「`revision_assist` send 自动落稿、主路径仍走 `conversation.apply`」的 Agent 入口描述。草稿 **数据模型**（append-only 版本表、不入正式链）仍以 2026-08-26 为准，落盘时机改为 **用户确认后追加**。
+本文 **取代** 2026-08-27 §2「讨论 / 修订两个 Agent」的分工，以及 2026-08-26 中「主路径仍走 `conversation.apply`」的 Agent 入口描述。草稿 **数据模型**（append-only 版本表、不入正式链）仍以 2026-08-26 为准。**改正文**：Agent 产出完整修订正文后 **当轮自动追加草稿**（无需用户确认）；覆盖 `章节正文/*.md` 仍须用户确认后走 `submitRevision`。
 
 ---
 
@@ -12,7 +12,7 @@
 
 作者在创作台或右栏与 **同一个 Agent** 连续讨论全书：写完第 1 章再聊第 2 章时，**接着同一条会话**，不新开聊天。改草稿时若涉及设定，走已有设定暂存 / 落盘，不要第二套设定协议。
 
-Agent **不能改正式正文文件**。所谓「修改正文」= 以当前正式正文为底，确认后写入 **新草稿**；磁盘上的 `章节正文/第N章….md` 不变。草稿成为正式正文，只走用户确认后的 `submitRevision`（旧 `sourceId` 留作正文备份链）。
+Agent **不能改正式正文文件**。所谓「修改正文」= 以当前正式正文（或最新草稿）为底，**当轮自动写入新草稿**；磁盘上的 `章节正文/第N章….md` 不变。草稿成为正式正文，只走用户确认后的 `submitRevision`（旧 `sourceId` 留作正文备份链，界面列为正文旧版本）。
 
 ---
 
@@ -25,9 +25,10 @@ Agent **不能改正式正文文件**。所谓「修改正文」= 以当前正�
 | 焦点 | **创作台**：输入框上方那条就是当前焦点（可搜索/下拉选章）。显示第 N 章则只允许改第 N 章。Agent 若要换章，必须出确认 choice，用户点了才 `setFocus`。正文推演完毕后焦点自动进下一章。**打开某章文件（右栏入口）**：焦点锁定为该章，Agent 不能提议换章。 |
 | 打开文件钮 | 创作台焦点条右侧仍为「打开…文件」：焦点在梗概/细纲/正文时分别打开对应文件。 |
 | 两处 UI | 创作台中央 = 完整时间线；右栏 = 同一会话的紧凑视图。发送都走 `synopsis.conversation.send`。 |
-| 改正文 | 确认后：正文只读副本 → 新草稿版本。正式文件不动。 |
-| 改已有草稿 | 未指定则最新草稿为父；指定版本号则以该版为父。确认后 **追加** 新草稿，不改写旧节点。 |
+| 改正文 | **自动**：正文只读副本 → 新草稿版本。正式文件不动。禁止改写成「修订清单」再推用户去修订助手。 |
+| 改已有草稿 | 未指定则最新草稿为父；指定版本号则以该版为父。**自动追加** 新草稿，不改写旧节点。 |
 | 覆盖为正文 | 用户确认后 `submitRevision`。Agent 禁止 `replacePublishedChapter`。 |
+| 章节文件右栏入口 | 与创作台同一 Agent、同一会话、同一改正文流程。**焦点锁定为本文件所属章**，忽略 `set_focus`；send 须带 `focusLocked` + `lockedChapterSequence`。 |
 | 设定集 | 复用 `stagingPromote` + 用户点落盘。不在右栏另做一套。 |
 | 正式推演链 | 讨论仍不写入 `model_context_chains` UNIQUE。 |
 | `revision_assist` 删除时机 | **最后**：草稿入库、右栏改接讨论并验收后再删。 |
@@ -69,14 +70,12 @@ Agent **不能改正式正文文件**。所谓「修改正文」= 以当前正�
 | `暂存区/` | 维持自动 `stagingDelta` | — |
 | `设定集/` | 禁止 | `promote_staging` |
 | 正式 `章节正文/第N章….md` | **禁止** | 仅 `submitRevision` / `chapter_publisher` |
-| 修订工作稿 / 草稿版本 | **禁止静默写入** | choices：修改正文为新草稿 / 修改草稿(vN)为新草稿 |
+| 修订工作稿 / 草稿版本 | **自动追加**（`chapterDraftProposal` 或等价完整修订正文） | — |
 | 恢复某次正文为当前正式版 | 禁止 | 确认后 `submitRevision`（append 新 head，内容=旧版；不拨回旧 sourceId 指针） |
 
-确认钮文案（创作台正式输出下与右栏同一组 choices）：
+确认钮文案（创作台正式输出下与右栏同一组 choices；草稿入库不再出确认钮）：
 
-- 无草稿：`是否确认修改正文为新草稿`
-- 有草稿：`是否确认修改草稿(vN)为新草稿`
-- 覆盖正式章：`是否确认用草稿(vN)覆盖正文（将备份为正文 vM）`
+- 覆盖正式章：`是否确认用草稿(vN)覆盖正文（当前正文将备份为旧版本）`
 - 恢复正文：`是否确认恢复正文(vM)为当前正文`
 
 工作区政策不变：非规划章路径仅 `chapter_publisher` 可写。
@@ -91,26 +90,23 @@ Agent **不能改正式正文文件**。所谓「修改正文」= 以当前正�
 
 ```text
 choices.action:
-  propose_draft_from_body
-  propose_draft_from_draft    // 缺省最新；可带 draftVersionLabel
   promote_draft_to_body
   restore_body_version
-  set_focus                   // 仅创作台渲染；须带 chapterSequence；点确认才换焦点
+  set_focus                   // 仅创作台渲染；须带 chapterSequence；点确认才换焦点。章节右栏入口禁止出现。
 
 artifact.chapterDraftProposal?: {
   base: "body" | "draft"
   baseDraftVersionId?: string
   heading: string
   body: string
-  bodyDigest: string
 }
 ```
 
-点确认前 **不** 调用 `updateRevision`、**不** 追加 `revision_draft_versions`。  
-点确认：renderer 调专用 IPC（对齐 `start_turn` / `promote_staging`），不要再 `onSend(按钮文案)` 当唯一通道。
+`send` 若带 `chapterDraftProposal`：**立即** `ensureRevision` + `appendDraftVersion`（source=agent），并给 `promote_draft_to_body`。正式 `.md` 仍不动。  
+点「覆盖正文」：renderer 调 `submitRevision`（对齐 `start_turn` / `promote_staging`），不要 `onSend(按钮文案)` 当唯一通道。
 
-预发布焦点（尚无正式正文）：禁止 `propose_draft_from_body` / `promote_draft_to_body`；允许梗概细纲、暂存、设定、`start_turn`。  
-已发布焦点：禁止 Agent 自行 `start_turn` 覆盖本章；草稿提案针对焦点章。
+预发布焦点（尚无正式正文）：禁止 `chapterDraftProposal` / `promote_draft_to_body`；允许梗概细纲、暂存、设定、`start_turn`。  
+已发布焦点：禁止 Agent 自行 `start_turn` 覆盖本章；草稿针对 **本轮有效焦点章**（创作台=session 焦点；章节右栏=`lockedChapterSequence`）。
 
 `bodyEdits` 保持 `target: "outline"`。若扩展，只允许 `target: "draft"`，禁止 `"chapter"` 打正式文件。
 
@@ -197,8 +193,8 @@ message_id?, heading, content_ref, body_digest, created_at_ms
 
 1. `revision_draft_versions` + list/append/restore API；`startRevision` 打 baseline；UI 下拉改读后端。
 2. 焦点 API：打开章路径时 `setFocus(sequence)`；send 的规划读写用焦点，不新建 session。
-3. `synopsis_discuss` 草稿提案 + choices；点确认才 append。
-4. 右栏改接 `synopsis.conversation.*`；去掉自动 apply。
+3. `synopsis_discuss` 改正文自动 append 草稿 + `promote_draft_to_body` 确认覆盖。
+4. 右栏改接 `synopsis.conversation.*`（`focusLocked`）；去掉 `revision_assist` 发送。
 5. 正文 vN 列表与恢复确认。
 6. 删除 `revision_assist` 栈。
 
@@ -208,9 +204,10 @@ message_id?, heading, content_ref, body_digest, created_at_ms
 
 - 创作台发一条、右栏可见同一条；反之亦然。
 - 推演第 1 章后再聊第 2 章：同一 `sessionId`，消息连续；焦点变为 2。
-- 无草稿时确认「修改正文为新草稿」：正式 `.md` digest 不变；草稿 v1 出现。
-- 指定草稿 vK 确认后：vK 仍在，latest 为新节点。
-- `send` 成功且用户未点草稿确认：`proposedBody` 与正式正文均不变。
-- 覆盖正文：新 `sourceId`，旧版可列为正文 vN-1。
+- 讨论要求改正文：正式 `.md` digest 不变；草稿 v1（或下一版）自动出现；给出覆盖正文确认钮。
+- 再改一次：旧草稿仍在，latest 为新节点。
+- `send` 未带 `chapterDraftProposal`：不追加草稿。
+- 覆盖正文：新 `sourceId`，旧版可列为正文备份。
+- 章节右栏 send 带 `lockedChapterSequence=N`：草稿打在第 N 章；`set_focus` 不出现、不生效。
 - 讨论 `send` 不向 `model_context_messages` 追加。
 - 描写「自动」仍为注入全部场面卡。

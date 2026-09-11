@@ -82,6 +82,30 @@ export class SqliteChapterRevisionRepository implements ChapterRevisionRepositor
     return row === undefined ? undefined : this.map(row)
   }
 
+  public async findLatestForChapter(
+    projectId: ProjectId,
+    chapterId: string,
+    exceptTaskId?: string,
+  ): Promise<StoredChapterRevision | undefined> {
+    let query = this.database.selectFrom("chapter_revision_tasks").selectAll()
+      .where("project_id", "=", projectId)
+      .where("chapter_id", "=", chapterId)
+      .where("status", "not in", ["retired", "failed"])
+    if (exceptTaskId !== undefined) query = query.where("id", "!=", exceptTaskId)
+    const row = await query.orderBy("updated_at", "desc").executeTakeFirst()
+    return row === undefined ? undefined : this.map(row)
+  }
+
+  public async listForChapter(projectId: ProjectId, chapterId: string): Promise<readonly StoredChapterRevision[]> {
+    const rows = await this.database.selectFrom("chapter_revision_tasks").selectAll()
+      .where("project_id", "=", projectId)
+      .where("chapter_id", "=", chapterId)
+      .where("status", "not in", ["retired", "failed"])
+      .orderBy("created_at", "asc")
+      .execute()
+    return Promise.all(rows.map((row) => this.map(row)))
+  }
+
   public async hasIncompleteGraphSync(projectId: ProjectId): Promise<boolean> {
     const row = await this.database.selectFrom("chapter_revision_tasks").select("id")
       .where("project_id", "=", projectId)

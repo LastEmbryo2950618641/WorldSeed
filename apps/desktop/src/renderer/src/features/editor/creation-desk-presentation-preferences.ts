@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useState } from "react"
 import type { ChapterNarrativeIntent } from "@worldseed/contracts"
 
 export type CreationDeskPresentationPreferences = Readonly<{
@@ -24,6 +24,15 @@ export const DEFAULT_CREATION_DESK_PRESENTATION: CreationDeskPresentationPrefere
   causalityFocus: "auto",
 }
 
+/** Keep the saved path until the dropdown options have actually loaded. */
+export function reconcileSelectedRulePath(
+  selected: string,
+  available: readonly string[],
+): string | undefined {
+  if (selected.length === 0 || available.length === 0) return undefined
+  return available.includes(selected) ? undefined : ""
+}
+
 export function useCreationDeskPresentationPreferences(
   projectId: string | undefined,
 ): readonly [
@@ -33,10 +42,11 @@ export function useCreationDeskPresentationPreferences(
   const [preferences, setPreferences] = useState<CreationDeskPresentationPreferences>(
     () => loadCreationDeskPresentationPreferences(projectId),
   )
-
-  useEffect(() => {
+  const [loadedProjectId, setLoadedProjectId] = useState(projectId)
+  if (loadedProjectId !== projectId) {
+    setLoadedProjectId(projectId)
     setPreferences(loadCreationDeskPresentationPreferences(projectId))
-  }, [projectId])
+  }
 
   const update = useCallback((patch: Partial<CreationDeskPresentationPreferences>): void => {
     setPreferences((current) => {
@@ -66,12 +76,10 @@ export function loadCreationDeskPresentationPreferences(
     return {
       descriptionRule: typeof parsed.descriptionRule === "string" ? parsed.descriptionRule : "",
       proseRule: typeof parsed.proseRule === "string" ? parsed.proseRule : "",
-      minimumWordCount: isPositiveIntString(parsed.minimumWordCount)
-        ? parsed.minimumWordCount
-        : DEFAULT_CREATION_DESK_PRESENTATION.minimumWordCount,
-      maximumWordCount: isPositiveIntString(parsed.maximumWordCount)
-        ? parsed.maximumWordCount
-        : DEFAULT_CREATION_DESK_PRESENTATION.maximumWordCount,
+      minimumWordCount: wordCountString(parsed.minimumWordCount)
+        ?? DEFAULT_CREATION_DESK_PRESENTATION.minimumWordCount,
+      maximumWordCount: wordCountString(parsed.maximumWordCount)
+        ?? DEFAULT_CREATION_DESK_PRESENTATION.maximumWordCount,
       boundaryPace: BOUNDARY_PACE_VALUES.includes(parsed.boundaryPace as typeof BOUNDARY_PACE_VALUES[number])
         ? parsed.boundaryPace as ChapterNarrativeIntent["boundaryPace"]
         : DEFAULT_CREATION_DESK_PRESENTATION.boundaryPace,
@@ -84,8 +92,11 @@ export function loadCreationDeskPresentationPreferences(
   }
 }
 
-function isPositiveIntString(value: unknown): value is string {
-  if (typeof value !== "string" || value.trim().length === 0) return false
+function wordCountString(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    return String(value)
+  }
+  if (typeof value !== "string" || value.trim().length === 0) return undefined
   const parsed = Number(value)
-  return Number.isInteger(parsed) && parsed > 0
+  return Number.isInteger(parsed) && parsed > 0 ? value.trim() : undefined
 }

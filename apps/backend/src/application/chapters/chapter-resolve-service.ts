@@ -55,7 +55,7 @@ export class ChapterResolveService {
     const committed = await this.dependencies.chapters.read(projectId, chapterId)
     const index = await this.dependencies.chapterIndex.find(projectId, chapterId)
       ?? await this.fallbackIndex(projectId, committed)
-    const activeRevision = await this.dependencies.chapters.findActiveRevision(projectId, chapterId)
+    const activeRevision = await this.dependencies.chapters.findDisplayRevision(projectId, chapterId)
     const lineage = await this.buildLineage(projectId, committed.chapterId, committed.sourceId, index.sequence)
     const revisionStale = activeRevision?.review !== undefined
       && activeRevision.review.contentDigest !== activeRevision.contentDigest

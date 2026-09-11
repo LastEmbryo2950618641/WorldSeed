@@ -42,6 +42,8 @@ import {
   extractVolumeFolderNameFromPath,
   formatChapterSequenceLabel,
   digest,
+  assembleChapterDocument,
+  readChapterBody,
   pickPreferredVolumeFolderName,
   parseChapterSequenceFromLabel,
   parseOutlineMarkdownPath,
@@ -56,8 +58,7 @@ import {
   validateVolumeFolderName,
   assertWorkspaceMutationAllowed,
   assertWorkDescriptionWriteBatch,
-  isAutoDescriptionSelection,
-  listDescriptionRuleFiles,
+  resolveDescriptionRulePaths,
   listWorkDescriptionRuleFiles,
 } from "../../core/index.js"
 import type { GoalProposalPayload } from "@worldseed/contracts"
@@ -66,6 +67,7 @@ import type { WorkspacePort, InternalStorePort } from "../workspace/index.js"
 import type { WorkspaceCatalogPort } from "../retrieval/ports/workspace-catalog.js"
 import type { WebResearchPort } from "../retrieval/ports/web-research-port.js"
 import type { ChapterResolveService } from "./chapter-resolve-service.js"
+import type { ChapterRevisionService } from "./chapter-revision-service.js"
 import type { ChapterSynopsisService } from "./chapter-synopsis-service.js"
 import type { DeductionGoalsService } from "./deduction-goals-service.js"
 import type { StagingPromoteService } from "./staging-promote-service.js"
@@ -77,6 +79,7 @@ import type { SqliteSynopsisConversationRepository } from "../../infrastructure/
 import { runtimeLog } from "../../infrastructure/diagnostics/index.js"
 import { synopsisConversationStreamHub } from "./synopsis-conversation-stream-hub.js"
 import {
+  collectDiscussReadEvidenceFromContext,
   computeDiscussBootstrapDigest,
   toVisibleDiscussContextMessages,
 } from "./discuss-session-context.js"
@@ -127,8 +130,16 @@ import {
 
 export class SynopsisInvalidStateError extends Error {}
 
+type ChapterDraftProposal = Readonly<{
+  base: "body" | "draft"
+  baseDraftVersionId?: string
+  heading: string
+  body: string
+}>
+
 export type SynopsisConversationServiceDependencies = Readonly<{
   chapters: ChapterResolveService
+  revisions?: ChapterRevisionService
   chapterSynopsis: ChapterSynopsisService
   conversation: SqliteSynopsisConversationRepository
   goals: DeductionGoalsService
@@ -178,6 +189,13 @@ export class SynopsisConversationService {
       messages: [...messages],
       ...(usage === undefined ? {} : { usage }),
     }
+  }
+
+  public async listInheritedReadEvidence(projectId: ProjectId): Promise<readonly TurnReadEvidence[]> {
+    const session = await this.dependencies.conversation.findActiveSession(projectId)
+    if (session === undefined) return []
+    const messages = await this.dependencies.conversation.listDiscussContextMessages(session.sessionId)
+    return collectDiscussReadEvidenceFromContext(messages)
   }
 
   public async start(input: Readonly<{
@@ -366,7 +384,19 @@ export class SynopsisConversationService {
     }>
     maxModelCalls?: number
     deadlineMs?: number
+    focusLocked?: boolean
+    lockedChapterSequence?: number
+    lockedFocusKind?: DiscussFocusKind
   }>): Promise<SynopsisConversationSendResult> {
+    const focusLocked = input.focusLocked === true
+    if (input.lockedChapterSequence !== undefined) {
+      await this.setFocus({
+        projectId: input.projectId,
+        workspaceRootRef: input.workspaceRootRef,
+        chapterSequence: input.lockedChapterSequence,
+        focusKind: input.lockedFocusKind ?? "chapter_body",
+      })
+    }
     const session = await this.ensureActiveSession(input.projectId, input.workspaceRootRef)
     clearSynopsisSendCancellation(input.projectId)
     await this.hydrateDiscussUsage(input.projectId)
@@ -389,6 +419,10 @@ export class SynopsisConversationService {
       const chapterBodyMarkdown = await this.readFocusedCommittedBody(
         input.projectId,
         input.workspaceRootRef,
+        session.chapterSequence,
+      )
+      const latestDraftMarkdown = await this.readFocusedLatestDraft(
+        input.projectId,
         session.chapterSequence,
       )
       const userEditedOutlineSinceAgent = session.lastOutlineAgentDigest !== undefined
@@ -440,6 +474,9 @@ export class SynopsisConversationService {
         synopsisMarkdown,
         outlineMarkdown,
         ...(chapterBodyMarkdown === undefined ? {} : { chapterBodyMarkdown }),
+        ...(latestDraftMarkdown === undefined ? {} : { latestDraftMarkdown }),
+        focusKind: session.focusKind ?? "plot_synopsis",
+        ...(focusLocked ? { focusLocked: true } : {}),
         ...(outlineDigest === undefined ? {} : { outlineDigest }),
         userEditedSinceAgent,
         userEditedOutlineSinceAgent,
@@ -769,10 +806,23 @@ export class SynopsisConversationService {
         await this.tryRemoveEmptyVolumeDirectory(input.workspaceRootRef, volumeCleanupFolder)
       }
 
+      const assistantMessageId = this.dependencies.createId()
+      const draftApply = await this.applyDiscussChapterDraft({
+        projectId: input.projectId,
+        workspaceRootRef: input.workspaceRootRef,
+        chapterSequence: session.chapterSequence,
+        ...(assist.chapterDraftProposal === undefined ? {} : { proposal: assist.chapterDraftProposal }),
+        messageId: assistantMessageId,
+      })
+      if (draftApply.notice !== undefined) writeNotices.push(draftApply.notice)
+      const persistedChoices = filterDiscussChoices(
+        withPromoteDraftChoice(assist.choices, draftApply.appended?.draftLabel),
+        { focusLocked },
+      )
+
       const assistantContent = writeNotices.length === 0
         ? assist.content
         : `${assist.content}\n\n——\n${writeNotices.join("\n")}`
-      const assistantMessageId = this.dependencies.createId()
       if (isSynopsisSendCancelled(input.projectId)) {
         throw new SynopsisSendCancelledError()
       }
@@ -856,7 +906,7 @@ export class SynopsisConversationService {
         ...(streamPeek.thinkingRounds.length === 0 ? {} : { thinkingRounds: streamPeek.thinkingRounds }),
         ...(streamPeek.searching.length === 0 ? {} : { searching: streamPeek.searching }),
         ...(streamPeek.editing.length === 0 ? {} : { editing: streamPeek.editing }),
-        ...(assist.choices === undefined ? {} : { choices: assist.choices }),
+        ...(persistedChoices === undefined ? {} : { choices: persistedChoices }),
         createdAtMs: nowMs + 1,
       })
       const createdProposals = assist.goalProposals === undefined || assist.goalProposals.length === 0
@@ -927,6 +977,7 @@ export class SynopsisConversationService {
         ...(budgetAdvisory === undefined ? {} : { budgetAdvisory }),
         ...(usage === undefined ? {} : { usage }),
         ...(workDisplayName === undefined ? {} : { workDisplayName }),
+        ...(draftApply.appended === undefined ? {} : { appendedDraft: draftApply.appended }),
       }
     } catch (error) {
       if (error instanceof SynopsisSendCancelledError || isSynopsisSendCancelled(input.projectId)) {
@@ -1291,6 +1342,9 @@ export class SynopsisConversationService {
     synopsisMarkdown: string
     outlineMarkdown: string
     chapterBodyMarkdown?: string
+    latestDraftMarkdown?: string
+    focusKind?: DiscussFocusKind
+    focusLocked?: boolean
     outlineDigest?: string
     userEditedSinceAgent: boolean
     userEditedOutlineSinceAgent: boolean
@@ -1323,6 +1377,7 @@ export class SynopsisConversationService {
       baseDigest?: string
       ops: readonly Readonly<{ oldText: string; newText: string }>[]
     }>
+    chapterDraftProposal?: ChapterDraftProposal
     choices?: SynopsisConversationSendResult["messages"][number]["choices"]
     goalProposals?: readonly Readonly<{ payload: GoalProposalPayload; reason?: string }>[]
     stagingDelta?: Readonly<{
@@ -1505,6 +1560,9 @@ export class SynopsisConversationService {
             synopsisMarkdown: input.synopsisMarkdown,
             outlineMarkdown: input.outlineMarkdown,
             ...(input.chapterBodyMarkdown === undefined ? {} : { chapterBodyMarkdown: input.chapterBodyMarkdown }),
+            ...(input.latestDraftMarkdown === undefined ? {} : { latestDraftMarkdown: input.latestDraftMarkdown }),
+            ...(input.focusKind === undefined ? {} : { focusKind: input.focusKind }),
+            ...(input.focusLocked === true ? { focusLocked: true } : {}),
             ...(input.outlineDigest === undefined ? {} : { outlineDigest: input.outlineDigest }),
             userEditedSinceAgent: input.userEditedSinceAgent,
             userEditedOutlineSinceAgent: input.userEditedOutlineSinceAgent,
@@ -1736,6 +1794,7 @@ export class SynopsisConversationService {
                   ops: artifact.data.bodyEdits.ops,
                 },
               }),
+          ...mapArtifactChapterDraftProposal(artifact.data.chapterDraftProposal),
           ...(artifact.data.choices === undefined ? {} : { choices: artifact.data.choices }),
           ...(artifact.data.stagingDelta === undefined
             ? {}
@@ -1800,6 +1859,7 @@ export class SynopsisConversationService {
                     ops: artifact.data.bodyEdits.ops,
                   },
                 }),
+            ...mapArtifactChapterDraftProposal(artifact.data.chapterDraftProposal),
             ...(artifact.data.choices === undefined ? {} : { choices: artifact.data.choices }),
             ...(artifact.data.stagingDelta === undefined
               ? {}
@@ -1981,11 +2041,10 @@ export class SynopsisConversationService {
     }>
   }>): Promise<readonly TurnReadEvidence[]> {
     const bootstrapPaths = ["设定集/readme.md", "参考文件/readme.md"]
-    const autoDescription = isAutoDescriptionSelection(input.presentation?.descriptionRulePath)
-    const descriptionPaths = autoDescription
-      ? listDescriptionRuleFiles(input.catalog.entries).map((entry) => entry.relativePath)
-      : [input.presentation?.descriptionRulePath?.trim() ?? ""]
-        .filter((path): path is string => path.length > 0 && isPresentationRuleMarkdownPath(path))
+    const descriptionPaths = resolveDescriptionRulePaths(
+      input.presentation?.descriptionRulePath,
+      input.catalog.entries,
+    )
     const prosePath = input.presentation?.proseStyleRulePath?.trim()
     const presentationPaths = [
       ...descriptionPaths,
@@ -2481,6 +2540,107 @@ export class SynopsisConversationService {
     }
   }
 
+  private async readFocusedLatestDraft(
+    projectId: ProjectId,
+    sequence: number,
+  ): Promise<string | undefined> {
+    const revisions = this.dependencies.revisions
+    if (revisions === undefined) return undefined
+    const indexed = await this.dependencies.chapterIndex.findBySequence(projectId, sequence)
+    if (indexed === undefined) return undefined
+    const active = await revisions.findActiveRevision(projectId, indexed.chapterId)
+    if (active === undefined) return undefined
+    const listed = await revisions.listDraftVersions(active.revisionTaskId)
+    const latest = listed.versions.find((version) => version.isLatest) ?? listed.versions.at(-1)
+    if (latest === undefined || latest.body.trim().length === 0) return undefined
+    return assembleChapterDocument(latest.heading, latest.body)
+  }
+
+  private async applyDiscussChapterDraft(input: Readonly<{
+    projectId: ProjectId
+    workspaceRootRef: string
+    chapterSequence: number
+    proposal?: ChapterDraftProposal
+    messageId: string
+  }>): Promise<Readonly<{
+    appended?: NonNullable<SynopsisConversationSendResult["appendedDraft"]>
+    notice?: string
+  }>> {
+    if (input.proposal === undefined) return {}
+    const revisions = this.dependencies.revisions
+    if (revisions === undefined) {
+      return { notice: "本章修订服务不可用，修订正文未写入草稿。" }
+    }
+    const indexed = await this.dependencies.chapterIndex.findBySequence(input.projectId, input.chapterSequence)
+    if (indexed === undefined) {
+      return { notice: "本章尚无正式正文，无法写入修订草稿。" }
+    }
+    const current = await revisions.read(input.projectId, indexed.chapterId)
+    const heading = normalizeDiscussDraftHeading(input.proposal.heading, current.heading)
+    const body = stripHeadingFromDraftBody(heading, input.proposal.body)
+    if (body.trim().length === 0) {
+      return { notice: "修订正文为空，未写入草稿。" }
+    }
+    const active = await revisions.findActiveRevision(input.projectId, indexed.chapterId)
+    const started = active ?? await revisions.start({
+      projectId: input.projectId,
+      workspaceRootRef: input.workspaceRootRef,
+      chapterId: indexed.chapterId,
+      baseSourceId: current.sourceId,
+      heading: current.heading,
+      body: current.body,
+      inputMode: "agent",
+    })
+    const listed = await revisions.listDraftVersions(started.revisionTaskId)
+    const latest = listed.versions.find((version) => version.isLatest) ?? listed.versions.at(-1)
+    if (latest !== undefined && latest.heading === heading && latest.body === body) {
+      this.emitDiscussEdit(input.projectId, {
+        path: indexed.currentPublishPath,
+        kind: "draft",
+        status: "completed",
+        summary: `草稿未变（仍为 ${latest.label}）`,
+      })
+      return {
+        appended: {
+          revisionTaskId: started.revisionTaskId,
+          chapterId: indexed.chapterId,
+          draftVersionId: latest.versionId,
+          draftLabel: latest.label,
+        },
+      }
+    }
+    this.emitDiscussEdit(input.projectId, {
+      path: indexed.currentPublishPath,
+      kind: "draft",
+      status: "running",
+      summary: "正在写入修订草稿",
+    })
+    const stored = await revisions.appendDraftVersion({
+      revisionTaskId: started.revisionTaskId,
+      source: "agent",
+      heading,
+      body,
+      messageId: input.messageId,
+      ...(input.proposal.base === "draft" && input.proposal.baseDraftVersionId !== undefined
+        ? { parentVersionId: input.proposal.baseDraftVersionId }
+        : {}),
+    })
+    this.emitDiscussEdit(input.projectId, {
+      path: indexed.currentPublishPath,
+      kind: "draft",
+      status: "completed",
+      summary: `已写入草稿 ${stored.label}`,
+    })
+    return {
+      appended: {
+        revisionTaskId: stored.revisionTaskId,
+        chapterId: indexed.chapterId,
+        draftVersionId: stored.versionId,
+        draftLabel: stored.label,
+      },
+    }
+  }
+
   private async synopsisFileExists(workspaceRootRef: string, synopsisPath: string): Promise<boolean> {
     const content = await this.readSynopsisFile(workspaceRootRef, synopsisPath)
     return content.length > 0
@@ -2827,6 +2987,7 @@ function finalizeDiscussReturn(
       baseDigest?: string
       ops: readonly Readonly<{ oldText: string; newText: string }>[]
     }>
+    chapterDraftProposal?: ChapterDraftProposal
     choices?: SynopsisConversationSendResult["messages"][number]["choices"]
     goalProposals?: readonly Readonly<{ payload: GoalProposalPayload; reason?: string }>[]
     stagingDelta?: Readonly<{
@@ -2867,6 +3028,7 @@ function finalizeDiscussReturn(
     baseDigest?: string
     ops: readonly Readonly<{ oldText: string; newText: string }>[]
   }>
+  chapterDraftProposal?: ChapterDraftProposal
   choices?: SynopsisConversationSendResult["messages"][number]["choices"]
   goalProposals?: readonly Readonly<{ payload: GoalProposalPayload; reason?: string }>[]
   stagingDelta?: Readonly<{
@@ -2910,6 +3072,59 @@ function buildSynopsisDiscussFallbackReturn(input: Readonly<{
   return input.accumulatedReasoning.length === 0
     ? { content }
     : { content, reasoningContent: input.accumulatedReasoning }
+}
+
+function mapArtifactChapterDraftProposal(
+  proposal: Readonly<{
+    base?: "body" | "draft"
+    baseDraftVersionId?: string | undefined
+    heading: string
+    body: string
+  }> | undefined,
+): { chapterDraftProposal?: ChapterDraftProposal } {
+  if (proposal === undefined) return {}
+  return {
+    chapterDraftProposal: {
+      base: proposal.base ?? "body",
+      heading: proposal.heading,
+      body: proposal.body,
+      ...(proposal.baseDraftVersionId === undefined ? {} : { baseDraftVersionId: proposal.baseDraftVersionId }),
+    },
+  }
+}
+
+function withPromoteDraftChoice(
+  choices: SynopsisConversationChoice[] | undefined,
+  draftLabel: string | undefined,
+): SynopsisConversationChoice[] | undefined {
+  if (draftLabel === undefined) return choices
+  const label = `是否确认用草稿(${draftLabel})覆盖正式正文（当前正文将备份为旧版本）`
+  const rest = (choices ?? []).filter((choice) => choice.action !== "promote_draft_to_body")
+  return [...rest, { label, action: "promote_draft_to_body" }]
+}
+
+function filterDiscussChoices(
+  choices: SynopsisConversationChoice[] | undefined,
+  input: Readonly<{ focusLocked: boolean }>,
+): SynopsisConversationChoice[] | undefined {
+  if (choices === undefined) return undefined
+  const filtered = input.focusLocked
+    ? choices.filter((choice) => choice.action !== "set_focus" && choice.action !== "start_turn")
+    : choices
+  return filtered.length === 0 ? undefined : filtered
+}
+
+function stripHeadingFromDraftBody(heading: string, body: string): string {
+  try {
+    return readChapterBody(heading, body).trim()
+  } catch {
+    return body.replaceAll("\r\n", "\n").trim()
+  }
+}
+
+function normalizeDiscussDraftHeading(proposed: string, fallback: string): string {
+  const trimmed = proposed.trim().replace(/^#+\s*/u, "")
+  return trimmed.length === 0 ? fallback : trimmed
 }
 
 /** User clicked confirm_synopsis or typed an equivalent confirmation. */

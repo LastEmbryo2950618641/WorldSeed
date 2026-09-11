@@ -1059,21 +1059,48 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   min-width: 0;
 }
 .chapter-draft-versions-inline .chapter-draft-versions-label {
-  display: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 .chapter-draft-versions-inline .chapter-draft-version-select {
   flex: 0 1 auto;
-  min-width: 96px;
-  max-width: 148px;
+  min-width: 132px;
+  max-width: 280px;
 }
-.chapter-draft-versions-inline .chapter-draft-version-select select {
+.chapter-draft-versions-inline .chapter-draft-version-trigger {
   height: var(--chapter-header-control-height, 26px);
-  padding: 0 22px 0 8px;
+  padding: 0 18px 0 6px;
   border-radius: 5px;
-  font-size: 10.5px;
+  font-size: 10px;
+  gap: 4px;
 }
 .chapter-draft-versions-inline .chapter-draft-version-select-icon {
-  right: 6px;
+  right: 5px;
+}
+.chapter-draft-versions-inline .chapter-version-title {
+  font-size: 10px;
+  font-weight: 500;
+}
+.chapter-draft-versions-inline .chapter-version-mark {
+  height: 13px;
+  padding: 0 4px;
+  font-size: 9px;
+  border-radius: 3px;
+}
+.chapter-draft-versions-inline .chapter-draft-version-menu {
+  padding: 4px;
+  border-radius: 6px;
+}
+.chapter-draft-versions-inline .chapter-draft-version-menu button {
+  min-height: 22px;
+  padding: 2px 6px;
+  font-size: 10px;
 }
 .chapter-draft-versions-inline .chapter-draft-versions-actions {
   margin-left: 0;
@@ -1174,24 +1201,108 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   min-width: 160px;
   max-width: 320px;
 }
-.chapter-draft-version-select select {
+.chapter-draft-version-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   width: 100%;
   height: 28px;
-  padding: 0 28px 0 10px;
+  padding: 0 22px 0 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
   color: var(--text);
-  font-size: 11px;
-  appearance: none;
+  font-size: 10px;
   cursor: pointer;
   box-sizing: border-box;
+  overflow: hidden;
+}
+.chapter-draft-version-trigger:hover,
+.chapter-draft-version-trigger[aria-expanded="true"] {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
 }
 .chapter-draft-version-select-icon {
   position: absolute;
   right: 8px;
   pointer-events: none;
   color: var(--text-faint);
+}
+.chapter-version-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+.chapter-version-title {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.chapter-version-mark {
+  display: inline-flex;
+  align-items: center;
+  height: 14px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.chapter-version-mark-ordinal {
+  background: var(--accent-soft);
+  color: var(--info);
+}
+.chapter-version-mark-current {
+  background: var(--success-soft);
+  color: var(--success);
+}
+.chapter-version-mark-covered {
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+.chapter-draft-version-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  display: grid;
+  gap: 2px;
+  min-width: 100%;
+  width: max-content;
+  max-width: 360px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-sidebar);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 28%);
+}
+.chapter-draft-version-menu[hidden] {
+  display: none;
+}
+.chapter-draft-version-menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 22px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 10px;
+  cursor: pointer;
+  text-align: left;
+}
+.chapter-draft-version-menu button:hover,
+.chapter-draft-version-menu button.is-selected {
+  background: var(--bg-hover);
 }
 .chapter-draft-version-chip {
   display: inline-flex;
@@ -1552,6 +1663,10 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   align-items: center;
   display: inline-flex;
 }
+.chapter-reader-header-compact .chapter-edit-command {
+  flex: 0 0 auto;
+  height: var(--chapter-header-control-height);
+}
 .chapter-reader-header-compact .chapter-document-switch button {
   height: calc(var(--chapter-header-control-height) - 4px);
   min-width: 48px;
@@ -1601,14 +1716,31 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
   margin-left: 4px; padding-left: 10px; border-left: 1px solid var(--border-subtle);
 }
-.chapter-document-switch { display: inline-flex; gap: 4px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-active); flex: 0 0 auto; }
+.chapter-document-switch {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-input);
+  flex: 0 0 auto;
+}
 .chapter-document-switch button {
   display: inline-flex; align-items: center; gap: 6px; min-width: 68px; height: 28px; padding: 0 10px;
-  border: 0; border-radius: 5px; background: transparent; color: #ffffff; font-size: 11px; cursor: pointer;
+  border: 0; border-radius: 5px; background: transparent; color: rgba(255, 255, 255, 0.55); font-size: 11px; cursor: pointer;
 }
-.chapter-document-switch button small { color: #ffffff; font-size: 10px; font-weight: 500; }
+.chapter-document-switch button small { color: inherit; font-size: 10px; font-weight: 500; }
 .chapter-document-switch button small::before { content: "·"; margin-right: 4px; }
-.chapter-document-switch button.active { background: var(--bg-active); color: #ffffff; box-shadow: none; }
+.chapter-document-switch button:hover:not(.active) {
+  color: #ffffff;
+  background: var(--bg-hover);
+}
+.chapter-document-switch button.active {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #ffffff 14%, transparent);
+}
 .chapter-workspace { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; min-height: 0; overflow: hidden; }
 .chapter-workspace:has(.chapter-editor-status-bar) { grid-template-rows: auto minmax(0, 1fr) auto; }
 .chapter-workspace:has(.chapter-editor-status-bar):has(.chapter-review-results) { grid-template-rows: auto minmax(0, 1fr) auto auto; }
@@ -1943,8 +2075,13 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
 .chapter-workspace .chapter-workspace-toolbar {
   margin-top: 8px; border: 1px solid var(--border); border-radius: 8px;
 }
-.chapter-document-switch { display: inline-flex; gap: 4px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-active); flex: 0 0 auto; }
-.chapter-document-switch button.active { background: var(--bg-active); color: #ffffff; box-shadow: none; }
+.chapter-document-switch { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-input); flex: 0 0 auto; }
+.chapter-document-switch button.active {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #ffffff 14%, transparent);
+}
 .chapter-editor-status-bar {
   display: flex;
   align-items: center;
@@ -2157,6 +2294,12 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
 .right-panel-layer.active { transform: translateX(0); opacity: 1; pointer-events: auto; visibility: visible; }
 .chapter-workspace-rail {
   display: flex; flex-direction: column; height: 100%; min-height: 0; border-left: 1px solid var(--border); background: var(--bg-sidebar);
+}
+.chapter-workspace-rail .creation-desk-workspace--rail {
+  flex: 1 1 auto; min-height: 0; height: auto; background: var(--bg-sidebar);
+}
+.chapter-workspace-rail .creation-desk-workspace--rail .composer-heading {
+  display: none;
 }
 .chapter-revision-error {
   margin: 0 12px 8px; padding: 7px 10px; border: 1px solid var(--danger); border-radius: 5px; background: var(--danger-soft); color: var(--danger-text); font-size: 12px; line-height: 1.4;
@@ -4794,6 +4937,16 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   cursor: pointer;
   list-style: none;
 }
+.agent-stream-block.thinking summary > svg:first-child,
+.agent-stream-block.searching summary > svg:first-child,
+.agent-stream-block.editing summary > svg:first-child,
+.agent-stream-block.resulting summary > svg:first-child {
+  flex: 0 0 auto;
+  transition: transform 0.15s ease;
+}
+.agent-stream-block[open] > summary > svg:first-child {
+  transform: rotate(90deg);
+}
 .agent-stream-block.thinking summary::-webkit-details-marker,
 .agent-stream-block.searching summary::-webkit-details-marker,
 .agent-stream-block.editing summary::-webkit-details-marker,
@@ -4933,6 +5086,9 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   border-top: 1px solid var(--border-subtle);
   background: var(--bg-sidebar);
   padding: 10px 24px 16px;
+}
+.creation-desk-workspace--rail .creation-desk-footer {
+  padding: 8px 10px 10px;
 }
 .creation-desk-session-bar {
   width: min(760px, 100%);
@@ -5113,6 +5269,18 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   gap: 8px;
   padding: 0 10px 10px;
 }
+.creation-desk-composer.is-compact {
+  width: 100%;
+  margin: 0;
+}
+.creation-desk-composer.is-compact textarea {
+  min-height: 56px;
+  padding: 10px 12px 6px;
+  font-size: 12px;
+}
+.creation-desk-composer.is-compact .creation-desk-composer-actions {
+  padding: 0 8px 8px;
+}
 .creation-desk-model-quick {
   display: flex;
   flex-wrap: wrap;
@@ -5245,6 +5413,92 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
 .creation-desk-stop:disabled,
 .creation-desk-start-turn:disabled { opacity: .5; cursor: default; }
 
+.chapter-rail-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  margin: 8px 10px 6px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-input);
+}
+.chapter-rail-tabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chapter-rail-tabs button:hover:not(.active) {
+  color: #ffffff;
+  background: var(--bg-hover);
+}
+.chapter-rail-tabs button.active {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-weight: 700;
+}
+.chapter-rail-document {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin: 0 10px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-primary);
+}
+.chapter-rail-document-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.chapter-rail-document-head strong {
+  font-size: 11px;
+  font-weight: 700;
+  color: #ffffff;
+}
+.chapter-rail-document-open {
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+.chapter-rail-document-open:hover {
+  color: #ffffff;
+  border-color: var(--border-strong);
+}
+.chapter-rail-document .chapter-synopsis-markdown,
+.chapter-rail-document .chapter-synopsis-empty {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  font-size: 12px;
+  line-height: 1.65;
+}
 .chapter-workspace-rail-toolbar { display: flex; justify-content: flex-end; padding: 8px 10px 0; }
 .chapter-workspace-rail-toolbar button { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); background: var(--surface); border-radius: 4px; padding: 4px 10px; font-size: 12px; }
 .chapter-workspace-rail-toolbar button.active { border-color: var(--accent); color: var(--accent); }

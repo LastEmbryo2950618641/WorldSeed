@@ -4,7 +4,8 @@ import type {
   WorkspaceCatalogSnapshot,
 } from "@worldseed/contracts"
 
-import { digest, isAutoDescriptionSelection, listDescriptionRuleFiles, listWorkDescriptionRuleFiles } from "../../core/index.js"
+import { digest, resolveDescriptionRulePaths, listWorkDescriptionRuleFiles } from "../../core/index.js"
+import type { TurnReadEvidence } from "../turns/ports/ai-model-port.js"
 import { isPresentationRuleMarkdownPath, listUserRuleMarkdownPaths } from "./synopsis-workspace-reads.js"
 
 export function listSynopsisDiscussBootstrapPaths(input: Readonly<{
@@ -14,11 +15,10 @@ export function listSynopsisDiscussBootstrapPaths(input: Readonly<{
     proseStyleRulePath?: string | undefined
   }>
 }>): readonly string[] {
-  const autoDescription = isAutoDescriptionSelection(input.presentation?.descriptionRulePath)
-  const descriptionPaths = autoDescription
-    ? listDescriptionRuleFiles(input.catalog.entries).map((entry) => entry.relativePath)
-    : [input.presentation?.descriptionRulePath?.trim() ?? ""]
-      .filter((path): path is string => path.length > 0 && isPresentationRuleMarkdownPath(path))
+  const descriptionPaths = resolveDescriptionRulePaths(
+    input.presentation?.descriptionRulePath,
+    input.catalog.entries,
+  )
   const prosePath = input.presentation?.proseStyleRulePath?.trim()
   return [
     "设定集/readme.md",
@@ -49,6 +49,52 @@ export function computeDiscussBootstrapDigest(input: Readonly<{
       version: entry?.version ?? "",
     }
   }))
+}
+
+export function collectDiscussReadEvidenceFromContext(
+  messages: readonly ModelContextMessage[],
+): TurnReadEvidence[] {
+  const collected: TurnReadEvidence[] = []
+  const seen = new Set<string>()
+  for (const message of messages) {
+    if (message.content === undefined) continue
+    const parsed = parseJsonObject(message.content)
+    if (parsed === undefined) continue
+    for (const item of collectReadEvidenceNodes(parsed)) {
+      const readId = typeof item.readId === "string" ? item.readId : undefined
+      if (readId === undefined || seen.has(readId)) continue
+      seen.add(readId)
+      collected.push(item as TurnReadEvidence)
+    }
+  }
+  return collected
+}
+
+function parseJsonObject(content: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(content)
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function collectReadEvidenceNodes(value: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(value)) return value.flatMap(collectReadEvidenceNodes)
+  if (value === null || typeof value !== "object") return []
+  const record = value as Record<string, unknown>
+  const nested = Object.values(record).flatMap(collectReadEvidenceNodes)
+  if (!Array.isArray(record.readEvidence)) return nested
+  return [
+    ...record.readEvidence.flatMap((item) => (
+      item !== null && typeof item === "object" && !Array.isArray(item)
+        ? [item as Record<string, unknown>]
+        : []
+    )),
+    ...nested,
+  ]
 }
 
 export function toVisibleDiscussContextMessages(

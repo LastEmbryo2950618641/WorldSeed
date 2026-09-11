@@ -2,7 +2,6 @@ import { dialog, ipcMain, type BrowserWindow } from "electron"
 import { randomUUID } from "node:crypto"
 import {
   chapterReviewRevisionPayloadSchema,
-  chapterRevisionConversationSendPayloadSchema,
   chapterSubmitRevisionPayloadSchema,
   clientRequestSchema,
   modelCatalogRequestSchema,
@@ -56,7 +55,6 @@ const MODEL_CREDENTIAL_PAYLOAD_SCHEMAS = {
   "world.evolve": worldEvolvePayloadSchema,
   "chapter.reviewRevision": chapterReviewRevisionPayloadSchema,
   "chapter.submitRevision": chapterSubmitRevisionPayloadSchema,
-  "chapter.revision.conversation.send": chapterRevisionConversationSendPayloadSchema,
   "synopsis.conversation.send": synopsisConversationSendPayloadSchema,
   "synopsis.conversation.refreshChoices": synopsisConversationRefreshChoicesPayloadSchema,
   "synopsis.conversation.beginTurn": synopsisBeginTurnPayloadSchema,

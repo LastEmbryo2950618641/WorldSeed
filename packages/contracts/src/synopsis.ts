@@ -28,6 +28,8 @@ export const synopsisConversationChoiceSchema = z.object({
     "confirm_arc_plan",
     "confirm_synopsis",
     "set_focus",
+    "promote_draft_to_body",
+    "restore_body_version",
   ]),
   chapterSequence: z.number().int().positive().optional(),
 })
@@ -128,6 +130,7 @@ export const synopsisConversationStreamEditKindSchema = z.enum([
   "synopsis",
   "outline",
   "body_edits",
+  "draft",
   "staging",
   "arc_plan",
   "presentation",
@@ -214,6 +217,13 @@ export const synopsisConversationSendResultSchema = z.object({
   usage: synopsisConversationStreamUsageSchema.optional(),
   /** Set when the discuss agent renamed the project/work display name. */
   workDisplayName: z.string().trim().min(1).max(200).optional(),
+  /** Set when this send auto-appended a chapter draft version. */
+  appendedDraft: z.object({
+    revisionTaskId: idSchema,
+    chapterId: z.string().min(1),
+    draftVersionId: idSchema,
+    draftLabel: z.string().min(1),
+  }).optional(),
 })
 export type SynopsisConversationSendResult = z.infer<typeof synopsisConversationSendResultSchema>
 

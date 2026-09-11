@@ -96,29 +96,6 @@ export type EditorSurfaceMode = z.infer<typeof editorSurfaceModeSchema>
 export const chapterRevisionInputModeSchema = z.enum(["direct", "agent"])
 export type ChapterRevisionInputMode = z.infer<typeof chapterRevisionInputModeSchema>
 
-export const chapterRevisionConversationProposalSchema = z.object({
-  heading: z.string().min(1).optional(),
-  body: z.string(),
-})
-export type ChapterRevisionConversationProposal = z.infer<typeof chapterRevisionConversationProposalSchema>
-
-export const chapterRevisionConversationMessageSchema = z.object({
-  messageId: idSchema,
-  revisionTaskId: idSchema,
-  projectId: idSchema,
-  role: z.enum(["user", "assistant", "system"]),
-  content: z.string(),
-  proposal: chapterRevisionConversationProposalSchema.optional(),
-  createdAtMs: z.number().int().nonnegative(),
-})
-export type ChapterRevisionConversationMessage = z.infer<typeof chapterRevisionConversationMessageSchema>
-
-export const chapterRevisionConversationListResultSchema = z.object({
-  revisionTaskId: idSchema.optional(),
-  messages: z.array(chapterRevisionConversationMessageSchema),
-})
-export type ChapterRevisionConversationListResult = z.infer<typeof chapterRevisionConversationListResultSchema>
-
 export const chapterRevisionContextMetadataSchema = z.object({
   chapterId: z.string().min(1),
   replacedSourceId: z.string().min(1),
@@ -176,12 +153,6 @@ export const chapterRevisionSchema = z.object({
 })
 export type ChapterRevision = z.infer<typeof chapterRevisionSchema>
 
-export const chapterRevisionConversationSendResultSchema = z.object({
-  revision: chapterRevisionSchema,
-  messages: z.array(chapterRevisionConversationMessageSchema),
-})
-export type ChapterRevisionConversationSendResult = z.infer<typeof chapterRevisionConversationSendResultSchema>
-
 export const chapterRevisionReadResultSchema = chapterRevisionSchema.extend({ proposedContent: z.string(), proposedBody: z.string() })
 export type ChapterRevisionReadResult = z.infer<typeof chapterRevisionReadResultSchema>
 
@@ -227,6 +198,7 @@ export const revisionDraftVersionSchema = z.object({
   bodyDigest: z.string().min(1),
   createdAtMs: z.number().int().nonnegative(),
   isLatest: z.boolean(),
+  isCurrentOfficial: z.boolean().optional(),
 })
 export type RevisionDraftVersion = z.infer<typeof revisionDraftVersionSchema>
 

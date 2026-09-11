@@ -1,7 +1,7 @@
 import { Editor, type Monaco } from "@monaco-editor/react"
 import { useEffect, useRef, useState } from "react"
 import type { editor } from "monaco-editor"
-import type { ChapterNarrativeIntent, ChapterRevision, ChapterRevisionConversationMessage, DiscussFocusKind, SynopsisConversationMessage, SynopsisConversationSession, SynopsisConversationStreamSnapshot, SynopsisStagingPromoteProposal } from "@worldseed/contracts"
+import type { ChapterNarrativeIntent, ChapterRevision, DiscussFocusKind, RevisionDraftVersion, SynopsisConversationMessage, SynopsisConversationSession, SynopsisConversationStreamSnapshot, SynopsisStagingPromoteProposal } from "@worldseed/contracts"
 import { WORLDSEED_EDITOR_THEME, ensureWorldseedEditorTheme } from "../../monaco.js"
 import { SynopsisConversationComposer } from "./SynopsisConversationComposer.js"
 import { isChapterPlanningMarkdownPath, type DiscussFocusChapterOption } from "./synopsis-path.js"
@@ -16,12 +16,22 @@ import {
   appendManualDraftVersion,
   buildPrototypeDraftVersions,
   COMMITTED_DRAFT_VERSION_ID,
+  draftDisplayModeForSelection,
+  fromPersistedDraftVersions,
+  isCoveringDraft,
   mergeDraftVersionContent,
-  relabelLatestDraftVersion,
+  preferredWorkingDraftId,
+  splitChapterPickerVersions,
   type PrototypeDraftVersion,
 } from "./chapter-draft-versions-prototype.js"
 import { chapterBodyStyle, useChapterReadingPreferences } from "./chapter-reading-preferences.js"
-import type { ChapterDocumentPane, RevisionStage } from "./chapter-workspace-types.js"
+import {
+  isChapterGraphSyncBlocking,
+  isChapterRevisionWritable,
+  shouldAutoEnsureChapterRevision,
+  type ChapterDocumentPane,
+  type RevisionStage,
+} from "./chapter-workspace-types.js"
 import { UiTooltip } from "../../components/UiTooltip.js"
 
 /** Space between text and scrollbar reserved for the floating toolbar (px). */
@@ -92,12 +102,14 @@ type Props = Readonly<{
   chapterBody: string
   revision: ChapterRevision | undefined
   revisionContent: string | undefined
+  persistedDraftVersions?: readonly RevisionDraftVersion[]
   onEnsureRevision(heading: string, body: string): Promise<ChapterRevision | undefined>
   onUpdateRevision(revisionTaskId: string, heading: string, body: string): Promise<ChapterRevision>
   onReviewRevision(revisionTaskId: string): Promise<ChapterRevision>
   onSubmitRevision(input: Readonly<{ revisionTaskId: string; mode: "direct" | "reviewed"; forced: boolean; reviewId?: string }>): Promise<ChapterRevision>
   onRetireRevision(revisionTaskId: string): Promise<ChapterRevision>
-  chapterConversationMessages: readonly ChapterRevisionConversationMessage[]
+  onAppendPersistedDraft?(input: Readonly<{ heading: string; body: string }>): Promise<void>
+  onRestorePersistedDraft?(versionId: string): Promise<void>
   projectId: string | undefined
   workspaceRootRef: string | undefined
   synopsisSession: SynopsisConversationSession | undefined
@@ -110,6 +122,7 @@ type Props = Readonly<{
   onSynopsisStop?(): Promise<void>
   onSynopsisRefreshChoices(messageId: string): Promise<void>
   onPromoteStaging(): Promise<void>
+  onPromoteDraftToBody?(): Promise<void>
   onRejectStagingPromote?(proposalIds: readonly string[]): Promise<void>
   onOpenSynopsisFile(path: string): void
   onSetFocus?(sequence: number, focusKind: DiscussFocusKind): void
@@ -121,8 +134,6 @@ type Props = Readonly<{
     currentContextTokens?: number
     contextWindowTokens?: number
   }>
-  diffFocusMessageId: string | undefined
-  onDiffFocusHandled(): void
 }>
 
 export function EditorArea(props: Props): React.JSX.Element {
@@ -156,6 +167,9 @@ export function EditorArea(props: Props): React.JSX.Element {
           : { onStop: props.onSynopsisStop })}
         onRefreshChoices={props.onSynopsisRefreshChoices}
         onPromoteStaging={props.onPromoteStaging}
+        {...(props.onPromoteDraftToBody === undefined
+          ? {}
+          : { onPromoteDraftToBody: props.onPromoteDraftToBody })}
         {...(props.onRejectStagingPromote === undefined
           ? {}
           : { onRejectStagingPromote: props.onRejectStagingPromote })}
@@ -198,15 +212,15 @@ export function EditorArea(props: Props): React.JSX.Element {
     chapter={props.chapter}
     revision={props.revision}
     revisionContent={props.revisionContent}
-    conversationMessages={props.chapterConversationMessages}
+    {...(props.persistedDraftVersions === undefined ? {} : { persistedDraftVersions: props.persistedDraftVersions })}
     dockToolbar={dockChapterToolbar}
-    diffFocusMessageId={props.diffFocusMessageId}
-    onDiffFocusHandled={props.onDiffFocusHandled}
     onEnsureRevision={props.onEnsureRevision}
     onUpdateRevision={props.onUpdateRevision}
     onReviewRevision={props.onReviewRevision}
     onSubmitRevision={props.onSubmitRevision}
     onRetireRevision={props.onRetireRevision}
+    {...(props.onAppendPersistedDraft === undefined ? {} : { onAppendPersistedDraft: props.onAppendPersistedDraft })}
+    {...(props.onRestorePersistedDraft === undefined ? {} : { onRestorePersistedDraft: props.onRestorePersistedDraft })}
   /> : <MarkdownEditor
     content={props.content}
     readOnly={props.readOnly}
@@ -293,49 +307,78 @@ function ChapterRevisionEditor(props: {
   chapter: Readonly<{ chapterId: string; sourceId: string; heading?: string }> | undefined
   revision: ChapterRevision | undefined
   revisionContent: string | undefined
-  conversationMessages: readonly ChapterRevisionConversationMessage[]
+  persistedDraftVersions?: readonly RevisionDraftVersion[]
   dockToolbar: boolean
-  diffFocusMessageId: string | undefined
-  onDiffFocusHandled(): void
   onEnsureRevision(heading: string, body: string): Promise<ChapterRevision | undefined>
   onUpdateRevision(revisionTaskId: string, heading: string, body: string): Promise<ChapterRevision>
   onReviewRevision(revisionTaskId: string): Promise<ChapterRevision>
   onSubmitRevision(input: Readonly<{ revisionTaskId: string; mode: "direct" | "reviewed"; forced: boolean; reviewId?: string }>): Promise<ChapterRevision>
   onRetireRevision(revisionTaskId: string): Promise<ChapterRevision>
+  onAppendPersistedDraft?(input: Readonly<{ heading: string; body: string }>): Promise<void>
+  onRestorePersistedDraft?(versionId: string): Promise<void>
 }): React.JSX.Element {
   const committedHeading = props.chapter?.heading ?? props.revision?.heading ?? "未命名章节"
-  const initialDraft = resolveDraftBody(props.body, props.revisionContent, props.conversationMessages)
+  const initialDraft = resolveDraftBody(
+    props.body,
+    props.revisionContent,
+    props.persistedDraftVersions,
+  )
   const [heading, setHeading] = useState(committedHeading)
   const [draft, setDraft] = useState(initialDraft)
   const [revision, setRevision] = useState<ChapterRevision | undefined>(props.revision)
-  const [pane, setPane] = useState<ChapterDocumentPane>("draft")
+  const [pane, setPane] = useState<ChapterDocumentPane>(() => (
+    isChapterGraphSyncBlocking(props.revision) ? "committed" : "draft"
+  ))
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<string>()
   const [reviewStage, setReviewStage] = useState<RevisionStage>(() => reviewStageFromRevision(props.revision))
   const [readingPreferences, updateReadingPreferences] = useChapterReadingPreferences()
-  const [displayMode, setDisplayMode] = useState<DraftDisplayMode>("edit")
-  const [selectedVersionId, setSelectedVersionId] = useState(COMMITTED_DRAFT_VERSION_ID)
+  const [displayMode, setDisplayMode] = useState<DraftDisplayMode>(() => (
+    resolveInitialDraftView({
+      ...(props.persistedDraftVersions === undefined ? {} : { persisted: props.persistedDraftVersions }),
+      committedHeading,
+      committedBody: props.body,
+    }).displayMode
+  ))
+  const [draftVersionChain, setDraftVersionChain] = useState<PrototypeDraftVersion[]>(() => (
+    resolveInitialDraftView({
+      ...(props.persistedDraftVersions === undefined ? {} : { persisted: props.persistedDraftVersions }),
+      committedHeading,
+      committedBody: props.body,
+    }).versions
+  ))
+  const [selectedVersionId, setSelectedVersionId] = useState(() => (
+    resolveInitialDraftView({
+      ...(props.persistedDraftVersions === undefined ? {} : { persisted: props.persistedDraftVersions }),
+      committedHeading,
+      committedBody: props.body,
+    }).selectedVersionId
+  ))
   const [diffBaseVersionId, setDiffBaseVersionId] = useState(COMMITTED_DRAFT_VERSION_ID)
   const [diffHeadVersionId, setDiffHeadVersionId] = useState(COMMITTED_DRAFT_VERSION_ID)
   const [editorChromeOpen, setEditorChromeOpen] = useState(false)
-  const [draftVersionChain, setDraftVersionChain] = useState<PrototypeDraftVersion[]>(() => buildPrototypeDraftVersions({
-    committedHeading,
-    committedBody: props.body,
-    messages: props.conversationMessages,
-  }))
   const [lastSavedAtMs, setLastSavedAtMs] = useState<number | undefined>(props.revision?.updatedAtMs)
   const [draftSaveState, setDraftSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle")
-  const previousSuggestionRef = useRef<string | undefined>(undefined)
   const previousVersionCountRef = useRef(0)
   const ensuringRevisionRef = useRef(false)
   const chapterEditorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<Monaco | null>(null)
   const chapterEditorLayoutCleanupRef = useRef<(() => void) | null>(null)
   const chapterEditorWrapColumnsRef = useRef(-1)
-  const agentProposalCountRef = useRef(0)
   const autosaveSnapshotRef = useRef<{ heading: string; body: string }>({ heading: committedHeading, body: initialDraft })
   const draftVersions = draftVersionChain
-  const latestVersionId = draftVersions.at(-1)?.versionId ?? COMMITTED_DRAFT_VERSION_ID
+  const { official: officialVersions, drafts: draftOnlyVersions } = splitChapterPickerVersions(draftVersions)
+  const pickerKind = pane === "committed" ? "official" : "draft"
+  const pickerVersions = pickerKind === "official" ? officialVersions : draftOnlyVersions
+  const latestWorkingDraftId = preferredWorkingDraftId(draftOnlyVersions)
+  const latestVersionId = (pickerKind === "official"
+    ? officialVersions.find((version) => version.isCurrentOfficial)?.versionId ?? officialVersions.at(-1)?.versionId
+    : latestWorkingDraftId ?? draftOnlyVersions.at(-1)?.versionId)
+    ?? draftVersions.at(-1)?.versionId
+    ?? COMMITTED_DRAFT_VERSION_ID
+  const pickerSelectedId = pickerVersions.some((version) => version.versionId === selectedVersionId)
+    ? selectedVersionId
+    : latestVersionId
 
   useEffect(() => {
     return () => {
@@ -354,30 +397,42 @@ function ChapterRevisionEditor(props: {
 
   useEffect(() => {
     setDisplayMode("edit")
-    setSelectedVersionId(COMMITTED_DRAFT_VERSION_ID)
-    setDiffBaseVersionId(COMMITTED_DRAFT_VERSION_ID)
-    setDiffHeadVersionId(COMMITTED_DRAFT_VERSION_ID)
-    previousSuggestionRef.current = undefined
     previousVersionCountRef.current = 0
-    agentProposalCountRef.current = props.conversationMessages.filter(
-      (message) => message.role === "assistant" && message.proposal !== undefined,
-    ).length
     setEditorChromeOpen(false)
-    const built = buildPrototypeDraftVersions({
+    const initial = resolveInitialDraftView({
+      ...(props.persistedDraftVersions === undefined ? {} : { persisted: props.persistedDraftVersions }),
       committedHeading,
       committedBody: props.body,
-      messages: props.conversationMessages,
     })
-    setDraftVersionChain(built)
-    const initialBody = resolveDraftBody(props.body, props.revisionContent, props.conversationMessages)
+    setDraftVersionChain(initial.versions)
+    const latestId = initial.versions.at(-1)?.versionId ?? COMMITTED_DRAFT_VERSION_ID
+    const baseId = baselineDraftVersionId(initial.versions)
+    setSelectedVersionId(initial.selectedVersionId)
+    setDisplayMode(initial.displayMode)
+    setDiffBaseVersionId(baseId)
+    setDiffHeadVersionId(latestId)
+    const initialBody = resolveDraftBody(
+      props.body,
+      props.revisionContent,
+      props.persistedDraftVersions,
+    )
     autosaveSnapshotRef.current = { heading: committedHeading, body: initialBody }
     setLastSavedAtMs(props.revision?.updatedAtMs)
     setDraftSaveState("idle")
   }, [props.path])
 
   useEffect(() => {
+    if (props.persistedDraftVersions === undefined || props.persistedDraftVersions.length === 0) return
+    setDraftVersionChain(fromPersistedDraftVersions(props.persistedDraftVersions))
+  }, [props.persistedDraftVersions])
+
+  useEffect(() => {
     setHeading(props.revision?.heading ?? props.chapter?.heading ?? "未命名章节")
-    const nextDraft = resolveDraftBody(props.body, props.revisionContent, props.conversationMessages)
+    const nextDraft = resolveDraftBody(
+      props.body,
+      props.revisionContent,
+      props.persistedDraftVersions,
+    )
     setDraft(nextDraft)
     setRevision(props.revision)
     setReviewStage(reviewStageFromRevision(props.revision))
@@ -388,42 +443,14 @@ function ChapterRevisionEditor(props: {
       heading: props.revision?.heading ?? props.chapter?.heading ?? "未命名章节",
       body: nextDraft,
     }
-  }, [props.body, props.chapter?.heading, props.revision, props.revisionContent, props.conversationMessages])
-
-  useEffect(() => {
-    const built = buildPrototypeDraftVersions({
-      committedHeading,
-      committedBody: props.body,
-      messages: props.conversationMessages,
-    })
-    const proposalCount = props.conversationMessages.filter(
-      (message) => message.role === "assistant" && message.proposal !== undefined,
-    ).length
-    if (proposalCount <= agentProposalCountRef.current) return
-    agentProposalCountRef.current = proposalCount
-    setDraftVersionChain((previous) => {
-      const manualVersions = previous.filter((version) => version.source === "manual")
-      return relabelLatestDraftVersion([...built, ...manualVersions])
-    })
-  }, [committedHeading, props.body, props.conversationMessages])
+  }, [props.body, props.chapter?.heading, props.revision, props.revisionContent, props.persistedDraftVersions])
 
   useEffect(() => {
     if (props.path === undefined) return
     previousVersionCountRef.current = draftVersions.length
-    setSelectedVersionId(latestVersionId)
-  }, [props.path, draftVersions.length, latestVersionId])
+  }, [props.path, draftVersions.length])
 
   useEffect(() => {
-    const nextSuggested = findSuggestedDraftBody(props.conversationMessages)
-    if (nextSuggested === undefined || nextSuggested === previousSuggestionRef.current) return
-    previousSuggestionRef.current = nextSuggested
-    setDraft(nextSuggested)
-    setPane("draft")
-    setReviewStage("idle")
-  }, [props.conversationMessages])
-
-  useEffect(() => {
-    setSelectedVersionId(latestVersionId)
     if (draftVersions.length <= previousVersionCountRef.current) {
       previousVersionCountRef.current = draftVersions.length
       return
@@ -431,28 +458,17 @@ function ChapterRevisionEditor(props: {
     previousVersionCountRef.current = draftVersions.length
     if (draftVersions.length <= 1) return
     const latest = draftVersions.at(-1)
-    if (latest === undefined || latest.source !== "agent") return
-    setDiffBaseVersionId(COMMITTED_DRAFT_VERSION_ID)
+    if (latest === undefined || latest.source !== "agent" || isCoveringDraft(latest)) return
+    setSelectedVersionId(latest.versionId)
+    setDiffBaseVersionId(baselineDraftVersionId(draftVersions))
     setDiffHeadVersionId(latest.versionId)
     setDisplayMode("diff")
     setPane("draft")
-  }, [draftVersions, latestVersionId])
-
-  useEffect(() => {
-    if (props.diffFocusMessageId === undefined) return
-    const match = draftVersions.find((version) => version.messageId === props.diffFocusMessageId)
-    if (match === undefined) return
-    setDiffBaseVersionId(COMMITTED_DRAFT_VERSION_ID)
-    setDiffHeadVersionId(match.versionId)
-    setSelectedVersionId(match.versionId)
-    setDisplayMode("diff")
-    setPane("draft")
-    props.onDiffFocusHandled()
-  }, [draftVersions, latestVersionId, props.diffFocusMessageId, props.onDiffFocusHandled])
+  }, [draftVersions])
 
   useEffect(() => {
     if (props.chapter === undefined || ensuringRevisionRef.current) return
-    if (props.revision !== undefined && props.revision.decision !== "submit" && props.revision.status === "editing") return
+    if (!shouldAutoEnsureChapterRevision(props.revision)) return
     ensuringRevisionRef.current = true
     void props.onEnsureRevision(committedHeading, props.body)
       .catch((error: unknown) => {
@@ -465,19 +481,26 @@ function ChapterRevisionEditor(props: {
 
   const changed = draft !== props.body || heading !== committedHeading
   const activeWordCount = countChapterCharacters(pane === "draft" ? draft : props.body)
-  const graphSyncPending = revision?.decision === "submit" && revision.graphSyncStatus !== "completed"
+  const graphSyncPending = isChapterGraphSyncBlocking(revision)
+  useEffect(() => {
+    if (graphSyncPending) setPane("committed")
+  }, [graphSyncPending])
+  const revisionWritable = isChapterRevisionWritable(revision) && !graphSyncPending
+  const latestWorkingDraft = draftOnlyVersions.find((version) => version.versionId === latestWorkingDraftId)
   const canReviseLatestDraft = pane === "draft"
-    && !graphSyncPending
-    && selectedVersionId === latestVersionId
+    && revisionWritable
+    && latestWorkingDraft !== undefined
+    && !isCoveringDraft(latestWorkingDraft)
+    && selectedVersionId === latestWorkingDraft.versionId
     && displayMode === "edit"
-  const revisionStatusHint = pane === "draft" && !graphSyncPending && !canReviseLatestDraft
+  const revisionStatusHint = pane === "draft" && revisionWritable && !canReviseLatestDraft
     ? displayMode === "view"
       ? "历史草稿仅可查看，请返回最新版本后再审核或提交"
       : "版本对比中，请返回编辑最新草稿后再审核或提交"
     : undefined
 
   useEffect(() => {
-    if (graphSyncPending || displayMode !== "edit" || selectedVersionId !== latestVersionId) return
+    if (!revisionWritable || displayMode !== "edit" || selectedVersionId !== latestVersionId) return
     if (draft === autosaveSnapshotRef.current.body && heading === autosaveSnapshotRef.current.heading) return
 
     setDraftSaveState("saving")
@@ -507,17 +530,18 @@ function ChapterRevisionEditor(props: {
     committedHeading,
     displayMode,
     draft,
-    graphSyncPending,
     heading,
     latestVersionId,
     props.body,
     props.onEnsureRevision,
     props.onUpdateRevision,
     revision,
+    revisionWritable,
     selectedVersionId,
   ])
 
   const persistDraft = async (): Promise<ChapterRevision> => {
+    if (revision !== undefined && !isChapterRevisionWritable(revision)) return revision
     const current = revision ?? await props.onEnsureRevision(committedHeading, props.body)
     if (current === undefined) throw new Error("无法创建章节修订草稿")
     const next = !changed ? current : await props.onUpdateRevision(current.revisionTaskId, heading, draft)
@@ -526,20 +550,31 @@ function ChapterRevisionEditor(props: {
   }
 
   const createNewDraftVersion = async (): Promise<void> => {
-    if (busy || graphSyncPending || displayMode !== "edit" || selectedVersionId !== latestVersionId) return
+    if (busy || !revisionWritable || displayMode === "diff") return
+    const sourceVersion = draftVersions.find((version) => version.versionId === pickerSelectedId)
+      ?? draftOnlyVersions.at(-1)
+    const editingLatestWorking = displayMode === "edit"
+      && latestWorkingDraft !== undefined
+      && selectedVersionId === latestWorkingDraft.versionId
+    const nextHeading = editingLatestWorking ? heading : (sourceVersion?.heading ?? heading)
+    const nextBody = editingLatestWorking ? draft : (sourceVersion?.body ?? draft)
     setBusy(true)
     setActionError(undefined)
     try {
       const current = await persistDraft()
       const savedAtMs = current.updatedAtMs ?? Date.now()
-      const nextChain = appendManualDraftVersion(draftVersionChain, {
-        heading,
-        body: draft,
-        createdAtMs: savedAtMs,
-      })
-      const nextLatestId = nextChain.at(-1)?.versionId ?? latestVersionId
-      setDraftVersionChain(nextChain)
-      setSelectedVersionId(nextLatestId)
+      if (props.onAppendPersistedDraft !== undefined) {
+        await props.onAppendPersistedDraft({ heading: nextHeading, body: nextBody })
+      } else {
+        const nextChain = appendManualDraftVersion(draftVersionChain, {
+          heading: nextHeading,
+          body: nextBody,
+          createdAtMs: savedAtMs,
+        })
+        const nextLatestId = nextChain.at(-1)?.versionId ?? latestVersionId
+        setDraftVersionChain(nextChain)
+        setSelectedVersionId(nextLatestId)
+      }
       setDisplayMode("edit")
       setPane("draft")
       autosaveSnapshotRef.current = { heading, body: draft }
@@ -645,10 +680,19 @@ function ChapterRevisionEditor(props: {
     : null
 
   const restorePrototypeVersion = async (version: PrototypeDraftVersion): Promise<void> => {
-    if (busy || graphSyncPending) return
+    if (busy || !revisionWritable) return
     setBusy(true)
     setActionError(undefined)
     try {
+      if (props.onRestorePersistedDraft !== undefined) {
+        await props.onRestorePersistedDraft(version.versionId)
+        setHeading(version.heading)
+        setDraft(version.body)
+        setPane("draft")
+        setReviewStage("idle")
+        setDisplayMode("edit")
+        return
+      }
       const current = revision ?? await props.onEnsureRevision(committedHeading, props.body)
       if (current === undefined) throw new Error("无法创建章节修订草稿")
       const next = await props.onUpdateRevision(current.revisionTaskId, version.heading, version.body)
@@ -670,34 +714,41 @@ function ChapterRevisionEditor(props: {
     const version = draftVersions.find((item) => item.versionId === versionId)
     if (version === undefined) return
     setSelectedVersionId(versionId)
-    setPane("draft")
-    if (versionId === latestVersionId) {
-      setDraft(version.body)
-      setDisplayMode("edit")
-      return
-    }
-    setDisplayMode("view")
+    if (pane === "committed") return
+    const nextMode = draftDisplayModeForSelection(draftOnlyVersions, versionId)
+    setDisplayMode(nextMode)
+    if (nextMode === "edit") setDraft(version.body)
   }
 
   const enterDiffMode = (): void => {
     const head = draftVersions.find((version) => version.versionId === selectedVersionId) ?? draftVersions.at(-1)
-    const headId = head?.versionId === COMMITTED_DRAFT_VERSION_ID
+    const baselineId = baselineDraftVersionId(draftVersions)
+    const headId = head?.versionId === baselineId
       ? latestVersionId
       : (head?.versionId ?? latestVersionId)
-    setDiffBaseVersionId(COMMITTED_DRAFT_VERSION_ID)
+    setDiffBaseVersionId(baselineId)
     setDiffHeadVersionId(headId)
     setDisplayMode("diff")
     setPane("draft")
   }
 
-  const viewingVersion = draftVersions.find((version) => version.versionId === selectedVersionId) ?? draftVersions.at(-1)
+  const viewingVersion = pickerVersions.find((version) => version.versionId === pickerSelectedId)
+    ?? pickerVersions.find((version) => version.versionId === selectedVersionId)
+    ?? draftVersions.find((version) => version.versionId === selectedVersionId)
+    ?? draftVersions.at(-1)
+  const officialView = officialVersions.find((version) => version.versionId === pickerSelectedId)
+    ?? officialVersions.find((version) => version.isCurrentOfficial === true)
+    ?? officialVersions.at(-1)
+  const committedBodyText = officialView?.body ?? props.body
 
-  const versionsPanel = graphSyncPending ? null : <ChapterDraftVersionsPrototype
-    versions={draftVersions}
+  const versionsPanel = <ChapterDraftVersionsPrototype
+    versions={pickerVersions}
     latestVersionId={latestVersionId}
-    selectedVersionId={selectedVersionId}
+    selectedVersionId={pickerSelectedId}
     displayMode={displayMode}
     busy={busy}
+    mutable={revisionWritable}
+    kind={pickerKind}
     showRevisionActions={canReviseLatestDraft}
     revisionStage={reviewStage}
     draftChanged={changed}
@@ -708,7 +759,7 @@ function ChapterRevisionEditor(props: {
     onEnterDiff={enterDiffMode}
     onReturnEdit={() => {
       setSelectedVersionId(latestVersionId)
-      setDisplayMode("edit")
+      setDisplayMode(draftDisplayModeForSelection(draftOnlyVersions, latestVersionId))
       setPane("draft")
     }}
     onRestore={restorePrototypeVersion}
@@ -740,31 +791,18 @@ function ChapterRevisionEditor(props: {
       />
     : null
 
-  if (graphSyncPending) {
-    return <article className="chapter-reader chapter-workspace">
-      <header className="chapter-reader-header">
-        <div className="chapter-reader-topline">
-          <div className="chapter-reader-title-block">
-            <span className="mode-pill chapter-status-committed"><BookOpenText size={12} />已提交修订</span>
-            <h1>{heading}</h1>
-          </div>
-          <button className="chapter-edit-command" disabled={busy || revision?.graphSyncStatus === "running"} onClick={() => { void retryGraphSync(); }}>
-            <RotateCcw className={revision?.graphSyncStatus === "running" ? "revision-spin" : ""} size={14} />
-            {revision?.graphSyncStatus === "failed" ? "重试图同步" : revision?.graphSyncStatus === "pending" ? "继续图同步" : "图同步中"}
-          </button>
-        </div>
-        <p className="chapter-reader-hint">{props.path ?? "章节正文"} · 正文已提交，世界图同步进行中</p>
-      </header>
-      <div className="chapter-body" data-testid="chapter-document-pane-committed" style={chapterBodyStyle(readingPreferences)}>
-        {props.body.length === 0
-          ? <p className="empty-paragraph">当前章节没有正文内容。</p>
-          : props.body.split(/\n{2,}/u).map((paragraph, index) => (
-            <p key={`${String(index)}-${paragraph.slice(0, 12)}`}>{paragraph}</p>
-          ))}
-      </div>
-      {props.dockToolbar ? null : toolbar}
-    </article>
-  }
+  const graphSyncAction = graphSyncPending
+    ? <button
+        type="button"
+        className="chapter-edit-command"
+        data-testid="chapter-graph-sync-action"
+        disabled={busy || revision?.graphSyncStatus === "running"}
+        onClick={() => { void retryGraphSync(); }}
+      >
+        <RotateCcw className={revision?.graphSyncStatus === "running" ? "revision-spin" : ""} size={14} />
+        {revision?.graphSyncStatus === "failed" ? "重试图同步" : revision?.graphSyncStatus === "pending" ? "继续图同步" : "图同步中"}
+      </button>
+    : null
 
   return <article className="chapter-reader chapter-workspace">
     <header className="chapter-reader-header chapter-reader-header-compact">
@@ -773,17 +811,49 @@ function ChapterRevisionEditor(props: {
           {pane === "draft" ? <Sparkles size={12} /> : <BookOpenText size={12} />}
           {pane === "draft" ? "章节草稿" : "已提交章节"}
         </span>
-        {pane === "draft" && versionsPanel !== null
+        {versionsPanel !== null
           ? <div className="chapter-draft-versions-inline" data-testid="chapter-draft-versions-host">{versionsPanel}</div>
           : null}
         <div className="chapter-document-switch" data-testid="chapter-document-switch" role="tablist" aria-label="章节文档视图">
-          <button type="button" role="tab" className={pane === "committed" ? "active" : ""} aria-selected={pane === "committed"} data-testid="chapter-document-committed" onClick={() => { setPane("committed"); }}>
+          <button
+            type="button"
+            role="tab"
+            className={pane === "committed" ? "active" : ""}
+            aria-selected={pane === "committed"}
+            data-testid="chapter-document-committed"
+            onClick={() => {
+              setPane("committed")
+              if (!officialVersions.some((version) => version.versionId === selectedVersionId)) {
+                const current = officialVersions.find((version) => version.isCurrentOfficial === true)
+                  ?? officialVersions.at(-1)
+                if (current !== undefined) setSelectedVersionId(current.versionId)
+              }
+            }}
+          >
             正文
           </button>
-          <button type="button" role="tab" className={pane === "draft" ? "active" : ""} aria-selected={pane === "draft"} data-testid="chapter-document-draft" onClick={() => { setPane("draft"); }}>
+          <button
+            type="button"
+            role="tab"
+            className={pane === "draft" ? "active" : ""}
+            aria-selected={pane === "draft"}
+            data-testid="chapter-document-draft"
+            onClick={() => {
+              setPane("draft")
+              const preferredId = preferredWorkingDraftId(draftOnlyVersions)
+              if (preferredId === undefined) return
+              const preferred = draftOnlyVersions.find((version) => version.versionId === preferredId)
+              if (preferred === undefined) return
+              setSelectedVersionId(preferred.versionId)
+              const nextMode = draftDisplayModeForSelection(draftOnlyVersions, preferred.versionId)
+              setDisplayMode(nextMode)
+              if (nextMode === "edit") setDraft(preferred.body)
+            }}
+          >
             草稿
           </button>
         </div>
+        {graphSyncAction}
       </div>
     </header>
     {revisionErrorBanner}
@@ -803,9 +873,9 @@ function ChapterRevisionEditor(props: {
                 ...(props.dockToolbar ? { paddingRight: CHAPTER_EDITOR_TOOLBAR_LANE + CHAPTER_EDITOR_SCROLLBAR_WIDTH + 16 } : {}),
               }}
             >
-              {props.body.length === 0
+              {committedBodyText.length === 0
                 ? <p className="empty-paragraph">当前章节没有正文内容。</p>
-                : props.body.split(/\n{2,}/u).map((paragraph, index) => (
+                : committedBodyText.split(/\n{2,}/u).map((paragraph, index) => (
                   <p key={`${String(index)}-${paragraph.slice(0, 12)}`}>{paragraph}</p>
                 ))}
             </div>
@@ -823,7 +893,9 @@ function ChapterRevisionEditor(props: {
             : <>
                 {displayMode === "view"
                   ? <div className="chapter-draft-view-banner" data-testid="chapter-draft-view-banner">
-                      正在查看 {viewingVersion?.label ?? "历史版本"}（只读）。选择最新版本可继续编辑。
+                      {viewingVersion !== undefined && isCoveringDraft(viewingVersion)
+                        ? "此草稿已覆盖为当前正文（只读）。创建新草稿可继续修改。"
+                        : `正在查看 ${viewingVersion?.label ?? "历史版本"}（只读）。选择最新未覆盖草稿可继续编辑。`}
                     </div>
                   : null}
                 <div className={`chapter-draft-editor-shell${props.dockToolbar ? " chapter-editor-surface" : ""}`}>
@@ -959,18 +1031,54 @@ function ChapterReviewResults(props: { issues: readonly RevisionIssue[] }): Reac
   </aside>
 }
 
-function findSuggestedDraftBody(messages: readonly ChapterRevisionConversationMessage[]): string | undefined {
-  const body = messages.findLast((message) => message.role === "assistant" && message.proposal !== undefined)?.proposal?.body
-  return body !== undefined && body.length > 0 ? body : undefined
+function resolveEditorDraftVersions(input: Readonly<{
+  persisted?: readonly RevisionDraftVersion[]
+  committedHeading: string
+  committedBody: string
+}>): PrototypeDraftVersion[] {
+  if (input.persisted !== undefined && input.persisted.length > 0) {
+    return fromPersistedDraftVersions(input.persisted)
+  }
+  return buildPrototypeDraftVersions({
+    committedHeading: input.committedHeading,
+    committedBody: input.committedBody,
+  })
+}
+
+function resolveInitialDraftView(input: Readonly<{
+  persisted?: readonly RevisionDraftVersion[]
+  committedHeading: string
+  committedBody: string
+}>): Readonly<{
+  versions: PrototypeDraftVersion[]
+  selectedVersionId: string
+  displayMode: DraftDisplayMode
+}> {
+  const versions = resolveEditorDraftVersions(input)
+  const drafts = versions.filter((version) => version.source !== "baseline")
+  const selectedVersionId = preferredWorkingDraftId(drafts)
+    ?? versions.at(-1)?.versionId
+    ?? COMMITTED_DRAFT_VERSION_ID
+  return {
+    versions,
+    selectedVersionId,
+    displayMode: draftDisplayModeForSelection(drafts, selectedVersionId),
+  }
+}
+
+function baselineDraftVersionId(versions: readonly PrototypeDraftVersion[]): string {
+  return versions.find((version) => version.source === "baseline")?.versionId
+    ?? versions[0]?.versionId
+    ?? COMMITTED_DRAFT_VERSION_ID
 }
 
 function resolveDraftBody(
   body: string,
   revisionContent: string | undefined,
-  messages: readonly ChapterRevisionConversationMessage[],
+  persisted?: readonly RevisionDraftVersion[],
 ): string {
-  const suggested = findSuggestedDraftBody(messages)
-  if (suggested !== undefined) return suggested
+  const latestPersisted = persisted?.find((version) => version.isLatest) ?? persisted?.at(-1)
+  if (latestPersisted !== undefined && latestPersisted.body.length > 0) return latestPersisted.body
   if (revisionContent !== undefined && revisionContent.length > 0) return revisionContent
   return body
 }

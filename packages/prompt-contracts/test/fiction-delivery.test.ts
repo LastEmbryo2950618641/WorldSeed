@@ -48,14 +48,6 @@ describe("fiction delivery inspector", () => {
   })
 
   it("inspects revision and synopsis user-facing prose", () => {
-    expect(inspectPhaseFictionDelivery("revision_assist", {
-      proposedBody: "抱歉，我无法生成这段修订。",
-      assistantMessage: "已按你的要求改了一刀。",
-    }).ok).toBe(false)
-    expect(inspectPhaseFictionDelivery("revision_assist", {
-      proposedBody: "刀光不能近身，他只能侧步。",
-      assistantMessage: "按你的要求把这一刀写进正文了。",
-    }).ok).toBe(true)
     expect(inspectPhaseFictionDelivery("synopsis_discuss", {
       assistantMessage: "作为AI，我不能提供此类描写。",
     }).ok).toBe(false)

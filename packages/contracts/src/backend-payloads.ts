@@ -233,20 +233,6 @@ export const chapterStartRevisionPayloadSchema = projectSettingsReadPayloadSchem
   body: z.string().min(1),
   inputMode: z.enum(["direct", "agent"]).optional(),
 })
-export const chapterRevisionConversationListPayloadSchema = projectSettingsReadPayloadSchema.extend({
-  chapterId: z.string().min(1),
-})
-export const chapterRevisionConversationSendPayloadSchema = projectSettingsReadPayloadSchema.extend({
-  chapterId: z.string().min(1),
-  message: z.string().trim().min(1).max(8_000),
-  model: modelSelectionSchema.optional(),
-  maxModelCalls: z.number().int().positive().optional(),
-  deadlineMs: z.number().int().positive().optional(),
-})
-export const chapterRevisionConversationApplyPayloadSchema = projectSettingsReadPayloadSchema.extend({
-  revisionTaskId: idSchema,
-  messageId: idSchema,
-})
 export const chapterUpdateRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
   revisionTaskId: idSchema,
   heading: z.string().min(1),
@@ -277,6 +263,7 @@ export type ChapterRetireRevisionPayload = z.infer<typeof chapterRetireRevisionP
 
 export const chapterDraftVersionListPayloadSchema = projectSettingsReadPayloadSchema.extend({
   revisionTaskId: idSchema,
+  includeChapterHistory: z.boolean().optional(),
 })
 export const chapterDraftVersionReadPayloadSchema = projectSettingsReadPayloadSchema.extend({
   versionId: idSchema,
@@ -297,9 +284,6 @@ export type ChapterDraftVersionListPayload = z.infer<typeof chapterDraftVersionL
 export type ChapterDraftVersionReadPayload = z.infer<typeof chapterDraftVersionReadPayloadSchema>
 export type ChapterDraftVersionAppendPayload = z.infer<typeof chapterDraftVersionAppendPayloadSchema>
 export type ChapterDraftVersionRestorePayload = z.infer<typeof chapterDraftVersionRestorePayloadSchema>
-export type ChapterRevisionConversationListPayload = z.infer<typeof chapterRevisionConversationListPayloadSchema>
-export type ChapterRevisionConversationSendPayload = z.infer<typeof chapterRevisionConversationSendPayloadSchema>
-export type ChapterRevisionConversationApplyPayload = z.infer<typeof chapterRevisionConversationApplyPayloadSchema>
 
 export const synopsisConversationStartPayloadSchema = projectSettingsReadPayloadSchema.extend({
   title: z.string().max(200).optional(),
@@ -326,6 +310,10 @@ export const synopsisConversationSendPayloadSchema = projectSettingsReadPayloadS
   model: modelSelectionSchema.optional(),
   maxModelCalls: z.number().int().positive().optional(),
   deadlineMs: z.number().int().positive().optional(),
+  /** Chapter-file rail: pin send to this sequence and ignore set_focus. */
+  focusLocked: z.boolean().optional(),
+  lockedChapterSequence: z.number().int().positive().optional(),
+  lockedFocusKind: discussFocusKindSchema.optional(),
 })
 export const synopsisConversationRefreshChoicesPayloadSchema = projectSettingsReadPayloadSchema.extend({
   messageId: idSchema.optional(),
@@ -656,9 +644,6 @@ export const backendPayloadSchemas = {
   "chapter.revision.draftVersion.read": chapterDraftVersionReadPayloadSchema,
   "chapter.revision.draftVersion.append": chapterDraftVersionAppendPayloadSchema,
   "chapter.revision.draftVersion.restore": chapterDraftVersionRestorePayloadSchema,
-  "chapter.revision.conversation.list": chapterRevisionConversationListPayloadSchema,
-  "chapter.revision.conversation.send": chapterRevisionConversationSendPayloadSchema,
-  "chapter.revision.conversation.apply": chapterRevisionConversationApplyPayloadSchema,
   "synopsis.conversation.start": synopsisConversationStartPayloadSchema,
   "synopsis.conversation.list": synopsisConversationListPayloadSchema,
   "synopsis.conversation.setFocus": synopsisConversationSetFocusPayloadSchema,

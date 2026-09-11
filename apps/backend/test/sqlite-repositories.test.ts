@@ -951,4 +951,99 @@ describe("SQLite repository contract", () => {
       { projectionId: testId(260), stateRole: "historical" },
     ])
   })
+
+  it("rebases a stale chapter revision content scope but still rejects a stale turn scope", async () => {
+    const directory = temporaryDirectory()
+    const database = await openProjectDatabase(join(directory, "revision-rebase.sqlite"))
+    const projectRepository = new SqliteProjectRepository(
+      database,
+      join(directory, "workspace"),
+      join(directory, "internal"),
+    )
+    const scopeRepository = new SqliteTaskScopeRepository(database)
+    const commitRepository = new SqliteScopeCommitRepository(database)
+    const projectId = testId(300)
+    await projectRepository.create({
+      projectId,
+      name: "Revision Rebase",
+      manifestVersion: 1,
+      committedSequence: 0,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+    }, {
+      id: projectId,
+      protocolVersion: "worldseed.v1",
+      manifestVersion: 1,
+      displayName: "Revision Rebase",
+      workspaceRootRef: join(directory, "workspace"),
+      fixedEntries: fixedWorkspaceEntries,
+      internalStoreRef: join(directory, "internal"),
+      manifestDigest: digest(fixedWorkspaceEntries),
+    })
+
+    const firstTurnScopeId = testId(301)
+    const revisionScopeId = testId(302)
+    const secondTurnScopeId = testId(303)
+    const staleTurnScopeId = testId(304)
+    await scopeRepository.create({
+      projectId,
+      taskId: testId(311),
+      turnId: testId(321),
+      scopeId: firstTurnScopeId,
+      kind: "turn",
+      status: "created",
+      reason: "First turn",
+      configSnapshot: {},
+      promptSnapshot: {},
+      createdAtMs: 10,
+    })
+    await commitRepository.commit(firstTurnScopeId)
+
+    await scopeRepository.create({
+      projectId,
+      taskId: testId(312),
+      turnId: testId(322),
+      scopeId: revisionScopeId,
+      kind: "revision",
+      status: "created",
+      reason: "chapter_revision_content",
+      configSnapshot: {},
+      promptSnapshot: {},
+      createdAtMs: 20,
+    })
+    await scopeRepository.create({
+      projectId,
+      taskId: testId(313),
+      turnId: testId(323),
+      scopeId: secondTurnScopeId,
+      kind: "turn",
+      status: "created",
+      reason: "Later turn",
+      configSnapshot: {},
+      promptSnapshot: {},
+      createdAtMs: 21,
+    })
+    await commitRepository.commit(secondTurnScopeId)
+
+    await expect(commitRepository.commit(revisionScopeId)).resolves.toMatchObject({
+      scopeId: revisionScopeId,
+      committedSequence: 3,
+    })
+
+    await scopeRepository.create({
+      projectId,
+      taskId: testId(314),
+      turnId: testId(324),
+      scopeId: staleTurnScopeId,
+      kind: "turn",
+      status: "created",
+      reason: "Stale turn",
+      configSnapshot: {},
+      promptSnapshot: {},
+      createdAtMs: 30,
+    })
+    await database.updateTable("projects").set({ committed_sequence: 4 }).where("id", "=", projectId).execute()
+    await expect(commitRepository.commit(staleTurnScopeId)).rejects.toThrow("stale committed sequence")
+    await database.destroy()
+  })
 })

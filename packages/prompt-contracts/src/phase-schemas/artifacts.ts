@@ -489,13 +489,6 @@ export const revisionReviewArtifactSchema = z.object({
   finalSelfReview: z.string().min(1),
 })
 
-export const revisionAssistArtifactSchema = z.object({
-  assistantMessage: z.string().min(1),
-  proposedHeading: z.string().min(1).optional(),
-  proposedBody: z.string().min(1),
-  finalSelfReview: z.string().min(1),
-})
-
 const synopsisDiscussGoalIdSchema = z.string().min(1)
 const synopsisDiscussGoalNarrativeKindSchema = z.enum(["general", "foreshadow", "climax"])
 const synopsisDiscussGoalScaleSchema = z.enum(["short", "medium", "long"])
@@ -654,6 +647,16 @@ export const synopsisDiscussArtifactSchema = z.object({
       newText: z.string().max(40_000),
     })).min(1).max(20),
   }).optional(),
+  /**
+   * Full revised chapter body for the focused (or locked) published chapter.
+   * Applied immediately as a new draft version; official 章节正文/*.md is unchanged.
+   */
+  chapterDraftProposal: z.object({
+    base: z.enum(["body", "draft"]).default("body"),
+    baseDraftVersionId: z.string().min(1).optional(),
+    heading: z.string().min(1),
+    body: z.string().min(1).max(200_000),
+  }).optional(),
   choices: z.array(z.object({
     label: z.string().min(1),
     action: z.enum([
@@ -663,6 +666,8 @@ export const synopsisDiscussArtifactSchema = z.object({
       "confirm_arc_plan",
       "confirm_synopsis",
       "set_focus",
+      "promote_draft_to_body",
+      "restore_body_version",
     ]),
     chapterSequence: z.number().int().positive().optional(),
   })).optional(),
@@ -748,7 +753,6 @@ export const phaseArtifactSchemas: Record<AIPhase, z.ZodType> = {
   frontier_settlement: frontierSettlementArtifactSchema,
   commit_review: commitReviewArtifactSchema,
   revision_review: revisionReviewArtifactSchema,
-  revision_assist: revisionAssistArtifactSchema,
   synopsis_discuss: synopsisDiscussArtifactSchema,
   work_naming: workNamingArtifactSchema,
 }
@@ -777,7 +781,6 @@ export type SettlementReviewArtifact = z.infer<typeof settlementReviewArtifactSc
 export type FrontierSettlementArtifact = z.infer<typeof frontierSettlementArtifactSchema>
 export type CommitReviewArtifact = z.infer<typeof commitReviewArtifactSchema>
 export type RevisionReviewArtifact = z.infer<typeof revisionReviewArtifactSchema>
-export type RevisionAssistArtifact = z.infer<typeof revisionAssistArtifactSchema>
 export type SynopsisDiscussArtifact = z.infer<typeof synopsisDiscussArtifactSchema>
 export type SynopsisPresentationWrite = z.infer<typeof synopsisPresentationWriteSchema>
 export type SettingsExtractionArtifact = z.infer<typeof settingsExtractionArtifactSchema>

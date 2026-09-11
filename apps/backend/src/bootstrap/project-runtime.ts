@@ -13,7 +13,6 @@ import { PROTOCOL_VERSION } from "@worldseed/contracts"
 import {
   TurnOrchestrator,
   ChapterRevisionService,
-  ChapterRevisionConversationService,
   ChapterResolveService,
   ChapterSynopsisService,
   ChapterBodyRematerializeService,
@@ -40,7 +39,6 @@ import {
   SqliteDocumentRepository,
   SqliteChapterRevisionRepository,
   SqliteRevisionDraftVersionRepository,
-  SqliteRevisionConversationRepository,
   SqliteSynopsisConversationRepository,
   SqliteChapterSynopsisRepository,
   SqliteDeductionGoalsRepository,
@@ -521,20 +519,10 @@ export class ProjectRuntime {
     })
   }
 
-  public createChapterRevisionConversationService(): ChapterRevisionConversationService {
-    return new ChapterRevisionConversationService({
-      chapters: this.createChapterRevisionService(),
-      revisions: new SqliteChapterRevisionRepository(this.database),
-      conversation: new SqliteRevisionConversationRepository(this.database),
-      prompts: this.createPromptResourcePort(),
-      createId: randomUUID,
-      now: Date.now,
-    })
-  }
-
   public createSynopsisConversationService(): SynopsisConversationService {
     return new SynopsisConversationService({
       chapters: this.createChapterResolveService(),
+      revisions: this.createChapterRevisionService(),
       chapterSynopsis: this.createChapterSynopsisService(),
       conversation: new SqliteSynopsisConversationRepository(this.database),
       goals: this.createDeductionGoalsService(),

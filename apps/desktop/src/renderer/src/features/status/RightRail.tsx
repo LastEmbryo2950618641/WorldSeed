@@ -64,6 +64,17 @@ const stagedGraphPhases = [
   "graph_governance_review",
 ] as const
 
+const turnCutIdlePhases = new Set([
+  "emergence_review",
+  "settings_extraction",
+  "response_review",
+  "settlement_review",
+  "commit_review",
+  "revision_review",
+  "synopsis_discuss",
+  "work_naming",
+])
+
 const visibleTopLevelPhases = aiPhaseValues.filter((phase) => (
   phase !== "graph_governance"
   && phase !== "semantic_review"
@@ -217,8 +228,8 @@ function ProcessPanel({
     {task?.finalization === undefined || task.finalization.status === "completed" ? null : <p className="phase-empty">正式章节收尾：{task.finalization.status} · {task.finalization.chapterHeading}</p>}
     <div className="phase-list">{visibleTopLevelPhases.flatMap((phase) => {
       const rows: React.ReactNode[] = []
-      if (phase === "settlement_review") {
-        rows.push(<GraphGovernanceGroup task={task} onOpenCheckpoint={onOpenCheckpoint} key="staged-graph-governance" />)
+      if (!shouldShowTopLevelPhase(phase, task)) {
+        return rows
       }
       const runs = task?.phaseRuns?.filter((run) => run.phase === phase) ?? []
       const latest = runs.at(-1)
@@ -245,6 +256,9 @@ function ProcessPanel({
         </summary>
         {latest?.result === undefined ? <PhasePending latestStatus={latest?.status} visualKind={visual.kind} /> : <PhaseDetails result={latest.result} />}
       </details>)
+      if (phase === "dependency_audit") {
+        rows.push(<GraphGovernanceGroup task={task} onOpenCheckpoint={onOpenCheckpoint} key="staged-graph-governance" />)
+      }
       return rows
     })}</div>
     {showTaskError
@@ -273,6 +287,7 @@ function GraphGovernanceGroup({
 }): React.JSX.Element {
   const runs = task?.phaseRuns?.filter((run) => stagedGraphPhases.includes(run.phase as typeof stagedGraphPhases[number])) ?? []
   const completed = new Set(runs.filter((run) => run.status === "completed").map((run) => run.phase))
+  const showGovernanceReview = shouldShowOptionalPhase("graph_governance_review", task)
   const steps = [
     { id: "graph_structure_plan", label: "候选结构规划", kind: "ai" as const },
     { id: "graph_capacity_assessment", label: "容量检查", kind: "mechanical" as const },
@@ -280,7 +295,9 @@ function GraphGovernanceGroup({
     { id: "graph_capacity_reassessment", label: "容量复检", kind: "mechanical" as const },
     { id: "graph_spacetime_settlement", label: "时空与历史结算", kind: "ai" as const },
     { id: "graph_retrieval_design", label: "查询投影设计", kind: "ai" as const },
-    { id: "graph_governance_review", label: "整体治理审核", kind: "ai" as const },
+    ...(showGovernanceReview
+      ? [{ id: "graph_governance_review", label: "整体治理审核", kind: "ai" as const }]
+      : []),
   ]
   const capacityRuns = runs.filter((run) => run.phase === "graph_capacity_rewrite")
   const stepVisuals = steps.map((step) => {
@@ -306,7 +323,8 @@ function GraphGovernanceGroup({
       visual: resolvePhaseVisualState(task, step.id, latest),
     }
   })
-  const done = completed.has("graph_governance_review")
+  const done = completed.has("graph_retrieval_design")
+    && (!showGovernanceReview || completed.has("graph_governance_review"))
   const groupFailed = stepVisuals.some((entry) => entry.visual.kind === "failed")
   const groupRunning = !groupFailed && stepVisuals.some((entry) => entry.visual.kind === "running")
   const interruptedInGroup = isDecisionGatedStatus(task?.status) && (
@@ -571,6 +589,39 @@ function checkpointDecisionKey(task: TaskSnapshot | undefined): string | undefin
   if (task === undefined || !isDecisionGatedStatus(task.status)) return undefined
   const taskId = task.handle?.taskId ?? "task"
   return `${taskId}:${task.status}:${task.interruption?.interruptedAtMs ?? task.interruption?.phase ?? task.lastPhase ?? ""}`
+}
+
+function isActiveTaskStatus(status: string | undefined): boolean {
+  return status === "running"
+    || status === "waiting_for_read"
+    || status === "waiting_for_model"
+    || status === "waiting_for_review"
+    || status === "paused"
+    || status === "awaiting_user_decision"
+    || status === "committing"
+    || status === "needs_revision"
+}
+
+function phaseHasContinuityAdvice(latest: PhaseRunSnapshot | undefined): boolean {
+  if (typeof latest?.result !== "object" || latest.result === null) return false
+  const artifact = (latest.result as Record<string, unknown>).artifact
+  if (typeof artifact !== "object" || artifact === null) return false
+  const advice = (artifact as Record<string, unknown>).continuityAdvice
+  return Array.isArray(advice) && advice.length > 0
+}
+
+function shouldShowOptionalPhase(phase: string, task: TaskSnapshot | undefined): boolean {
+  const latest = task?.phaseRuns?.filter((run) => run.phase === phase).at(-1)
+  if (latest?.status === "running" || latest?.status === "failed") return true
+  if (isActiveTaskStatus(task?.status) && (task?.lastPhase === phase || task?.interruption?.phase === phase)) {
+    return true
+  }
+  return phaseHasContinuityAdvice(latest)
+}
+
+function shouldShowTopLevelPhase(phase: string, task: TaskSnapshot | undefined): boolean {
+  if (!turnCutIdlePhases.has(phase)) return true
+  return shouldShowOptionalPhase(phase, task)
 }
 
 function resolvePhaseVisualState(

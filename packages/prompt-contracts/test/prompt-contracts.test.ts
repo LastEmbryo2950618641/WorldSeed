@@ -222,6 +222,16 @@ describe("prompt contracts", () => {
     expect(prompt).toContain("性格与背景")
   })
 
+  it("requires outline-to-prose translation rules in the draft prompt", () => {
+    const packageRoot = resolve(process.cwd(), "packages/prompt-contracts")
+    const draft = readFileSync(resolve(packageRoot, promptDefinitions.draft.resourcePath), "utf8")
+    expect(draft).toContain("细纲 → 正文")
+    expect(draft).toContain("翻译，不要照抄")
+    expect(draft).toContain("禁止层")
+    expect(draft).toContain("第X章")
+    expect(draft).toContain("服从细纲 = 演出其要求的场面与约束")
+  })
+
   it("requires character personality in settings revision and draft prompts", () => {
     const packageRoot = resolve(process.cwd(), "packages/prompt-contracts")
     const revision = readFileSync(resolve(packageRoot, SETTINGS_REVISION_GUIDE_RESOURCE), "utf8")
@@ -640,5 +650,22 @@ describe("prompt contracts", () => {
       synopsisBody: "",
     })
     expect(parsed.synopsisBody).toBeUndefined()
+  })
+
+  it("accepts chapterDraftProposal and promote_draft_to_body", () => {
+    const parsed = synopsisDiscussArtifactSchema.parse({
+      assistantMessage: "已写入新草稿。",
+      chapterDraftProposal: {
+        heading: "第一章 虫与蝶",
+        body: "雨还在下。",
+      },
+      choices: [{
+        label: "是否确认用这份草稿覆盖正式正文（当前正文将备份为旧版本）",
+        action: "promote_draft_to_body",
+      }],
+      finalSelfReview: "Official file unchanged.",
+    })
+    expect(parsed.chapterDraftProposal?.body).toBe("雨还在下。")
+    expect(parsed.choices?.[0]?.action).toBe("promote_draft_to_body")
   })
 })

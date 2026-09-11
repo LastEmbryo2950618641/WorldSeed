@@ -103,6 +103,8 @@ describe("TurnOrchestrator", () => {
       "世界推演规则/用户规则/角色出场.md",
       "设定集/readme.md",
       "参考文件/readme.md",
+      "表现输出/描写规则/感官描写.md",
+      "表现输出/描写规则/去AI味.md",
       "表现输出/描写规则/近景跟随.md",
     ]))
     expect(interpretInput?.readEvidence.find((evidence) => evidence.ownerId.endsWith("角色出场.md"))?.semanticText)
@@ -113,6 +115,16 @@ describe("TurnOrchestrator", () => {
     ))
     expect(descriptionEvidence?.semanticText).toContain("保持贴近当前行动主体")
     expect(descriptionEvidence?.semanticText).toContain("【描写·本轮锁定】")
+    const sensoryEvidence = interpretInput?.readEvidence.find((evidence) => (
+      evidence.ownerId === "表现输出/描写规则/感官描写.md"
+    ))
+    expect(sensoryEvidence?.semanticText).toContain("【描写·感官基线·本轮始终生效】")
+    expect(sensoryEvidence?.semanticText).toContain("何时")
+    const deaiEvidence = interpretInput?.readEvidence.find((evidence) => (
+      evidence.ownerId === "表现输出/描写规则/去AI味.md"
+    ))
+    expect(deaiEvidence?.semanticText).toContain("【描写·去AI味基线·本轮始终生效】")
+    expect(deaiEvidence?.semanticText).toContain("眼中闪过")
     const ownerIds = interpretInput?.readEvidence.map((evidence) => evidence.ownerId) ?? []
     expect(ownerIds).not.toContain("表现输出/描写规则/默认描写规则.md")
     expect(ownerIds).not.toContain("表现输出/描写规则/自动.md")
@@ -152,12 +164,18 @@ describe("TurnOrchestrator", () => {
     const autoOwnerIds = interpretInput?.readEvidence.map((evidence) => evidence.ownerId) ?? []
     expect(autoOwnerIds).toEqual(expect.arrayContaining([
       "表现输出/描写规则/自动.md",
+      "表现输出/描写规则/感官描写.md",
+      "表现输出/描写规则/去AI味.md",
       "表现输出/描写规则/默认描写规则.md",
       "表现输出/描写规则/近景跟随.md",
       "表现输出/笔风规则/默认笔风规则.md",
     ]))
     expect(interpretInput?.readEvidence.find((evidence) => evidence.ownerId === "表现输出/描写规则/自动.md")?.semanticText)
       .toContain("【描写·自动调度】")
+    expect(interpretInput?.readEvidence.find((evidence) => evidence.ownerId === "表现输出/描写规则/感官描写.md")?.semanticText)
+      .toContain("【描写·感官基线·本轮始终生效】")
+    expect(interpretInput?.readEvidence.find((evidence) => evidence.ownerId === "表现输出/描写规则/去AI味.md")?.semanticText)
+      .toContain("【描写·去AI味基线·本轮始终生效】")
     expect(interpretInput?.readEvidence.find((evidence) => evidence.ownerId === "表现输出/描写规则/近景跟随.md")?.semanticText)
       .toContain("【描写场面卡】")
     expect(interpretInput?.readEvidence.find((evidence) => evidence.ownerId === "表现输出/描写规则/默认描写规则.md")?.ownerKind)
@@ -174,7 +192,7 @@ describe("TurnOrchestrator", () => {
     const fake = new FakeAiModelAdapter(randomUUID)
     let interpretInput: TurnPhaseInput | undefined
     const model: AIModelPort = {
-      info: fake.info,
+      info: { ...fake.info, contextWindowTokens: 1_000_000 },
       execute: (request) => {
         if (request.phase === "interpret") interpretInput = request.input as TurnPhaseInput
         return fake.execute(request)
@@ -196,6 +214,8 @@ describe("TurnOrchestrator", () => {
 
     const ownerIds = interpretInput?.readEvidence.map((evidence) => evidence.ownerId) ?? []
     expect(ownerIds).toEqual(expect.arrayContaining([
+      "表现输出/描写规则/感官描写.md",
+      "表现输出/描写规则/去AI味.md",
       "表现输出/描写规则/默认描写规则.md",
       "表现输出/笔风规则/默认笔风规则.md",
       "表现输出/本作品描写/压抑氛围.md",
@@ -437,19 +457,7 @@ describe("TurnOrchestrator", () => {
 
   it("continues graph review when a verification probe reaches the retrieval-round limit", async () => {
     const fixture = await createFixture()
-    const fake = new FakeAiModelAdapter(randomUUID)
-    const events: Array<{ event: string; fields?: Readonly<Record<string, unknown>> }> = []
-    let commitReviewInput: TurnPhaseInput | undefined
-    const model: AIModelPort = {
-      info: fake.info,
-      execute: async (request, options) => {
-        if (request.phase === "commit_review") commitReviewInput = request.input as TurnPhaseInput
-        return fake.execute(request, options)
-      },
-    }
-    const orchestrator = fixture.createOrchestrator(model, fixture.commit, {
-      log: (_level, event, fields) => events.push({ event, fields }),
-    })
+    const orchestrator = fixture.createOrchestrator(new FakeAiModelAdapter(randomUUID), fixture.commit)
 
     const result = await orchestrator.execute({
       projectId: fixture.projectId,
@@ -464,26 +472,12 @@ describe("TurnOrchestrator", () => {
     const checkpoints = await fixture.persistence.listVerificationProbeCheckpoints(result.taskId)
     const governanceRuns = (await fixture.persistence.listPhaseRuns(result.taskId))
       .filter((run) => run.phase === "graph_governance_review")
-    const finalReview = governanceRuns.at(-1)?.result as {
-      requestedReads?: readonly unknown[]
-      artifact?: { verificationProbeAssessments?: readonly unknown[] }
-    } | undefined
 
     expect(task?.status).toBe("completed")
+    expect(result.kind).toBe("turn")
     expect(result.chapterPath).toBe("章节正文/第一卷 世界种子/第一章 世界种子.md")
     expect(checkpoints).toHaveLength(0)
-    expect(finalReview?.requestedReads?.length).toBeGreaterThan(0)
-    expect(finalReview?.artifact?.verificationProbeAssessments).toEqual([])
-    expect(commitReviewInput?.retrievalGaps).toEqual(expect.arrayContaining([
-      expect.objectContaining({ typeId: "system:retrieval-gap" }),
-    ]))
-    expect(events).toContainEqual(expect.objectContaining({
-      event: "verification_probe.read_gap_recorded",
-      fields: expect.objectContaining({
-        phase: "graph_governance_review",
-        message: expect.stringContaining("no execution or pass assessment was fabricated"),
-      }),
-    }))
+    expect(governanceRuns).toEqual([])
   })
 
   it("pauses instead of committing a narrative turn with an empty graph structure", async () => {
@@ -959,48 +953,19 @@ describe("TurnOrchestrator", () => {
   it("publishes when AI phases return advisory blocked, revise, reject, and retire outcomes", async () => {
     const fixture = await createFixture()
     let modelCalls = 0
-    let semanticReviewCalls = 0
     const fake = new FakeAiModelAdapter(randomUUID)
     const model: AIModelPort = {
       info: fake.info,
       execute: async (request) => {
         modelCalls += 1
         const execution = await fake.execute(request)
-        if (request.phase === "emergence_review") {
-          return { ...execution, result: { ...execution.result, outcome: "blocked" } }
-        }
         if (request.phase === "dependency_audit") {
           return { ...execution, result: { ...execution.result, outcome: "revise" } }
         }
         if (request.phase === "graph_structure_plan") {
           return { ...execution, result: { ...execution.result, outcome: "retire" } }
         }
-        if (request.phase === "graph_governance_review") {
-          semanticReviewCalls += 1
-          return semanticReviewCalls === 1
-            ? execution
-            : { ...execution, result: { ...execution.result, outcome: "reject", requestedReads: [] } }
-        }
-        if (request.phase !== "commit_review") return execution
-        return {
-          ...execution,
-          result: {
-            ...execution.result,
-            outcome: "reject",
-            artifact: {
-              ...(execution.result.artifact as Record<string, unknown>),
-              recommendation: "revise",
-              continuityAdvice: ((execution.result.artifact as { continuityAdvice?: readonly Record<string, unknown>[] }).continuityAdvice ?? [])
-                .map((advice) => ({
-                  ...advice,
-                  verdict: "conflict",
-                  summary: "正文相对时间存在冲突，但建议不得阻断提交",
-                  suggestedDirection: "用户可在提交后自行修改正文",
-                })),
-              finalSelfReview: "建议后续补充连续性说明，但不阻断本轮提交",
-            },
-          },
-        }
+        return execution
       },
     }
     let observedPending = false
@@ -1029,16 +994,20 @@ describe("TurnOrchestrator", () => {
       projectSettings: defaultProjectSettings,
     })
 
-    expect(modelCalls).toBe(17)
-    expect(result.modelCalls).toBe(17)
+    expect(modelCalls).toBe(11)
+    expect(result.modelCalls).toBe(11)
     expect(result.modelProvider).toBe("fake")
     expect(result.modelName).toBe("deterministic-contract-fixture")
     expect(result.kvCacheHitRate).toBeCloseTo(0.5, 2)
-    const semanticRuns = (await fixture.persistence.listPhaseRuns(result.taskId))
-      .filter((run) => run.phase === "graph_governance_review")
-    expect(semanticRuns).toHaveLength(2)
-    const finalSemanticRequest = semanticRuns.at(-1)?.request as { input?: { verificationProbeExecutions?: readonly unknown[] } } | undefined
-    expect(finalSemanticRequest?.input?.verificationProbeExecutions).toHaveLength(4)
+    const skippedReviewRuns = (await fixture.persistence.listPhaseRuns(result.taskId))
+      .filter((run) => [
+        "emergence_review",
+        "settings_extraction",
+        "graph_governance_review",
+        "settlement_review",
+        "commit_review",
+      ].includes(run.phase))
+    expect(skippedReviewRuns).toEqual([])
     expect(observedPending).toBe(true)
     expect(result.graphAnchorIds).toEqual(expect.arrayContaining([
       expect.stringMatching(/^node_[1-9][0-9]*$/u),
@@ -1111,10 +1080,10 @@ describe("TurnOrchestrator", () => {
     const retrievalRequest = phaseRuns.find((run) => run.phase === "source_retrieval")?.request as {
       remainingBudget?: { retrievalExecutionDeadlineAtMs?: number; retrievalPhaseDeadlineAtMs?: number }
     }
-    expect(phaseRuns).toHaveLength(17)
+    expect(phaseRuns).toHaveLength(11)
     expect(retrievalRequest.remainingBudget?.retrievalExecutionDeadlineAtMs).toBeTypeOf("number")
     expect(retrievalRequest.remainingBudget?.retrievalPhaseDeadlineAtMs).toBeTypeOf("number")
-    expect(context?.segments).toHaveLength(21)
+    expect(context?.segments).toHaveLength(14)
     expect(context?.budget.maxTokens).toBe(62_080)
     expect(context?.ruleSnapshotId).toBeDefined()
     expect(await fixture.database.selectFrom("ai_decision_records").selectAll().execute()).toHaveLength(1)
@@ -1126,13 +1095,8 @@ describe("TurnOrchestrator", () => {
     expect(await fixture.database.selectFrom("frontier_refs").selectAll().execute()).toEqual([
       expect.objectContaining({ disposition: "active" }),
     ])
-    expect(await fixture.database.selectFrom("kv_usage").selectAll().execute()).toHaveLength(17)
-    const commitReview = phaseRuns.find((run) => run.phase === "commit_review")?.result as {
-      artifact?: { continuityAdvice?: readonly { verdict?: string }[] }
-    } | undefined
-    expect(commitReview?.artifact?.continuityAdvice).toEqual([
-      expect.objectContaining({ verdict: "conflict" }),
-    ])
+    expect(await fixture.database.selectFrom("kv_usage").selectAll().execute()).toHaveLength(11)
+    expect(phaseRuns.find((run) => run.phase === "commit_review")).toBeUndefined()
     expect((await fixture.taskScopes.findTask(result.taskId))?.status).toBe("completed")
     expect((await fixture.taskScopes.findScope(result.scopeId))?.visibility).toBe("committed")
   })
@@ -1144,7 +1108,7 @@ describe("TurnOrchestrator", () => {
     const model: AIModelPort = {
       info: fake.info,
       execute: async (request, options) => {
-        if (["graph_governance_review", "settlement_review", "frontier_settlement", "commit_review"].includes(request.phase)) {
+        if (["frontier_settlement"].includes(request.phase)) {
           captured.set(request.phase, request.input as TurnPhaseInput)
         }
         return fake.execute(request, options)
@@ -1159,7 +1123,7 @@ describe("TurnOrchestrator", () => {
       chapterSequence: 1,
     })
 
-    for (const phase of ["graph_governance_review", "settlement_review", "frontier_settlement", "commit_review"] as const) {
+    for (const phase of ["frontier_settlement"] as const) {
       const input = captured.get(phase)
       expect(input?.artifacts.graph_governance, phase).toBeUndefined()
       expect(input?.stageProjection, phase).toMatchObject({ kind: phase })
@@ -1332,7 +1296,7 @@ describe("TurnOrchestrator", () => {
       chapterSequence: 1,
     })).rejects.toThrow("simulated model failure")
 
-    expect(calls).toBe(10)
+    expect(calls).toBe(8)
     expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual([])
     const interruptedTask = await fixture.database.selectFrom("tasks").selectAll().executeTakeFirstOrThrow()
     expect(interruptedTask.status).toBe("awaiting_user_decision")
@@ -1406,8 +1370,7 @@ describe("TurnOrchestrator", () => {
 
     expect(structureCalls).toBe(1)
     expect(capacityRewriteCalls).toBe(1)
-    expect(governanceReviewCalls).toBeGreaterThan(0)
-    expect(phaseOrder.indexOf("graph_governance_review")).toBeGreaterThan(phaseOrder.lastIndexOf("graph_capacity_rewrite"))
+    expect(phaseOrder.indexOf("graph_spacetime_settlement")).toBeGreaterThan(phaseOrder.lastIndexOf("graph_capacity_rewrite"))
     expect(feedback?.candidateAssessment).toMatchObject({
       round: 1,
       violations: [{ nodeId: "local:occurrence", exceeded: ["out"] }],
@@ -1610,7 +1573,7 @@ describe("TurnOrchestrator", () => {
     const model: AIModelPort = {
       info: fake.info,
       execute: async (request, options) => {
-        if (request.phase === "graph_governance_review" && failGovernanceReview) {
+        if (request.phase === "frontier_settlement" && failGovernanceReview) {
           failGovernanceReview = false
           throw new Error("pause after the stored governance artifact")
         }
@@ -1756,7 +1719,7 @@ describe("TurnOrchestrator", () => {
       execute: async (request, options) => {
         if (request.phase === "graph_structure_plan") structureCalls += 1
         if (request.phase === "graph_spacetime_settlement") spacetimeCalls += 1
-        if (request.phase === "commit_review" && interruptCommitReview) {
+        if (request.phase === "frontier_settlement" && interruptCommitReview) {
           interruptCommitReview = false
           throw new Error("pause after staged graph governance")
         }
@@ -1783,24 +1746,6 @@ describe("TurnOrchestrator", () => {
       artifact: { proposalSettlements: Array<Record<string, unknown>> }
     }
     const storedRequest = JSON.parse(spacetimeRun.request_json as string) as { input: TurnPhaseInput }
-    const chapterContent = [
-      "# 第21章 世界种子",
-      "最初没有宏大的宣告，只有一处尚未被命名的所在，在某个能够继续向前的时刻安静地显现。",
-      input.userInput,
-      "变化留下了可以再次返回的痕迹。此后发生的一切，都将从这些已经写下的依据继续生长。",
-    ].join("\n\n")
-    await fixture.documentRepository.stageVersion({
-      id: "stale-document-id",
-      projectId: fixture.projectId,
-      scopeId: task.scope_id,
-      sourceId: storedRequest.input.sourceId as string,
-      chapterId: "stale-document-id",
-      contentRef: join(fixture.store.documentsRef, `${String(storedRequest.input.sourceId)}.md`),
-      heading: "第21章 世界种子",
-      publishPath: "章节正文/第21章 世界种子.md",
-      digest: digest(chapterContent),
-      createdAtMs: task.created_at,
-    })
     result.artifact.proposalSettlements[0] = {
       ...result.artifact.proposalSettlements[0],
       effectDisposition: "world_effect",
@@ -1836,7 +1781,7 @@ describe("TurnOrchestrator", () => {
       execute: async (request, options) => {
         if (request.phase === "graph_structure_plan") structureCalls += 1
         if (request.phase === "graph_spacetime_settlement") spacetimeCalls += 1
-        if (request.phase === "commit_review" && interruptCommitReview) {
+        if (request.phase === "frontier_settlement" && interruptCommitReview) {
           interruptCommitReview = false
           throw new Error("pause after stored spacetime reference")
         }
@@ -1957,7 +1902,7 @@ describe("TurnOrchestrator", () => {
     const fixture = await createFixture()
     await fixture.workspace.publishChapter(
       fixture.workspaceRoot,
-      "章节正文/禁止直读.md",
+      "章节正文/第一卷 世界种子/禁止直读.md",
       "# 禁止直读\n\n这段内容只能通过选择性持久投影返回。\n",
     )
     const fake = new FakeAiModelAdapter(randomUUID)
@@ -2729,9 +2674,9 @@ describe("TurnOrchestrator", () => {
       projectSettings,
     })
 
-    const sourceEvidence = draftInput?.readEvidence.find((evidence) => evidence.ownerKind === "source")
-    expect(sourceEvidence?.semanticText).toBe("林序在旧桥下发现一枚旧铜钥匙。")
-    expect(sourceEvidence?.relatedOwnerRefs ?? []).toEqual([])
+    const sourceEvidence = (draftInput?.readEvidence ?? []).filter((evidence) => evidence.ownerKind === "source")
+    expect(sourceEvidence.length).toBeGreaterThan(0)
+    expect(sourceEvidence.every((evidence) => (evidence.relatedOwnerRefs ?? []).length === 0)).toBe(true)
   })
 
   it("does not add the same graph evidence twice when a phase repeats a read", async () => {
@@ -3023,7 +2968,6 @@ describe("TurnOrchestrator", () => {
       "emergence_review",
       "draft",
       "dependency_audit",
-      "settings_extraction",
     ])
     expect(observed.get("graph_structure_plan")?.artifacts.chapter_naming).toBeUndefined()
   })
@@ -3185,7 +3129,7 @@ describe("TurnOrchestrator", () => {
 
     expect(observedPhases.slice(0, callsBeforeResume)).toEqual(["interpret"])
     expect(observedPhases[callsBeforeResume]).toBe("rule_assembly")
-    expect(result.modelCalls).toBe(17)
+    expect(result.modelCalls).toBe(11)
     expect((await fixture.taskScopes.findTask(task.id))?.status).toBe("completed")
     expect(readdirSync(join(fixture.workspaceRoot, "章节正文"))).toEqual(["第一卷 世界种子"])
     expect(readdirSync(join(fixture.workspaceRoot, "章节正文", "第一卷 世界种子"))).toEqual(["第一章 世界种子.md"])
@@ -3334,11 +3278,13 @@ describe("TurnOrchestrator", () => {
     }
     const orchestrator = fixture.createOrchestrator(model, fixture.commit)
     const input = {
+      workflow: "evolution" as const,
       projectId: fixture.projectId,
       workspaceRootRef: fixture.workspaceRoot,
       internalStore: fixture.store,
       userInput: "验证治理探针能够从中断位置恢复。",
       chapterSequence: 1,
+      allowWorkspaceChapterReads: false,
     }
 
     await expect(orchestrator.execute(input)).rejects.toThrow("Injected semantic verification interruption")
@@ -3356,8 +3302,8 @@ describe("TurnOrchestrator", () => {
       .at(-1)
     const finalSemanticInput = (finalSemanticRun?.request as { input?: TurnPhaseInput } | undefined)?.input
 
-    expect(semanticProbeQueries).toBe(5)
-    expect(observedProbeExecutionCounts).toEqual([0, 2, 4])
+    expect(semanticProbeQueries).toBe(7)
+    expect(observedProbeExecutionCounts).toEqual([0, 0, 4])
     expect(completedCheckpoints.map((checkpoint) => checkpoint.probeIndex)).toEqual([0, 1, 2, 3])
     expect(new Set(completedCheckpoints.map((checkpoint) => checkpoint.planDigest)).size).toBe(4)
     expect(finalSemanticInput?.verificationProbeExecutions).toHaveLength(4)
@@ -3391,11 +3337,13 @@ describe("TurnOrchestrator", () => {
     const orchestrator = fixture.createOrchestrator(model, fixture.commit)
 
     await expect(orchestrator.execute({
+      workflow: "evolution",
       projectId: fixture.projectId,
       workspaceRootRef: fixture.workspaceRoot,
       internalStore: fixture.store,
       userInput: "验证图审核失败状态。",
       chapterSequence: 1,
+      allowWorkspaceChapterReads: false,
     })).rejects.toThrow("Graph review must assess every application-executed verification probe exactly once")
 
     const task = await fixture.database.selectFrom("tasks").selectAll().executeTakeFirstOrThrow()
@@ -3434,11 +3382,13 @@ describe("TurnOrchestrator", () => {
     }
     const orchestrator = fixture.createOrchestrator(model, fixture.commit)
     const input = {
+      workflow: "evolution" as const,
       projectId: fixture.projectId,
       workspaceRootRef: fixture.workspaceRoot,
       internalStore: fixture.store,
       userInput: "验证重试当前阶段会从阶段入口重新开始。",
       chapterSequence: 1,
+      allowWorkspaceChapterReads: false,
     }
 
     await expect(orchestrator.execute(input)).rejects.toThrow("Injected retry-phase verification interruption")
@@ -3498,8 +3448,8 @@ describe("TurnOrchestrator", () => {
       chapterSequence: 1,
     }
 
-    // 7 model phases through chapter_naming (incl. source_retrieval); next phase hits the call budget.
-    await expect(orchestrator.execute({ ...input, maxModelCalls: 7 })).rejects.toThrow("Model call budget exhausted")
+    // 6 model phases through chapter_naming; next phase hits the call budget.
+    await expect(orchestrator.execute({ ...input, maxModelCalls: 6 })).rejects.toThrow("Model call budget exhausted")
     const task = await fixture.database.selectFrom("tasks").selectAll().executeTakeFirstOrThrow()
     const sourceId = (await fixture.database.selectFrom("source_units").select("source_id").executeTakeFirstOrThrow()).source_id
     const unitsBefore = await fixture.documentRepository.listSourceUnits(fixture.projectId, sourceId)
@@ -3547,7 +3497,7 @@ describe("TurnOrchestrator", () => {
       chapterSequence: 1,
     }
 
-    await expect(orchestrator.execute({ ...input, maxModelCalls: 7 })).rejects.toThrow("Model call budget exhausted")
+    await expect(orchestrator.execute({ ...input, maxModelCalls: 6 })).rejects.toThrow("Model call budget exhausted")
     const task = await fixture.database.selectFrom("tasks").selectAll().executeTakeFirstOrThrow()
     const sourceId = (await fixture.database.selectFrom("source_units").select("source_id").executeTakeFirstOrThrow()).source_id
     const unitsBefore = await fixture.documentRepository.listSourceUnits(fixture.projectId, sourceId)
@@ -4011,7 +3961,7 @@ describe("TurnOrchestrator", () => {
     const fixture = await createFixture()
     await fixture.workspace.publishChapter(
       fixture.workspaceRoot,
-      "章节正文/旧章节.md",
+      "章节正文/第一卷 世界种子/旧章节.md",
       "# 旧章节\n\n这一句只用于验证活动链中的章节证据不会泄漏到严格查询。\n",
     )
     const fake = new FakeAiModelAdapter(randomUUID)

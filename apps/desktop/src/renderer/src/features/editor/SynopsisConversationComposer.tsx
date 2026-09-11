@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react"
-import { Bot, ChevronDown, Ellipsis, FileText, Globe, Loader2, Play, RefreshCw, Send, Settings2, Sparkles, Square, UserRound } from "lucide-react"
+import { Bot, ChevronDown, ChevronRight, Ellipsis, FileText, Globe, Loader2, Play, RefreshCw, Send, Settings2, Sparkles, Square, UserRound } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type {
@@ -98,6 +98,8 @@ type Props = Readonly<{
   onSetFocus?(sequence: number, focusKind: DiscussFocusKind): void
   focusChapters?: readonly DiscussFocusChapterOption[]
   focusLocked?: boolean
+  layout?: "desk" | "rail"
+  onPromoteDraftToBody?(): Promise<void>
   onOpenSettingsLineage?(): void
   tokenMetrics?: Readonly<{
     kvRate?: number
@@ -223,16 +225,22 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
     }
   }, [])
 
+  const isRail = props.layout === "rail"
   const badgeCount = toolbarBadgeCount(goals.snapshot, chapterSequence)
   const latestChoiceMessageId = [...visibleMessages]
     .reverse()
     .find((message) => message.role === "assistant" && (message.choices?.length ?? 0) > 0)
     ?.messageId
 
-  return <div className="creation-desk-workspace" data-testid="synopsis-conversation">
+  return <div
+    className={`creation-desk-workspace${isRail ? " creation-desk-workspace--rail" : ""}`}
+    data-testid={isRail ? "chapter-conversation" : "synopsis-conversation"}
+  >
     <div className="creation-desk-body">
       <div className="creation-desk-thread-wrap">
-        <CreationDeskToolbar
+        {isRail
+          ? <div className="composer-heading"><span>Agent 对话</span></div>
+          : <CreationDeskToolbar
           goalsOpen={goalsOpen}
           badgeCount={badgeCount}
           onToggleGoals={() => {
@@ -262,15 +270,17 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
             onApprove={goals.approveProposals}
             onReject={goals.rejectProposals}
           />}
-        />
+        />}
         <div className="creation-desk-thread overlay-scrollbar" ref={threadRef} aria-live="polite">
         <div className="creation-desk-thread-inner">
           {visibleMessages.length === 0 && !props.busy
             ? <div className="creation-desk-empty">
                 <Sparkles size={28} aria-hidden="true" />
-                <h2>剧情梗概讨论</h2>
-                <p>描述下一章想怎么写，Agent 会与你讨论并更新 `[剧情梗概].md`。</p>
-                {props.session === undefined
+                <h2>{isRail ? "修订这一章" : "剧情梗概讨论"}</h2>
+                <p>{isRail
+                  ? "描述你想如何改这一章，Agent 会自动写入新草稿；覆盖正式正文需要你确认。"
+                  : "描述下一章想怎么写，Agent 会与你讨论并更新 `[剧情梗概].md`。"}</p>
+                {props.session === undefined && !isRail
                   ? <span className="creation-desk-empty-hint">发送首条消息后将创建占位文件</span>
                   : null}
               </div>
@@ -287,6 +297,9 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
                   onPromoteStaging={props.onPromoteStaging}
                   onStartTurn={props.onStartTurn}
                   onRefreshChoices={refreshChoices}
+                  {...(props.onPromoteDraftToBody === undefined
+                    ? {}
+                    : { onPromoteDraftToBody: props.onPromoteDraftToBody })}
                   {...(props.onSetFocus === undefined ? {} : { onSetFocus: props.onSetFocus })}
                   {...(props.pendingStagingPromotes === undefined
                     ? {}
@@ -305,7 +318,6 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
                         <header>Agent{discussPhase === "finalizing" ? " · 收尾中" : " · 进行中"}</header>
                         <AgentStructuredBody
                           segments={buildLiveTimeline(props.stream, streamPreview, discussPhase)}
-                          mode="live"
                           streaming
                           discussPhase={discussPhase}
                           {...(props.onOpenSettingsLineage === undefined
@@ -332,7 +344,9 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
       </div>
 
       <footer className="creation-desk-footer">
-        {props.session !== undefined && props.onSetFocus !== undefined
+        {isRail
+          ? null
+          : props.session !== undefined && props.onSetFocus !== undefined
           ? <CreationDeskFocusBar
               session={props.session}
               chapters={props.focusChapters ?? []}
@@ -348,7 +362,9 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
         {goals.error !== undefined
           ? <div className="creation-desk-goals-error" role="alert">{goals.error}</div>
           : null}
-        <div className="creation-desk-settings">
+        {isRail
+          ? null
+          : <div className="creation-desk-settings">
           <Settings2 size={13} aria-hidden="true" />
           <label>
             <span>描写</span>
@@ -404,7 +420,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
               <option value="payoff">落点</option>
             </select>
           </label>
-        </div>
+        </div>}
         {discussStatusLabel === undefined
           ? null
           : <p className="creation-desk-discuss-status" data-testid="creation-desk-discuss-status" aria-live="polite">
@@ -412,6 +428,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
               <span className="creation-desk-discuss-status-hint">右侧「运行监控」仅反映正式推演</span>
             </p>}
         <CreationDeskComposerInput
+          compact={isRail}
           busy={props.busy}
           running={props.running}
           showStop={showStop}
@@ -436,6 +453,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
 }
 
 type ComposerInputProps = Readonly<{
+  compact?: boolean
   busy: boolean
   running: boolean
   showStop: boolean
@@ -471,6 +489,7 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
     ?? props.modelProfiles[0]
 
   useEffect(() => {
+    if (props.compact === true) return
     if (activeProfile === undefined) {
       loadedCatalogSigRef.current = ""
       setCatalogModels([])
@@ -531,7 +550,7 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
       cancelled = true
       window.clearTimeout(timeout)
     }
-  }, [activeProfile])
+  }, [activeProfile, props.compact])
 
   const submit = async (): Promise<void> => {
     const message = draft.trim()
@@ -547,17 +566,19 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
     return catalogModels
   })()
 
-  return <div className="creation-desk-composer">
-    <div className="creation-desk-token-metrics" data-testid="creation-desk-token-metrics">
-      <span>KV <strong>{formatDeskKv(props.tokenMetrics?.kvRate)}</strong></span>
-      <span>Token <strong>{formatDeskTokens(props.tokenMetrics?.totalTokens)}</strong></span>
-      <span>上下文 <strong>{formatDeskContext(props.tokenMetrics?.currentContextTokens, props.tokenMetrics?.contextWindowTokens)}</strong></span>
-    </div>
+  return <div className={`creation-desk-composer${props.compact === true ? " is-compact" : ""}`}>
+    {props.compact === true
+      ? null
+      : <div className="creation-desk-token-metrics" data-testid="creation-desk-token-metrics">
+          <span>KV <strong>{formatDeskKv(props.tokenMetrics?.kvRate)}</strong></span>
+          <span>Token <strong>{formatDeskTokens(props.tokenMetrics?.totalTokens)}</strong></span>
+          <span>上下文 <strong>{formatDeskContext(props.tokenMetrics?.currentContextTokens, props.tokenMetrics?.contextWindowTokens)}</strong></span>
+        </div>}
     <textarea
       value={draft}
       disabled={props.busy || props.running}
       placeholder="告诉 Agent 下一章想怎么推进…"
-      rows={3}
+      rows={props.compact === true ? 2 : 3}
       onChange={(event) => { setDraft(event.target.value); }}
       onKeyDown={(event) => {
         if (event.key === "Enter" && !event.shiftKey) {
@@ -567,7 +588,9 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
       }}
     />
     <div className="creation-desk-composer-actions">
-      <div className="creation-desk-model-quick" data-testid="creation-desk-model-quick">
+      {props.compact === true
+        ? null
+        : <div className="creation-desk-model-quick" data-testid="creation-desk-model-quick">
         <label>
           <UiTooltip label="当前模型配置下的可选模型（与「模型配置」里的模型列表相同）">
             <span>模型</span>
@@ -597,7 +620,7 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
           </UiTooltip>
           <select
             aria-label="模型效果"
-            value={activeProfile?.reasoningEffort ?? "high"}
+            value={activeProfile?.reasoningEffort ?? "medium"}
             disabled={activeProfile === undefined}
             onChange={(event) => {
               props.onReasoningEffortChange(event.target.value as ReasoningEffort)
@@ -612,7 +635,7 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
             <option value="max">最大</option>
           </select>
         </label>
-      </div>
+      </div>}
       {props.showStop
         ? <button
             type="button"
@@ -637,12 +660,15 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
           : <button
             type="button"
             className="creation-desk-send"
+            data-testid="creation-desk-send"
             disabled={props.running || draft.trim().length === 0}
             onClick={() => { void submit(); }}
           >
             <Send size={15} aria-hidden="true" />发送
           </button>}
-      <div className="creation-desk-advanced-menu" ref={props.advancedMenuRef}>
+      {props.compact === true
+        ? null
+        : <div className="creation-desk-advanced-menu" ref={props.advancedMenuRef}>
         <UiTooltip label="更多操作">
           <button
             type="button"
@@ -676,7 +702,7 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
               </button>
             </div>
           : null}
-      </div>
+      </div>}
     </div>
   </div>
 }
@@ -694,6 +720,7 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
   onRejectStagingPromote?(proposalIds: readonly string[]): Promise<void>
   onStartTurn(): void
   onSetFocus?(sequence: number, focusKind: DiscussFocusKind): void
+  onPromoteDraftToBody?(): Promise<void>
   onRefreshChoices(messageId: string): Promise<void>
   onOpenSettingsLineage?(): void
 }>): React.JSX.Element {
@@ -717,7 +744,6 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
                 text: resolveThinkingDisplay(round.text) ?? round.text,
               })),
             })}
-            mode="persisted"
             {...(props.onOpenSettingsLineage === undefined
               ? {}
               : { onOpenSettingsLineage: props.onOpenSettingsLineage })}
@@ -741,6 +767,10 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
                 }
                 if (choice.action === "confirm_synopsis") {
                   void props.onSend("用这份梗概写细纲")
+                  return
+                }
+                if (choice.action === "promote_draft_to_body") {
+                  void props.onPromoteDraftToBody?.()
                   return
                 }
                 if (choice.action === "set_focus" && choice.chapterSequence !== undefined) {
@@ -784,13 +814,11 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
 
 const AgentStructuredBody = memo(function AgentStructuredBody({
   segments,
-  mode,
   streaming = false,
   discussPhase = "idle",
   onOpenSettingsLineage,
 }: Readonly<{
   segments: readonly AgentTimelineSegment[]
-  mode: "live" | "persisted"
   streaming?: boolean
   discussPhase?: DiscussBusyPhase
   onOpenSettingsLineage?(): void
@@ -806,14 +834,12 @@ const AgentStructuredBody = memo(function AgentStructuredBody({
   return <div className="agent-structured-body">
     {segments.map((segment, index) => {
       if (segment.kind === "thinking") {
-        const open = mode === "live" && index === lastThinkingIndex
         return <details
           key={`thinking-${String(segment.round)}-${String(index)}`}
           className="agent-stream-block thinking"
-          open={open}
         >
           <summary>
-            <ChevronDown size={14} aria-hidden="true" />
+            <ChevronRight size={14} aria-hidden="true" />
             thinking
             {streaming && index === lastThinkingIndex ? <em>流式</em> : null}
           </summary>
@@ -830,7 +856,7 @@ const AgentStructuredBody = memo(function AgentStructuredBody({
           className="agent-stream-block searching"
         >
           <summary>
-            <ChevronDown size={14} aria-hidden="true" />
+            <ChevronRight size={14} aria-hidden="true" />
             <Globe size={13} aria-hidden="true" />
             {noun}
             <span className="agent-stream-count">{segment.items.length}</span>
@@ -862,10 +888,9 @@ const AgentStructuredBody = memo(function AgentStructuredBody({
         return <details
           key={`editing-${String(index)}`}
           className="agent-stream-block editing"
-          open
         >
           <summary>
-            <ChevronDown size={14} aria-hidden="true" />
+            <ChevronRight size={14} aria-hidden="true" />
             <FileText size={13} aria-hidden="true" />
             {noun}
             <span className="agent-stream-count">{segment.items.length}</span>
@@ -893,10 +918,9 @@ const AgentStructuredBody = memo(function AgentStructuredBody({
         return <details
           key={`resulting-${String(index)}`}
           className={`agent-stream-block resulting${segment.active ? " is-live" : ""}`}
-          open
         >
           <summary>
-            <ChevronDown size={14} aria-hidden="true" />
+            <ChevronRight size={14} aria-hidden="true" />
             {segment.active
               ? <Loader2 size={13} aria-hidden="true" className="agent-stream-spinner" />
               : <FileText size={13} aria-hidden="true" />}

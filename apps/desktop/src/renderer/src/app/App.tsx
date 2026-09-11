@@ -3,8 +3,6 @@ import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels"
 import { ChevronDown, Cloud, Cpu, FolderOpen, PanelLeftClose, PanelRightClose, Save, Settings2, X } from "lucide-react"
 import type {
   ChapterRevision,
-  ChapterRevisionConversationListResult,
-  ChapterRevisionConversationSendResult,
   ChapterRevisionReadResult,
   ChapterSummary,
   ChapterSynopsis,
@@ -14,6 +12,8 @@ import type {
   HistoryRetentionPreview,
   ProjectSettings,
   ResettableRuntimeMetricId,
+  RevisionDraftVersion,
+  RevisionDraftVersionListResult,
   ResolvedChapter,
   SynopsisConversationListResult,
   SynopsisConversationMessage,
@@ -51,13 +51,11 @@ import { WorkspaceTree } from "../features/workspace/WorkspaceTree.js"
 import { WorkspaceNameDialog } from "../features/workspace/WorkspaceNameDialog.js"
 import { AUTO_DESCRIPTION_RULE_PATH, canCreateFolderInDirectory, findDuplicateVolumeSequence, isValidVolumeFolderName, isChapterVolumeContainerPath, isVolumeDirectoryPath, resolveCreateDestination } from "../features/workspace/workspace-locks.js"
 import { EditorArea } from "../features/editor/EditorArea.js"
-import { useCreationDeskPresentationPreferences } from "../features/editor/creation-desk-presentation-preferences.js"
+import { SynopsisConversationComposer } from "../features/editor/SynopsisConversationComposer.js"
+import { useCreationDeskPresentationPreferences, reconcileSelectedRulePath } from "../features/editor/creation-desk-presentation-preferences.js"
 import { SettingsLineagePanel } from "../features/settings/SettingsLineagePanel.js"
 import { ChapterWorkspaceRail } from "../features/editor/ChapterWorkspaceRail.js"
-import {
-  ChapterArtifactRelatedRail,
-  type RelatedChapterArtifact,
-} from "../features/editor/ChapterArtifactRelatedRail.js"
+import type { RelatedChapterArtifact } from "../features/editor/ChapterArtifactRelatedRail.js"
 import { CreationDeskProgressReviewDialog } from "../features/editor/CreationDeskProgressReviewDialog.js"
 import { countPendingReviews } from "../features/editor/creation-desk-goals.js"
 import {
@@ -69,6 +67,7 @@ import {
   resolveChapterMarkdownKind,
   resolveChapterSurfacePath,
 } from "../features/editor/synopsis-path.js"
+import { shouldAutoEnsureChapterRevision } from "../features/editor/chapter-workspace-types.js"
 import { BackendWaitTimeoutDialog } from "../features/status/BackendWaitTimeoutDialog.js"
 import { RightRail, summarizeSynopsisStreamTokenMetrics, summarizeSynopsisUsageTokenMetrics, type TaskTokenMetrics } from "../features/status/RightRail.js"
 import { RightPanelViewport } from "../features/status/RightPanelViewport.js"
@@ -97,8 +96,11 @@ export function App(): React.JSX.Element {
   const [selectedChapter, setSelectedChapter] = useState<ChapterSummary>()
   const [chapterRevision, setChapterRevision] = useState<ChapterRevision>()
   const [chapterRevisionContent, setChapterRevisionContent] = useState<string>()
-  const [chapterConversation, setChapterConversation] = useState<ChapterRevisionConversationListResult>({ messages: [] })
-  const [chapterConversationBusy, setChapterConversationBusy] = useState(false)
+  const [chapterDraftVersions, setChapterDraftVersions] = useState<readonly RevisionDraftVersion[]>([])
+  const [discussDraftPromotion, setDiscussDraftPromotion] = useState<{
+    revisionTaskId: string
+    chapterId: string
+  }>()
   const [synopsisConversation, setSynopsisConversation] = useState<SynopsisConversationListResult>({ messages: [] })
   const [synopsisConversationBusy, setSynopsisConversationBusy] = useState(false)
   const [synopsisDraftRestore, setSynopsisDraftRestore] = useState<{ text: string; token: number }>()
@@ -116,7 +118,6 @@ export function App(): React.JSX.Element {
   const selectedPathRef = useRef<string | undefined>(undefined)
   selectedPathRef.current = selectedPath
   const [chapterSynopsis, setChapterSynopsis] = useState<ChapterSynopsis>()
-  const [synopsisPanelOpen, setSynopsisPanelOpen] = useState(false)
   const [relatedChapterArtifacts, setRelatedChapterArtifacts] = useState<readonly RelatedChapterArtifact[]>([])
   const [prompt, setPrompt] = useState("")
   const [presentation, updatePresentation] = useCreationDeskPresentationPreferences(project?.projectId)
@@ -148,7 +149,6 @@ export function App(): React.JSX.Element {
   const [modelProfiles, setModelProfiles] = useState<readonly ModelProfile[]>([])
   const [activeModelProfileId, setActiveModelProfileId] = useState("")
   const monitoredChapterRevisionIds = useRef(new Set<string>())
-  const [diffFocusMessageId, setDiffFocusMessageId] = useState<string>()
   const activeModelProfile = modelProfiles.find((profile) => profile.id === activeModelProfileId)
   const parsedMinimumWordCount = parseWordCount(minimumWordCount)
   const parsedMaximumWordCount = parseWordCount(maximumWordCount)
@@ -240,14 +240,22 @@ export function App(): React.JSX.Element {
     setRelatedChapterArtifacts(loaded)
   }, [project, report.inventory])
 
-  const refreshChapterConversation = useCallback(async (chapterId: string): Promise<void> => {
-    if (project === undefined) return
-    const result = await invokeBackend<ChapterRevisionConversationListResult>("chapter.revision.conversation.list", {
-      projectId: project.projectId,
-      workspaceRootRef: project.workspaceRootRef,
-      chapterId,
-    })
-    setChapterConversation(result)
+  const refreshChapterDraftVersions = useCallback(async (revisionTaskId: string | undefined): Promise<void> => {
+    if (project === undefined || revisionTaskId === undefined) {
+      setChapterDraftVersions([])
+      return
+    }
+    try {
+      const listed = await invokeBackend<RevisionDraftVersionListResult>("chapter.revision.draftVersion.list", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        revisionTaskId,
+        includeChapterHistory: true,
+      })
+      setChapterDraftVersions(listed.versions)
+    } catch {
+      setChapterDraftVersions([])
+    }
   }, [project])
 
   const refreshWorkspace = useCallback(async (): Promise<void> => {
@@ -493,16 +501,6 @@ export function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    const inGraphSyncRecovery = chapterRevision?.decision === "submit"
-      && chapterRevision.graphSyncStatus !== "completed"
-    const chapterConversationActive = selectedPath?.startsWith("章节正文/") === true
-      && !inGraphSyncRecovery
-    if (!chapterConversationActive) {
-      setDiffFocusMessageId(undefined)
-    }
-  }, [selectedPath, chapterRevision])
-
-  useEffect(() => {
     const handleCommand = (command: "project.new" | "project.open" | "turn.start"): void => {
       if (command === "project.new" || command === "project.open") resetWorkbenchForProject(undefined)
       if (command === "turn.start") void startTurn()
@@ -543,9 +541,8 @@ export function App(): React.JSX.Element {
         setSelectedChapter(undefined)
         setChapterRevision(undefined)
         setChapterRevisionContent(undefined)
-        setChapterConversation({ messages: [] })
+        setChapterDraftVersions([])
         setChapterSynopsis(undefined)
-        setSynopsisPanelOpen(false)
         setContent(result.content)
         setChapterBody("")
         setSavedContent(result.content)
@@ -563,20 +560,18 @@ export function App(): React.JSX.Element {
         setSelectedChapter(resolved.committed)
         setChapterRevision(resolved.activeRevision)
         setChapterRevisionContent(resolved.activeRevision?.proposedBody)
+        void refreshChapterDraftVersions(resolved.activeRevision?.revisionTaskId)
         setContent(resolved.committed.content)
         setChapterBody(resolved.committed.body)
         setSavedContent(resolved.committed.content)
-        setSynopsisPanelOpen(false)
         if (resolved.activeRevision !== undefined && shouldMonitorChapterRevision(resolved.activeRevision.graphSyncStatus)) {
           void monitorChapterRevision(resolved.activeRevision.revisionTaskId)
         }
-        void refreshChapterConversation(resolved.committed.chapterId)
         void refreshChapterSynopsis(resolved.committed.chapterId)
         void loadRelatedChapterArtifacts(path)
         void syncDiscussFocus(path)
         return
       }
-      setChapterConversation({ messages: [] })
       const result = await invokeBackend<{ content: string }>("workspace.read", {
         projectId: project.projectId,
         workspaceRootRef: project.workspaceRootRef,
@@ -586,6 +581,7 @@ export function App(): React.JSX.Element {
       setSelectedChapter(undefined)
       setChapterRevision(undefined)
       setChapterRevisionContent(undefined)
+      setChapterDraftVersions([])
       setContent(result.content)
       setChapterBody("")
       setSavedContent(result.content)
@@ -607,16 +603,16 @@ export function App(): React.JSX.Element {
     })
     setChapterRevision(revision)
     setChapterRevisionContent(body)
+    await refreshChapterDraftVersions(revision.revisionTaskId)
     return revision
   }
 
   const ensureChapterRevision = async (heading: string, body: string): Promise<ChapterRevision | undefined> => {
     if (project === undefined || selectedChapter === undefined) return undefined
-    if (chapterRevision !== undefined && chapterRevision.decision !== "submit" && chapterRevision.status === "editing") {
+    if (chapterRevision !== undefined && !shouldAutoEnsureChapterRevision(chapterRevision)) {
       return chapterRevision
     }
     const revision = await startChapterRevision(heading, body)
-    await refreshChapterConversation(selectedChapter.chapterId)
     return revision
   }
 
@@ -708,11 +704,15 @@ export function App(): React.JSX.Element {
       chapterId: revision.chapterId,
     })
     setSelectedChapter(current)
-    setSelectedPath(current.publishPath)
+    if (selectedPath !== undefined) {
+      setSelectedPath(current.publishPath)
+    }
+    setOpenedDocumentPath(current.publishPath)
     setChapterRevision(revision)
     setContent(current.content)
     setChapterBody(current.body)
     setSavedContent(current.content)
+    await refreshChapterDraftVersions(revision.revisionTaskId)
     await refreshWorkspace()
     void syncDiscussFocus(current.publishPath)
     setPostCommitNotice(revision.graphSyncStatus === "completed"
@@ -737,71 +737,49 @@ export function App(): React.JSX.Element {
     })
     setChapterRevision(undefined)
     setChapterRevisionContent(undefined)
-    if (selectedChapter !== undefined) await refreshChapterConversation(selectedChapter.chapterId)
+    setChapterDraftVersions([])
     return revision
   }
 
-  const sendChapterConversation = async (message: string): Promise<void> => {
-    if (project === undefined || selectedChapter === undefined) throw new Error("当前没有可对话章节")
-    const optimisticId = crypto.randomUUID()
-    const optimisticMessage = {
-      messageId: optimisticId,
-      revisionTaskId: chapterConversation.revisionTaskId ?? crypto.randomUUID(),
+  const appendPersistedDraftVersion = async (input: Readonly<{ heading: string; body: string }>): Promise<void> => {
+    if (project === undefined) throw new Error("当前没有打开项目")
+    const revisionTaskId = chapterRevision?.revisionTaskId
+    if (revisionTaskId === undefined) throw new Error("当前没有可写入的章节草稿")
+    await invokeBackend("chapter.revision.draftVersion.append", {
       projectId: project.projectId,
-      role: "user" as const,
-      content: message,
-      createdAtMs: Date.now(),
+      workspaceRootRef: project.workspaceRootRef,
+      revisionTaskId,
+      source: "manual",
+      heading: input.heading,
+      body: input.body,
+    })
+    await refreshChapterDraftVersions(revisionTaskId)
+  }
+
+  const restorePersistedDraftVersion = async (versionId: string): Promise<void> => {
+    if (project === undefined) throw new Error("当前没有打开项目")
+    const revisionTaskId = chapterRevision?.revisionTaskId
+    if (revisionTaskId === undefined) throw new Error("当前没有可回退的章节草稿")
+    await invokeBackend("chapter.revision.draftVersion.restore", {
+      projectId: project.projectId,
+      workspaceRootRef: project.workspaceRootRef,
+      revisionTaskId,
+      versionId,
+    })
+    await refreshChapterDraftVersions(revisionTaskId)
+  }
+
+  const promoteDiscussDraftToBody = async (): Promise<void> => {
+    const revisionTaskId = discussDraftPromotion?.revisionTaskId ?? chapterRevision?.revisionTaskId
+    if (revisionTaskId === undefined) {
+      setError("还没有可覆盖正文的草稿")
+      return
     }
-    setChapterConversation((current) => ({
-      ...current,
-      messages: [...current.messages, optimisticMessage],
-    }))
-    setChapterConversationBusy(true)
-    setError(undefined)
-    try {
-      const result = await invokeBackend<ChapterRevisionConversationSendResult>("chapter.revision.conversation.send", {
-        projectId: project.projectId,
-        workspaceRootRef: project.workspaceRootRef,
-        chapterId: selectedChapter.chapterId,
-        message,
-        ...(activeModelProfile === undefined ? {} : { model: modelSelection(activeModelProfile) }),
-      })
-      setChapterConversation({ revisionTaskId: result.revision.revisionTaskId, messages: result.messages })
-      setChapterRevision(result.revision)
-      const latestProposal = [...result.messages].reverse().find((entry) => entry.role === "assistant" && entry.proposal !== undefined)
-      if (latestProposal !== undefined) {
-        const revision = await invokeBackend<ChapterRevision>("chapter.revision.conversation.apply", {
-          projectId: project.projectId,
-          workspaceRootRef: project.workspaceRootRef,
-          revisionTaskId: result.revision.revisionTaskId,
-          messageId: latestProposal.messageId,
-        })
-        setChapterRevision(revision)
-        const applied = await invokeBackend<ChapterRevisionReadResult>("chapter.readRevision", {
-          projectId: project.projectId,
-          workspaceRootRef: project.workspaceRootRef,
-          revisionTaskId: revision.revisionTaskId,
-        })
-        setChapterRevisionContent(applied.proposedBody)
-        setPostCommitNotice("Agent 建议已自动写入草稿。可在版本条查看 diff，或继续对话 / 审核提交。")
-      } else {
-        const detail = await invokeBackend<ChapterRevisionReadResult>("chapter.readRevision", {
-          projectId: project.projectId,
-          workspaceRootRef: project.workspaceRootRef,
-          revisionTaskId: result.revision.revisionTaskId,
-        })
-        setChapterRevisionContent(detail.proposedBody)
-      }
-    } catch (cause) {
-      setChapterConversation((current) => ({
-        ...current,
-        messages: current.messages.filter((entry) => entry.messageId !== optimisticId),
-      }))
-      setError(cause instanceof Error ? cause.message : String(cause))
-      throw cause
-    } finally {
-      setChapterConversationBusy(false)
-    }
+    await submitChapterRevision({
+      revisionTaskId,
+      mode: "direct",
+      forced: true,
+    })
   }
 
   const loadCommittedGraph = async (
@@ -1025,9 +1003,16 @@ export function App(): React.JSX.Element {
     }
   }
 
-  const sendSynopsisMessage = async (message: string): Promise<void> => {
+  const sendSynopsisMessage = async (
+    message: string,
+    options?: Readonly<{ focusLocked?: boolean; lockedChapterSequence?: number }>,
+  ): Promise<void> => {
     if (project === undefined || activeModelProfile === undefined) {
       setError("模型配置尚未加载完成，请稍候再发送")
+      return
+    }
+    if (!wordCountValid || parsedMinimumWordCount === undefined || parsedMaximumWordCount === undefined) {
+      setError("请填写有效的正文字数范围（最少字数不能大于最多字数）")
       return
     }
     if (synopsisSendInFlightRef.current) {
@@ -1151,6 +1136,10 @@ export function App(): React.JSX.Element {
           disableResponseStorage: activeModelProfile.disableResponseStorage,
           serviceTier: activeModelProfile.serviceTier,
         },
+        ...(options?.focusLocked === true ? { focusLocked: true } : {}),
+        ...(options?.lockedChapterSequence === undefined
+          ? {}
+          : { lockedChapterSequence: options.lockedChapterSequence, lockedFocusKind: "chapter_body" as const }),
       }, {
         waitTimeoutMs: projectSettings?.execution.backendRequestWaitTimeoutMs
           ?? 600_000,
@@ -1179,6 +1168,26 @@ export function App(): React.JSX.Element {
       }
       if (sent.usage !== undefined) {
         setSynopsisUsage(sent.usage)
+      }
+      if (sent.appendedDraft !== undefined) {
+        setDiscussDraftPromotion({
+          revisionTaskId: sent.appendedDraft.revisionTaskId,
+          chapterId: sent.appendedDraft.chapterId,
+        })
+        try {
+          const applied = await invokeBackend<ChapterRevisionReadResult>("chapter.readRevision", {
+            projectId: project.projectId,
+            workspaceRootRef: project.workspaceRootRef,
+            revisionTaskId: sent.appendedDraft.revisionTaskId,
+          })
+          setChapterRevision(applied)
+          setChapterRevisionContent(applied.proposedBody)
+          await refreshChapterDraftVersions(sent.appendedDraft.revisionTaskId)
+          setPostCommitNotice(`已写入草稿 ${sent.appendedDraft.draftLabel}。确认后才会覆盖正式正文。`)
+        } catch {
+          await refreshChapterDraftVersions(sent.appendedDraft.revisionTaskId)
+          setPostCommitNotice(`已写入草稿 ${sent.appendedDraft.draftLabel}。确认后才会覆盖正式正文。`)
+        }
       }
       setSynopsisStream(undefined)
       setSynopsisConversationBusy(false)
@@ -1546,6 +1555,7 @@ export function App(): React.JSX.Element {
     setSavedContent("")
     setChapterRevision(undefined)
     setChapterRevisionContent(undefined)
+    setChapterDraftVersions([])
     await Promise.all([refreshWorkspace(), refreshHistory(), loadHistoryGraph(result.graphAnchorIds)])
     const recoverable = await invokeBackend<RecoverableTaskList>("turn.recoverable.list", {
       projectId: project.projectId,
@@ -1692,18 +1702,16 @@ export function App(): React.JSX.Element {
   const proseRules = useMemo(() => report.inventory.filter((entry) => entry.kind === "file" && entry.path.startsWith("表现输出/笔风规则/")).map((entry) => entry.path), [report])
 
   useEffect(() => {
-    if (report.inventory.length === 0) return
-    if (descriptionRule.length > 0 && !descriptionRules.includes(descriptionRule)) {
-      updatePresentation({ descriptionRule: "" })
-    }
-  }, [descriptionRule, descriptionRules, report.inventory.length, updatePresentation])
+    const next = reconcileSelectedRulePath(descriptionRule, descriptionRules)
+    if (next === undefined) return
+    updatePresentation({ descriptionRule: next })
+  }, [descriptionRule, descriptionRules, updatePresentation])
 
   useEffect(() => {
-    if (report.inventory.length === 0) return
-    if (proseRule.length > 0 && !proseRules.includes(proseRule)) {
-      updatePresentation({ proseRule: "" })
-    }
-  }, [proseRule, proseRules, report.inventory.length, updatePresentation])
+    const next = reconcileSelectedRulePath(proseRule, proseRules)
+    if (next === undefined) return
+    updatePresentation({ proseRule: next })
+  }, [proseRule, proseRules, updatePresentation])
 
   useEffect(() => {
     if (postCommitNotice === undefined) return
@@ -1731,14 +1739,13 @@ export function App(): React.JSX.Element {
     setSelectedChapter(undefined)
     setChapterRevision(undefined)
     setChapterRevisionContent(undefined)
-    setChapterConversation({ messages: [] })
-    setChapterConversationBusy(false)
+    setChapterDraftVersions([])
+    setDiscussDraftPromotion(undefined)
     setSynopsisConversation({ messages: [] })
     setSynopsisConversationBusy(false)
     setSynopsisStream(undefined)
     setSynopsisUsage(undefined)
     setChapterSynopsis(undefined)
-    setSynopsisPanelOpen(false)
     setPrompt("")
     setTask(undefined)
     setGraphSlice(undefined)
@@ -1750,19 +1757,16 @@ export function App(): React.JSX.Element {
     useWorkbenchStore.getState().closeAllDialogs()
     setProjectSettings(undefined)
     setHistory(undefined)
-    setDiffFocusMessageId(undefined)
   }, [])
 
   const openWorkspaceHome = (): void => {
     setSelectedPath(undefined)
     setLineageMode(false)
-    setSynopsisPanelOpen(false)
   }
 
   const openSettingsLineage = (): void => {
     setLineageMode(true)
     setSelectedPath(undefined)
-    setSynopsisPanelOpen(false)
     setError(undefined)
   }
 
@@ -1802,21 +1806,24 @@ export function App(): React.JSX.Element {
   const readOnly = selectedPath?.startsWith("世界推演规则/基础规则/") === true
     || (selectedPath?.startsWith("章节正文/") === true && !isChapterPlanningMarkdownPath(selectedPath))
   const dirty = content !== savedContent
-  const inGraphSyncRecovery = chapterRevision?.decision === "submit"
-    && chapterRevision.graphSyncStatus !== "completed"
   const selectedChapterKind = selectedPath === undefined
     ? undefined
     : resolveChapterMarkdownKind(selectedPath)
-  const showPlanningRelatedRail = selectedChapterKind === "plot_synopsis"
-    || selectedChapterKind === "plot_outline"
   const showChapterConversation = selectedPath?.startsWith("章节正文/") === true
-    && !isChapterPlanningMarkdownPath(selectedPath ?? "")
-    && !inGraphSyncRecovery
   const showRightPanel = !lineageMode && (
     selectedPath === undefined
     || showChapterConversation
-    || showPlanningRelatedRail
   )
+  const relatedSynopsis = relatedChapterArtifacts.find((item) => item.kind === "plot_synopsis")
+  const relatedOutline = relatedChapterArtifacts.find((item) => item.kind === "plot_outline")
+  const railSynopsisMarkdown = selectedChapterKind === "plot_synopsis"
+    ? content
+    : (chapterSynopsis?.synopsisMarkdown ?? relatedSynopsis?.content)
+  const railOutlineMarkdown = selectedChapterKind === "plot_outline"
+    ? content
+    : relatedOutline?.content
+  const railSynopsisPath = selectedChapterKind === "plot_synopsis" ? selectedPath : relatedSynopsis?.path
+  const railOutlinePath = selectedChapterKind === "plot_outline" ? selectedPath : relatedOutline?.path
 
   return <AppChrome
     rail={
@@ -2009,12 +2016,14 @@ export function App(): React.JSX.Element {
           chapterBody={chapterBody}
           revision={chapterRevision}
           revisionContent={chapterRevisionContent}
+          persistedDraftVersions={chapterDraftVersions}
           onEnsureRevision={ensureChapterRevision}
           onUpdateRevision={updateChapterRevision}
           onReviewRevision={reviewChapterRevision}
           onSubmitRevision={submitChapterRevision}
           onRetireRevision={retireChapterRevision}
-          chapterConversationMessages={chapterConversation.messages}
+          onAppendPersistedDraft={appendPersistedDraftVersion}
+          onRestorePersistedDraft={restorePersistedDraftVersion}
           synopsisSession={synopsisConversation.session}
           synopsisMessages={synopsisConversation.messages}
           synopsisBusy={synopsisConversationBusy}
@@ -2031,13 +2040,12 @@ export function App(): React.JSX.Element {
           onSynopsisStop={stopSynopsisMessage}
           onSynopsisRefreshChoices={refreshSynopsisChoices}
           onPromoteStaging={promoteStaging}
+          onPromoteDraftToBody={promoteDiscussDraftToBody}
           onRejectStagingPromote={rejectStagingPromote}
           onOpenSynopsisFile={(path) => { void openFile(path); }}
           onSetFocus={(sequence, focusKind) => { void setDiscussFocus(sequence, focusKind); }}
           focusChapters={discussFocusChapters}
           onOpenSettingsLineage={openSettingsLineage}
-          diffFocusMessageId={diffFocusMessageId}
-          onDiffFocusHandled={() => { setDiffFocusMessageId(undefined); }}
         />}
       </Panel>
       {showRightPanel
@@ -2045,35 +2053,70 @@ export function App(): React.JSX.Element {
       <PanelResizeHandle className="resize-handle"><PanelRightClose size={12} /></PanelResizeHandle>
             <Panel defaultSize={25} minSize={20} maxSize={38} collapsible className="workbench-right-panel">
               <RightPanelViewport
-                chapterMode={showChapterConversation || showPlanningRelatedRail}
-                chapterPanel={showPlanningRelatedRail && selectedChapterKind !== undefined && selectedPath !== undefined
-                  ? <ChapterArtifactRelatedRail
-                      currentKind={selectedChapterKind}
-                      currentPath={selectedPath}
-                      related={[
-                        {
-                          kind: selectedChapterKind,
-                          path: selectedPath,
-                          present: true,
-                          content,
-                        },
-                        ...relatedChapterArtifacts,
-                      ]}
-                      onOpen={(path) => { void openFile(path); }}
-                    />
-                  : <ChapterWorkspaceRail
-                      messages={chapterConversation.messages}
-                      revisionTaskId={chapterConversation.revisionTaskId}
-                      busy={chapterConversationBusy}
-                      chapterSynopsis={chapterSynopsis}
-                      synopsisPanelOpen={synopsisPanelOpen}
-                      relatedArtifacts={relatedChapterArtifacts}
-                      {...(selectedChapterKind === undefined ? {} : { currentKind: selectedChapterKind })}
-                      {...(selectedPath === undefined ? {} : { currentPath: selectedPath })}
-                      onToggleSynopsisPanel={() => { setSynopsisPanelOpen((current) => !current); }}
-                      onSend={sendChapterConversation}
-                      onInspectDiff={(messageId) => { setDiffFocusMessageId(messageId); }}
-                      onOpenRelated={(path) => { void openFile(path); }}
+                chapterMode={showChapterConversation}
+                chapterPanel={<ChapterWorkspaceRail
+                      key={selectedPath}
+                      conversation={<SynopsisConversationComposer
+                        layout="rail"
+                        focusLocked
+                        projectId={project.projectId}
+                        workspaceRootRef={project.workspaceRootRef}
+                        session={synopsisConversation.session}
+                        messages={synopsisConversation.messages}
+                        busy={synopsisConversationBusy}
+                        stream={synopsisStream}
+                        {...(synopsisDraftRestore === undefined ? {} : { draftRestore: synopsisDraftRestore })}
+                        running={task?.status === "running"}
+                        {...(pendingStagingPromotes.length === 0
+                          ? {}
+                          : { pendingStagingPromotes })}
+                        onSend={async (message) => {
+                          const lockedChapterSequence = selectedChapter?.sequence
+                            ?? (selectedPath === undefined
+                              ? undefined
+                              : parseChapterSequenceFromPath(selectedPath))
+                          if (lockedChapterSequence === undefined) {
+                            setError("无法锁定当前章节焦点")
+                            return
+                          }
+                          await sendSynopsisMessage(message, {
+                            focusLocked: true,
+                            lockedChapterSequence,
+                          })
+                        }}
+                        {...(stopSynopsisMessage === undefined ? {} : { onStop: stopSynopsisMessage })}
+                        onRefreshChoices={refreshSynopsisChoices}
+                        onPromoteStaging={promoteStaging}
+                        onPromoteDraftToBody={promoteDiscussDraftToBody}
+                        {...(rejectStagingPromote === undefined ? {} : { onRejectStagingPromote: rejectStagingPromote })}
+                        onStartTurn={() => { startTurn(); }}
+                        onOpenSynopsisFile={(path) => { void openFile(path); }}
+                        onOpenSettingsLineage={openSettingsLineage}
+                        descriptionRule={descriptionRule}
+                        proseRule={proseRule}
+                        minimumWordCount={minimumWordCount}
+                        maximumWordCount={maximumWordCount}
+                        wordCountValid={wordCountValid}
+                        descriptionRules={descriptionRules}
+                        proseRules={proseRules}
+                        boundaryPace={boundaryPace}
+                        causalityFocus={causalityFocus}
+                        onDescriptionRuleChange={(value) => { updatePresentation({ descriptionRule: value }); }}
+                        onProseRuleChange={(value) => { updatePresentation({ proseRule: value }); }}
+                        onMinimumWordCountChange={(value) => { updatePresentation({ minimumWordCount: value }); }}
+                        onMaximumWordCountChange={(value) => { updatePresentation({ maximumWordCount: value }); }}
+                        onBoundaryPaceChange={(value) => { updatePresentation({ boundaryPace: value }); }}
+                        onCausalityFocusChange={(value) => { updatePresentation({ causalityFocus: value }); }}
+                        modelProfiles={modelProfiles}
+                        activeModelProfileId={activeModelProfileId}
+                        onActiveModelIdChange={(modelId) => { void updateActiveModelId(modelId); }}
+                        onReasoningEffortChange={(effort) => { void updateActiveReasoningEffort(effort); }}
+                      />}
+                      {...(railSynopsisMarkdown === undefined ? {} : { synopsisMarkdown: railSynopsisMarkdown })}
+                      {...(railOutlineMarkdown === undefined ? {} : { outlineMarkdown: railOutlineMarkdown })}
+                      {...(railSynopsisPath === undefined ? {} : { synopsisPath: railSynopsisPath })}
+                      {...(railOutlinePath === undefined ? {} : { outlinePath: railOutlinePath })}
+                      onOpenFile={(path) => { void openFile(path); }}
                     />}
                 defaultPanel={<RightRail
           task={task}

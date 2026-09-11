@@ -48,7 +48,7 @@ checks.push(await clickAndCheck(page, "open_chapter_from_tree", chapterButton, p
 await page.waitForTimeout(800)
 checks.push(await noErrorBannerCheck(page, "no_validation_error_on_chapter_open"))
 
-await page.getByTestId("chapter-synopsis-toggle").click()
+await page.getByTestId("chapter-rail-tab-synopsis").click()
 checks.push(await visibleCheck(page, "chapter_synopsis_panel", page.getByTestId("chapter-synopsis-panel")))
 
 await page.getByRole("button", { name: "创作台", exact: true }).click()

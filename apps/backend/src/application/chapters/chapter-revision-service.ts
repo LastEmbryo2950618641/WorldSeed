@@ -124,25 +124,46 @@ export class ChapterRevisionService {
   }
 
   public async readRevision(revisionTaskId: string): Promise<ChapterRevisionReadResult> {
-    const revision = await this.requireRevision(revisionTaskId)
-    const proposedContent = await this.dependencies.internalStore.readDocument(revision.contentRef)
-    return {
-      ...toPublicRevision(revision),
-      proposedContent,
-      proposedBody: readChapterBody(revision.heading, proposedContent),
-    }
+    return this.toRevisionReadResult(await this.requireRevision(revisionTaskId))
   }
 
   public async findActiveRevision(projectId: ProjectId, chapterId: string): Promise<ChapterRevisionReadResult | undefined> {
     await this.requireCurrentChapter(projectId, chapterId)
     const revision = await this.dependencies.revisions.findActiveForChapter(projectId, chapterId)
     if (revision === undefined) return undefined
-    const proposedContent = await this.dependencies.internalStore.readDocument(revision.contentRef)
-    return {
-      ...toPublicRevision(revision),
-      proposedContent,
-      proposedBody: readChapterBody(revision.heading, proposedContent),
+    return this.toRevisionReadResult(revision)
+  }
+
+  public async findLatestRevision(projectId: ProjectId, chapterId: string): Promise<ChapterRevisionReadResult | undefined> {
+    await this.requireCurrentChapter(projectId, chapterId)
+    const revision = await this.dependencies.revisions.findLatestForChapter(projectId, chapterId)
+    if (revision === undefined) return undefined
+    return this.toRevisionReadResult(revision)
+  }
+
+  public async findDisplayRevision(projectId: ProjectId, chapterId: string): Promise<ChapterRevisionReadResult | undefined> {
+    await this.requireCurrentChapter(projectId, chapterId)
+    const inflight = await this.dependencies.revisions.findActiveForChapter(projectId, chapterId)
+    if (inflight === undefined) {
+      const latest = await this.dependencies.revisions.findLatestForChapter(projectId, chapterId)
+      return latest === undefined ? undefined : this.toRevisionReadResult(latest)
     }
+    const inflightDrafts = await this.dependencies.draftVersions.list(inflight.revisionTaskId)
+    if (inflightDrafts.some((version) => version.source !== "baseline")) {
+      return this.toRevisionReadResult(inflight)
+    }
+    const previous = await this.dependencies.revisions.findLatestForChapter(
+      projectId,
+      chapterId,
+      inflight.revisionTaskId,
+    )
+    if (previous !== undefined) {
+      const previousDrafts = await this.dependencies.draftVersions.list(previous.revisionTaskId)
+      if (previousDrafts.some((version) => version.source !== "baseline")) {
+        return this.toRevisionReadResult(previous)
+      }
+    }
+    return this.toRevisionReadResult(inflight)
   }
 
   public async start(input: Readonly<{
@@ -155,13 +176,13 @@ export class ChapterRevisionService {
     inputMode?: "direct" | "agent"
   }>): Promise<ChapterRevision> {
     const current = await this.requireCurrentChapter(input.projectId, input.chapterId)
+    const inflight = await this.dependencies.revisions.findActiveForChapter(input.projectId, input.chapterId)
+    if (inflight !== undefined) {
+      await this.ensureBaselineDraft(inflight.revisionTaskId)
+      return toPublicRevision(inflight)
+    }
     if (current.sourceId !== input.baseSourceId) {
       throw new RevisionConflictError("The chapter changed while it was being edited")
-    }
-    const existing = await this.dependencies.revisions.findActive(input.projectId, input.chapterId, input.baseSourceId)
-    if (existing !== undefined) {
-      await this.ensureBaselineDraft(existing.revisionTaskId)
-      return toPublicRevision(existing)
     }
 
     const revisionTaskId = this.dependencies.createId()
@@ -213,10 +234,28 @@ export class ChapterRevisionService {
     return toPublicRevision(record)
   }
 
-  public async listDraftVersions(revisionTaskId: string): Promise<RevisionDraftVersionListResult> {
-    await this.requireRevision(revisionTaskId)
-    const versions = await this.ensureBaselineDraft(revisionTaskId)
-    return { revisionTaskId, versions: [...versions] }
+  public async listDraftVersions(
+    revisionTaskId: string,
+    options?: Readonly<{ includeChapterHistory?: boolean }>,
+  ): Promise<RevisionDraftVersionListResult> {
+    const revision = await this.requireRevision(revisionTaskId)
+    await this.ensureBaselineDraft(revisionTaskId)
+    const current = await this.read(revision.projectId, revision.chapterId)
+    let versions: RevisionDraftVersion[]
+    if (options?.includeChapterHistory === true) {
+      const siblings = await this.dependencies.revisions.listForChapter(revision.projectId, revision.chapterId)
+      const collected: RevisionDraftVersion[] = []
+      for (const sibling of siblings) {
+        collected.push(...await this.dependencies.draftVersions.list(sibling.revisionTaskId))
+      }
+      versions = collected
+    } else {
+      versions = [...await this.dependencies.draftVersions.list(revisionTaskId)]
+    }
+    return {
+      revisionTaskId,
+      versions: publishChapterDraftHistory(versions, current.body),
+    }
   }
 
   public async readDraftVersion(versionId: string): Promise<RevisionDraftVersion> {
@@ -416,7 +455,11 @@ export class ChapterRevisionService {
     const revision = await this.requireRevision(input.revisionTaskId)
     if (isFinalized(revision)) return toPublicRevision(revision)
     const canResume = revision.decision === "submit"
-      && (isContentCommitState(revision.status) || revision.graphSyncStatus === "failed")
+      && (
+        isContentCommitState(revision.status)
+        || revision.status === "committing_content"
+        || revision.graphSyncStatus === "failed"
+      )
     if (!canResume) assertEditable(revision)
     const current = await this.requireCurrentChapter(revision.projectId, revision.chapterId)
     const base = await this.dependencies.documents.findStoredVersion(revision.projectId, revision.baseSourceId)
@@ -588,6 +631,9 @@ export class ChapterRevisionService {
         updatedAtMs: this.dependencies.now(),
       })
       return
+    }
+    if (existing.status === "committing_content") {
+      await this.dependencies.commit.resetPending(revision.contentScopeId)
     }
     await this.dependencies.revisions.updateState({
       revisionTaskId: revision.revisionTaskId,
@@ -780,6 +826,15 @@ export class ChapterRevisionService {
     return chapter
   }
 
+  private async toRevisionReadResult(revision: StoredChapterRevision): Promise<ChapterRevisionReadResult> {
+    const proposedContent = await this.dependencies.internalStore.readDocument(revision.contentRef)
+    return {
+      ...toPublicRevision(revision),
+      proposedContent,
+      proposedBody: readChapterBody(revision.heading, proposedContent),
+    }
+  }
+
   private async requireRevision(revisionTaskId: string): Promise<StoredChapterRevision> {
     const revision = await this.dependencies.revisions.find(revisionTaskId)
     if (revision === undefined) throw new RevisionNotFoundError(revisionTaskId)
@@ -789,6 +844,25 @@ export class ChapterRevisionService {
 
 function estimateTokenCount(value: string): number {
   return Math.max(1, Math.ceil(value.length / 4))
+}
+
+function publishChapterDraftHistory(
+  versions: readonly RevisionDraftVersion[],
+  currentBody: string,
+): RevisionDraftVersion[] {
+  const unique: RevisionDraftVersion[] = []
+  const seen = new Set<string>()
+  for (const version of versions) {
+    if (seen.has(version.bodyDigest)) continue
+    seen.add(version.bodyDigest)
+    unique.push(version)
+  }
+  const latestId = unique.at(-1)?.versionId
+  return unique.map((version) => ({
+    ...version,
+    isLatest: version.versionId === latestId,
+    isCurrentOfficial: version.body === currentBody,
+  }))
 }
 
 function toPublicRevision(record: StoredChapterRevision): ChapterRevision {

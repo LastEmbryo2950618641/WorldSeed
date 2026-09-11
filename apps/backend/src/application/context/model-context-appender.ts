@@ -95,7 +95,6 @@ function selectCoreTurnInput(
     "allowWorkspaceChapterReads",
     "presentation",
     "projectSettings",
-    "revisionAssist",
   ].flatMap((key) => input[key] === undefined ? [] : [[key, input[key]]]).concat(
     input.synopsisDiscuss === undefined
       ? []
@@ -113,6 +112,7 @@ function slimSynopsisDiscuss(
   const lastSynopsis = [...previous].reverse().find((item) => typeof item.synopsisMarkdown === "string")
   const lastOutline = [...previous].reverse().find((item) => typeof item.outlineMarkdown === "string")
   const lastBody = [...previous].reverse().find((item) => typeof item.chapterBodyMarkdown === "string")
+  const lastDraft = [...previous].reverse().find((item) => typeof item.latestDraftMarkdown === "string")
   if (
     typeof discuss.synopsisMarkdown === "string"
     && lastSynopsis?.synopsisMarkdown === discuss.synopsisMarkdown
@@ -130,6 +130,12 @@ function slimSynopsisDiscuss(
     && lastBody?.chapterBodyMarkdown === discuss.chapterBodyMarkdown
   ) {
     delete discuss.chapterBodyMarkdown
+  }
+  if (
+    typeof discuss.latestDraftMarkdown === "string"
+    && lastDraft?.latestDraftMarkdown === discuss.latestDraftMarkdown
+  ) {
+    delete discuss.latestDraftMarkdown
   }
   return discuss
 }

@@ -48,7 +48,6 @@ export const aiPhaseValues = [
   "frontier_settlement",
   "commit_review",
   "revision_review",
-  "revision_assist",
   "synopsis_discuss",
   "work_naming",
 ] as const

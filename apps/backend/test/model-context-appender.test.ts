@@ -368,38 +368,6 @@ describe("ModelContextAppender", () => {
     expect(secondDiscuss.chapterBodyMarkdown).toBeUndefined()
     expect(secondDiscuss.heading).toBe(discuss.heading)
   })
-
-  it("includes revisionAssist conversationHistory on the first request of a revision turn", () => {
-    const appender = new ModelContextAppender()
-    const request = { ...createRequest(), phase: "revision_assist" as const }
-    const revisionAssist = {
-      chapterId: "chapter-1",
-      heading: "第一章",
-      committedBody: "正文定稿",
-      workingBody: "正文草稿",
-      conversationHistory: [
-        { role: "user", content: "加强悬念" },
-        { role: "assistant", content: "已在结尾埋伏笔。" },
-      ],
-    }
-    const modelRequest = {
-      phase: "revision_assist",
-      protocolVersion: "1.0.0",
-      committedReadIds: [],
-      visiblePendingIds: [],
-      remainingBudget: {},
-      input: {
-        workflow: "revision_assist",
-        userInput: "再压缩一点",
-        revisionAssist,
-      },
-    }
-
-    const delta = appender.createDelta(request, modelRequest, [systemMessage()]) as {
-      input: Record<string, unknown>
-    }
-    expect(delta.input.revisionAssist).toEqual(revisionAssist)
-  })
 })
 
 function createRequest(): PhaseRequestEnvelope {

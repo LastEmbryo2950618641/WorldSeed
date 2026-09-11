@@ -8,6 +8,7 @@ import type { RuntimeMetricsSnapshot } from "@worldseed/contracts"
 import { invokeBackend } from "../src/renderer/src/api/client.js"
 import { EditorArea } from "../src/renderer/src/features/editor/EditorArea.js"
 import { ChapterWorkspaceRail } from "../src/renderer/src/features/editor/ChapterWorkspaceRail.js"
+import { SynopsisConversationComposer } from "../src/renderer/src/features/editor/SynopsisConversationComposer.js"
 import { ChapterWorkspaceToolbar } from "../src/renderer/src/features/editor/ChapterWorkspaceToolbar.js"
 import { ChapterDraftVersionsPrototype } from "../src/renderer/src/features/editor/ChapterDraftVersionsPrototype.js"
 import { CreationDeskProgressReview } from "../src/renderer/src/features/editor/CreationDeskProgressReview.js"
@@ -21,6 +22,7 @@ import {
   mergeGraphSlices,
   shouldMonitorChapterRevision,
 } from "../src/renderer/src/app/App.js"
+import { isChapterGraphSyncBlocking, shouldAutoEnsureChapterRevision } from "../src/renderer/src/features/editor/chapter-workspace-types.js"
 import {
   buildGraphLevelsForLayout,
   GraphContentView,
@@ -126,7 +128,6 @@ function editorDefaults(overrides: Partial<React.ComponentProps<typeof EditorAre
     onReviewRevision: vi.fn(async () => { throw new Error("reviewRevision not mocked") }),
     onSubmitRevision: vi.fn(async () => { throw new Error("submitRevision not mocked") }),
     onRetireRevision: vi.fn(async () => { throw new Error("retireRevision not mocked") }),
-    chapterConversationMessages: [],
     projectId: "project-test",
     workspaceRootRef: "C:\\Worldseed\\test",
     synopsisSession: undefined,
@@ -134,8 +135,6 @@ function editorDefaults(overrides: Partial<React.ComponentProps<typeof EditorAre
     synopsisBusy: false,
     onSynopsisSend: vi.fn(async () => {}),
     onOpenSynopsisFile: vi.fn(),
-    diffFocusMessageId: undefined,
-    onDiffFocusHandled: vi.fn(),
     ...overrides,
   }
 }
@@ -171,6 +170,9 @@ describe("renderer workbench UI contract", () => {
     expect(html).toContain("data-testid=\"creation-desk-toolbar\"")
     expect(html).toContain("data-testid=\"creation-desk-goals-trigger\"")
     expect(html).toContain("data-testid=\"creation-desk-advanced-trigger\"")
+    expect(html).toContain("data-testid=\"creation-desk-token-metrics\"")
+    expect(html).toContain("data-testid=\"creation-desk-model-quick\"")
+    expect(html).toContain("data-testid=\"creation-desk-send\"")
     expect(html).not.toContain("data-testid=\"creation-desk-start-turn\"")
     expect(html).not.toContain("创作台首页")
     expect(html).not.toContain("从本轮输入开始")
@@ -183,6 +185,32 @@ describe("renderer workbench UI contract", () => {
     expect(html).toContain("因果焦点")
     expect(html).toContain("自动")
     expect(html).not.toContain("data-testid=\"creation-desk-jump-latest\"")
+  })
+
+  it("collapses thinking, search, and edit stream blocks by default", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      synopsisMessages: [{
+        messageId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        projectId: "11111111-1111-4111-8111-111111111111",
+        role: "assistant",
+        content: "正式输出正文。",
+        thinkingRounds: [{ round: 1, text: "先想检索范围。" }],
+        searching: [{ query: "Sakura 词条", status: "completed", round: 1 }],
+        editing: [{
+          path: "章节正文/第一章 [剧情梗概].md",
+          kind: "synopsis",
+          status: "completed",
+          summary: "已写入梗概",
+        }],
+        createdAtMs: 2,
+      }],
+    })))
+
+    expect(html).toContain("agent-stream-block thinking")
+    expect(html).toContain("agent-stream-block searching")
+    expect(html).toContain("agent-stream-block editing")
+    expect(html).not.toMatch(/agent-stream-block (?:thinking|searching|editing|resulting)[^>]*\sopen/)
   })
 
   it("renders a searchable chapter focus bar on the creation desk", () => {
@@ -293,15 +321,34 @@ describe("renderer workbench UI contract", () => {
         createdAtMs: 1,
         updatedAtMs: 2,
       },
-      chapterConversationMessages: [{
-        messageId: "message-1",
-        revisionTaskId: "revision-1",
-        projectId: "project-1",
-        role: "assistant",
-        content: "我已扩展正文。",
-        proposal: { heading: "第一章 世界种子", body: "正式正文。\n\nAgent 扩写段落。" },
-        createdAtMs: 2,
-      }],
+      revisionContent: "正式正文。\n\nAgent 扩写段落。",
+      persistedDraftVersions: [
+        {
+          versionId: "11111111-1111-4111-8111-111111111001",
+          projectId: "11111111-1111-4111-8111-111111111000",
+          revisionTaskId: "revision-1",
+          source: "baseline",
+          label: "v0",
+          heading: "第一章 世界种子",
+          body: "正式正文。",
+          bodyDigest: "d0",
+          createdAtMs: 1,
+          isLatest: false,
+        },
+        {
+          versionId: "11111111-1111-4111-8111-111111111003",
+          projectId: "11111111-1111-4111-8111-111111111000",
+          revisionTaskId: "revision-1",
+          parentVersionId: "11111111-1111-4111-8111-111111111001",
+          source: "agent",
+          label: "v1",
+          heading: "第一章 世界种子",
+          body: "正式正文。\n\nAgent 扩写段落。",
+          bodyDigest: "d1",
+          createdAtMs: 2,
+          isLatest: true,
+        },
+      ],
     })))
 
     expect(html).toContain("data-testid=\"chapter-document-switch\"")
@@ -314,6 +361,64 @@ describe("renderer workbench UI contract", () => {
     expect(html).toContain("aria-label=\"创建新草稿\"")
     expect(html).toContain("Agent 扩写段落。")
     expect(html).not.toContain("data-testid=\"chapter-conversation\"")
+  })
+
+  it("lists persisted agent drafts in the chapter version picker", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      selectedPath: "章节正文/第一章 世界种子.md",
+      content: "# 第一章 世界种子\n\n正式正文。",
+      chapterBody: "正式正文。",
+      chapter: { chapterId: "chapter-1", sourceId: "source-1", heading: "第一章 世界种子" },
+      revision: {
+        revisionTaskId: "11111111-1111-4111-8111-111111111002",
+        projectId: "project-1",
+        chapterId: "chapter-1",
+        baseSourceId: "source-1",
+        proposedSourceId: "source-2",
+        heading: "第一章 世界种子",
+        contentDigest: "digest-2",
+        inputMode: "agent",
+        decision: "pending",
+        graphSyncStatus: "not_started",
+        status: "editing",
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      },
+      persistedDraftVersions: [
+        {
+          versionId: "11111111-1111-4111-8111-111111111001",
+          projectId: "11111111-1111-4111-8111-111111111000",
+          revisionTaskId: "11111111-1111-4111-8111-111111111002",
+          source: "baseline",
+          label: "v0",
+          heading: "第一章 世界种子",
+          body: "正式正文。",
+          bodyDigest: "d0",
+          createdAtMs: 1,
+          isLatest: false,
+        },
+        {
+          versionId: "11111111-1111-4111-8111-111111111003",
+          projectId: "11111111-1111-4111-8111-111111111000",
+          revisionTaskId: "11111111-1111-4111-8111-111111111002",
+          parentVersionId: "11111111-1111-4111-8111-111111111001",
+          source: "agent",
+          label: "v1",
+          heading: "第一章 世界种子",
+          body: "Agent 写入的草稿。",
+          bodyDigest: "d1",
+          createdAtMs: 2,
+          isLatest: true,
+        },
+      ],
+    })))
+
+    expect(html).toContain("data-testid=\"chapter-draft-version-select\"")
+    expect(html).toContain("草稿版本")
+    expect(html).toContain("草稿 · v1")
+    expect(html).toContain("chapter-version-mark-ordinal")
+    expect(html).toContain("Agent 写入的草稿。")
+    expect(html).toContain("data-version-kind=\"draft\"")
   })
 
   it("renders revision actions in the chapter header toolbar", () => {
@@ -362,23 +467,113 @@ describe("renderer workbench UI contract", () => {
 
   it("renders chapter workspace rail with conversation only", () => {
     const html = renderToStaticMarkup(React.createElement(ChapterWorkspaceRail, {
-      messages: [],
-      revisionTaskId: "revision-1",
-      busy: false,
-      chapterSynopsis: undefined,
-      synopsisPanelOpen: false,
-      onToggleSynopsisPanel: vi.fn(),
-      onSend: vi.fn(),
-      onInspectDiff: vi.fn(),
+      conversation: React.createElement("div", { "data-testid": "chapter-conversation" }, "Agent 对话"),
     }))
 
     expect(html).toContain("data-testid=\"chapter-workspace-rail\"")
+    expect(html).toContain("data-testid=\"chapter-rail-tabs\"")
+    expect(html).toContain("剧情细纲")
     expect(html).toContain("剧情梗概")
+    expect(html).toContain("Agent 对话")
+    expect(html).toContain("aria-selected=\"true\"")
+    expect(html).toContain("data-testid=\"chapter-rail-tab-conversation\"")
     expect(html).not.toContain("章节修订")
     expect(html).not.toContain("data-testid=\"chapter-revision-actions\"")
     expect(html).not.toContain("data-testid=\"chapter-reading-toolbar\"")
+    expect(html).not.toContain("data-testid=\"chapter-workspace-related-strip\"")
     expect(html).toContain("data-testid=\"chapter-conversation\"")
-    expect(html).toContain("Agent 对话")
+    expect(html).not.toContain("data-testid=\"chapter-synopsis-panel\"")
+    expect(html).not.toContain("data-testid=\"chapter-outline-panel\"")
+  })
+
+  it("switches the chapter rail between outline, synopsis, and conversation", () => {
+    const synopsisHtml = renderToStaticMarkup(React.createElement(ChapterWorkspaceRail, {
+      conversation: React.createElement("div", { "data-testid": "chapter-conversation" }, "Agent 对话"),
+      activeTab: "synopsis",
+      synopsisMarkdown: "雨夜来信的梗概。",
+      outlineMarkdown: "细纲段落。",
+    }))
+    expect(synopsisHtml).toContain("data-testid=\"chapter-synopsis-panel\"")
+    expect(synopsisHtml).toContain("雨夜来信的梗概。")
+    expect(synopsisHtml).not.toContain("data-testid=\"chapter-conversation\"")
+    expect(synopsisHtml).not.toContain("细纲段落。")
+
+    const outlineHtml = renderToStaticMarkup(React.createElement(ChapterWorkspaceRail, {
+      conversation: React.createElement("div", { "data-testid": "chapter-conversation" }, "Agent 对话"),
+      activeTab: "outline",
+      synopsisMarkdown: "雨夜来信的梗概。",
+      outlineMarkdown: "细纲段落。",
+    }))
+    expect(outlineHtml).toContain("data-testid=\"chapter-outline-panel\"")
+    expect(outlineHtml).toContain("细纲段落。")
+    expect(outlineHtml).not.toContain("data-testid=\"chapter-conversation\"")
+    expect(outlineHtml).not.toContain("雨夜来信的梗概。")
+  })
+
+  it("hides set_focus choices in the chapter-locked discuss rail", () => {
+    const html = renderToStaticMarkup(React.createElement(SynopsisConversationComposer, {
+      layout: "rail",
+      focusLocked: true,
+      projectId: "11111111-1111-4111-8111-111111111111",
+      workspaceRootRef: "ws",
+      session: {
+        sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        projectId: "11111111-1111-4111-8111-111111111111",
+        chapterSequence: 1,
+        synopsisPath: "章节正文/第一卷 待命名/第一章 雨夜来信 [剧情梗概].md",
+        title: "雨夜来信",
+        focusKind: "chapter_body",
+        status: "active",
+        createdAtMs: 1,
+        updatedAtMs: 1,
+      },
+      messages: [{
+        messageId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        projectId: "11111111-1111-4111-8111-111111111111",
+        role: "assistant",
+        content: "已写入草稿。",
+        choices: [
+          { label: "是否将焦点调整到第2章", action: "set_focus", chapterSequence: 2 },
+          { label: "是否确认用草稿(v1)覆盖正式正文（当前正文将备份为旧版本）", action: "promote_draft_to_body" },
+        ],
+        createdAtMs: 2,
+      }],
+      busy: false,
+      running: false,
+      onSend: vi.fn(async () => {}),
+      onRefreshChoices: vi.fn(async () => {}),
+      onPromoteStaging: vi.fn(async () => {}),
+      onStartTurn: vi.fn(),
+      descriptionRule: "",
+      proseRule: "",
+      minimumWordCount: "2000",
+      maximumWordCount: "3000",
+      wordCountValid: true,
+      descriptionRules: [],
+      proseRules: [],
+      boundaryPace: "advance_allowed",
+      causalityFocus: "auto",
+      onDescriptionRuleChange: vi.fn(),
+      onProseRuleChange: vi.fn(),
+      onMinimumWordCountChange: vi.fn(),
+      onMaximumWordCountChange: vi.fn(),
+      onBoundaryPaceChange: vi.fn(),
+      onCausalityFocusChange: vi.fn(),
+      modelProfiles: [],
+      activeModelProfileId: "",
+      onActiveModelIdChange: vi.fn(),
+      onReasoningEffortChange: vi.fn(),
+    }))
+
+    expect(html).toContain("data-testid=\"chapter-conversation\"")
+    expect(html).toContain("覆盖正式正文")
+    expect(html).not.toContain("是否将焦点调整到第2章")
+    expect(html).not.toContain("data-testid=\"creation-desk-toolbar\"")
+    expect(html).not.toContain("data-testid=\"creation-desk-token-metrics\"")
+    expect(html).not.toContain("data-testid=\"creation-desk-model-quick\"")
+    expect(html).not.toContain("data-testid=\"creation-desk-advanced-trigger\"")
+    expect(html).toContain("data-testid=\"creation-desk-send\"")
   })
 
   it("mounts only the active right panel layer", () => {
@@ -469,6 +664,36 @@ describe("renderer workbench UI contract", () => {
     expect(html).not.toContain("data-testid=\"chapter-revision-actions\"")
   })
 
+  it("does not treat a stuck content commit as world-graph sync", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      selectedPath: "章节正文/第一章 雨夜来信.md",
+      content: "# 第一章 雨夜来信\n\n修改后的正文。",
+      chapterBody: "修改后的正文。",
+      chapter: { chapterId: "chapter-1", sourceId: "source-2", heading: "第一章 雨夜来信" },
+      revision: {
+        revisionTaskId: "revision-1",
+        projectId: "project-1",
+        chapterId: "chapter-1",
+        baseSourceId: "source-1",
+        proposedSourceId: "source-2",
+        heading: "第一章 雨夜来信",
+        contentDigest: "digest-2",
+        decision: "submit",
+        graphSyncStatus: "not_started",
+        status: "committing_content",
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      },
+      revisionContent: "修改后的正文。",
+      readOnly: true,
+    })))
+
+    expect(html).not.toContain("图同步中")
+    expect(html).not.toContain("世界图同步进行中")
+    expect(html).toContain("章节草稿")
+    expect(html).toContain("mock-monaco-editor")
+  })
+
   it("does not expose editing controls after chapter content enters graph synchronization", () => {
     const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
       selectedPath: "章节正文/第一章 雨夜来信.md",
@@ -490,13 +715,192 @@ describe("renderer workbench UI contract", () => {
         updatedAtMs: 2,
       },
       revisionContent: "修改后的正文。",
+      persistedDraftVersions: [
+        {
+          versionId: "11111111-1111-4111-8111-111111111001",
+          projectId: "11111111-1111-4111-8111-111111111000",
+          revisionTaskId: "revision-1",
+          source: "baseline",
+          label: "v0",
+          heading: "第一章 雨夜来信",
+          body: "旧正文。",
+          bodyDigest: "d0",
+          createdAtMs: 1,
+          isLatest: false,
+          isCurrentOfficial: false,
+        },
+        {
+          versionId: "11111111-1111-4111-8111-111111111003",
+          projectId: "11111111-1111-4111-8111-111111111000",
+          revisionTaskId: "revision-1",
+          parentVersionId: "11111111-1111-4111-8111-111111111001",
+          source: "agent",
+          label: "v2",
+          heading: "第一章 雨夜来信",
+          body: "修改后的正文。",
+          bodyDigest: "d2",
+          createdAtMs: 2,
+          isLatest: true,
+          isCurrentOfficial: true,
+        },
+      ],
       readOnly: true,
     })))
 
     expect(html).toContain("继续图同步")
+    expect(html).toContain("chapter-reader-header-compact")
+    expect(html).toContain("正文版本")
+    expect(html).toContain("正文 · v1")
+    expect(html).toContain("当前正文 · v2")
+    expect(html).toContain("chapter-version-mark-ordinal")
+    expect(html).toContain("chapter-version-mark-current")
+    expect(html).toContain("data-version-kind=\"official\"")
+    expect(html).toContain("aria-selected=\"true\"")
+    expect(html).not.toContain("chapter-reader-title-block")
+    expect(html).not.toContain("<h1>")
     expect(html).not.toContain("图同步中")
     expect(html).not.toContain("修订检查")
     expect(html).not.toContain("审核后提交")
+    expect(html).not.toContain("data-testid=\"chapter-revision-actions\"")
+  })
+
+  it("keeps persisted drafts visible after covering the official body", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      selectedPath: "章节正文/第一章 雨夜来信.md",
+      content: "# 第一章 雨夜来信\n\n修改后的正文。",
+      chapterBody: "修改后的正文。",
+      chapter: { chapterId: "chapter-1", sourceId: "source-2", heading: "第一章 雨夜来信" },
+      revision: {
+        revisionTaskId: "revision-1",
+        projectId: "project-1",
+        chapterId: "chapter-1",
+        baseSourceId: "source-1",
+        proposedSourceId: "source-2",
+        heading: "第一章 雨夜来信",
+        contentDigest: "digest-2",
+        decision: "submit",
+        graphSyncStatus: "completed",
+        status: "completed",
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      },
+      revisionContent: "修改后的正文。",
+      persistedDraftVersions: [
+        {
+          versionId: "11111111-1111-4111-8111-111111111001",
+          projectId: "11111111-1111-4111-8111-111111111000",
+          revisionTaskId: "revision-1",
+          source: "baseline",
+          label: "v0",
+          heading: "第一章 雨夜来信",
+          body: "旧正文。",
+          bodyDigest: "d0",
+          createdAtMs: 1,
+          isLatest: false,
+          isCurrentOfficial: false,
+        },
+        {
+          versionId: "11111111-1111-4111-8111-111111111003",
+          projectId: "11111111-1111-4111-8111-111111111000",
+          revisionTaskId: "revision-1",
+          parentVersionId: "11111111-1111-4111-8111-111111111001",
+          source: "agent",
+          label: "v2",
+          heading: "第一章 雨夜来信",
+          body: "修改后的正文。",
+          bodyDigest: "d2",
+          createdAtMs: 2,
+          isLatest: true,
+          isCurrentOfficial: true,
+        },
+      ],
+    })))
+
+    expect(html).toContain("data-testid=\"chapter-draft-version-select\"")
+    expect(html).toContain("草稿版本")
+    expect(html).toContain("草稿 · v1 · 已覆盖正文")
+    expect(html).toContain("chapter-version-mark-covered")
+    expect(html).toContain("此草稿已覆盖为当前正文")
+    expect(html).toContain("data-version-kind=\"draft\"")
+    expect(html).not.toContain("data-testid=\"chapter-revision-actions\"")
+    expect(shouldAutoEnsureChapterRevision({ status: "completed" })).toBe(false)
+    expect(shouldAutoEnsureChapterRevision({ status: "editing" })).toBe(false)
+    expect(shouldAutoEnsureChapterRevision(undefined)).toBe(true)
+  })
+
+  it("opens the draft pane on a working draft instead of the covering official body", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      selectedPath: "章节正文/第一章 雨夜来信.md",
+      content: "# 第一章 雨夜来信\n\n修改后的正文。",
+      chapterBody: "修改后的正文。",
+      chapter: { chapterId: "chapter-1", sourceId: "source-2", heading: "第一章 雨夜来信" },
+      revision: {
+        revisionTaskId: "revision-1",
+        projectId: "project-1",
+        chapterId: "chapter-1",
+        baseSourceId: "source-1",
+        proposedSourceId: "source-2",
+        heading: "第一章 雨夜来信",
+        contentDigest: "digest-2",
+        decision: "submit",
+        graphSyncStatus: "completed",
+        status: "completed",
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      },
+      revisionContent: "修改后的正文。",
+      persistedDraftVersions: [
+        {
+          versionId: "11111111-1111-4111-8111-111111111001",
+          projectId: "11111111-1111-4111-8111-111111111000",
+          revisionTaskId: "revision-1",
+          source: "baseline",
+          label: "v0",
+          heading: "第一章 雨夜来信",
+          body: "旧正文。",
+          bodyDigest: "d0",
+          createdAtMs: 1,
+          isLatest: false,
+          isCurrentOfficial: false,
+        },
+        {
+          versionId: "11111111-1111-4111-8111-111111111003",
+          projectId: "11111111-1111-4111-8111-111111111000",
+          revisionTaskId: "revision-1",
+          parentVersionId: "11111111-1111-4111-8111-111111111001",
+          source: "agent",
+          label: "v1",
+          heading: "第一章 雨夜来信",
+          body: "中间草稿，尚未覆盖正文。",
+          bodyDigest: "d1",
+          createdAtMs: 2,
+          isLatest: false,
+          isCurrentOfficial: false,
+        },
+        {
+          versionId: "11111111-1111-4111-8111-111111111004",
+          projectId: "11111111-1111-4111-8111-111111111000",
+          revisionTaskId: "revision-1",
+          parentVersionId: "11111111-1111-4111-8111-111111111003",
+          source: "agent",
+          label: "v2",
+          heading: "第一章 雨夜来信",
+          body: "修改后的正文。",
+          bodyDigest: "d2",
+          createdAtMs: 3,
+          isLatest: true,
+          isCurrentOfficial: true,
+        },
+      ],
+    })))
+
+    expect(html).toContain("data-version-kind=\"draft\"")
+    expect(html).toContain("草稿 · v1")
+    expect(html).toContain("草稿 · v2 · 已覆盖正文")
+    expect(html).toContain("中间草稿，尚未覆盖正文。")
+    expect(html).toContain("正在查看 草稿 · v1")
+    expect(html).toContain("chapter-version-mark-covered")
+    expect(html).not.toContain("data-version-kind=\"official\"")
   })
 
   it("only monitors graph synchronization after the backend reports it running", () => {
@@ -504,6 +908,14 @@ describe("renderer workbench UI contract", () => {
     expect(shouldMonitorChapterRevision("running")).toBe(true)
     expect(shouldMonitorChapterRevision("completed")).toBe(false)
     expect(shouldMonitorChapterRevision("failed")).toBe(false)
+    expect(isChapterGraphSyncBlocking({
+      decision: "submit",
+      graphSyncStatus: "not_started",
+    })).toBe(false)
+    expect(isChapterGraphSyncBlocking({
+      decision: "submit",
+      graphSyncStatus: "pending",
+    })).toBe(true)
   })
 
   it("renders non-chapter Markdown through a read-only aware editor", () => {
@@ -647,7 +1059,7 @@ describe("right rail process UI contract", () => {
 
     expect(html).toContain("已向模型发起请求")
     expect(html).toContain("等待 AI 返回思考记录与正式输出")
-    expect(html).toContain("等待后端返回运行指标")
+    expect(html).toContain("等待本轮数据")
   })
 
   it("omits the redundant text status column from phase rows", () => {
@@ -731,8 +1143,8 @@ describe("right rail process UI contract", () => {
     expect(html).not.toContain("runtime-counter")
     expect(html).not.toContain("1 / 10 / 10")
     expect(html).toContain("执行时间")
-    expect(html).toContain("活动上下文长度")
-    expect(html).toContain("KV 缓存平均命中率")
+    expect(html).toContain("上下文长度")
+    expect(html).toContain("KV 命中率")
     expect(html).toContain("ui-tooltip-anchor")
     expect(html.split("class=\"phase-list\"")[0]).not.toContain("当前阶段检索轮次")
     expect(html).toContain("压缩次数")
@@ -748,7 +1160,12 @@ describe("right rail process UI contract", () => {
     expect(html).not.toContain("实时状态")
     expect(html).toContain("全部重置")
     expect(html).toContain("读取当前场景锚点")
-    expect(html).toContain("审查正文响应")
+    expect(html).toContain("撰写正文")
+    expect(html).not.toContain("审查正文响应")
+    expect(html).not.toContain("抽取设定提案")
+    expect(html).not.toContain("审查出现依据")
+    expect(html).not.toContain("结算资料返回路径")
+    expect(html).not.toContain("最终提交审查")
     expect(html).toContain("尚未进入该阶段")
     expect(html).toContain("平均上下文请求 Token 数")
     expect(html).toContain("平均 AI 请求数")
@@ -799,6 +1216,31 @@ describe("right rail process UI contract", () => {
     expect(html).toContain("completed")
     expect(html).not.toContain("class=\"task-error\"")
     expect(html).not.toContain("<details class=\"continuity-advice\" open=\"\"")
+  })
+
+  it("hides retired turn review rows on a completed historical task", () => {
+    const html = renderToStaticMarkup(React.createElement(RightRail, {
+      graphSlice: undefined,
+      task: {
+        status: "completed",
+        lastPhase: "commit_review",
+        phaseRuns: [
+          { phaseRunId: "p-emerge", phase: "emergence_review", status: "completed", attempt: 1, usage: {}, startedAtMs: 1, finishedAtMs: 2 },
+          { phaseRunId: "p-settings", phase: "settings_extraction", status: "completed", attempt: 1, usage: {}, startedAtMs: 3, finishedAtMs: 4 },
+          { phaseRunId: "p-gov", phase: "graph_governance_review", status: "completed", attempt: 1, usage: {}, startedAtMs: 5, finishedAtMs: 6 },
+          { phaseRunId: "p-settle", phase: "settlement_review", status: "completed", attempt: 1, usage: {}, startedAtMs: 7, finishedAtMs: 8 },
+          { phaseRunId: "p-commit", phase: "commit_review", status: "completed", attempt: 1, usage: {}, startedAtMs: 9, finishedAtMs: 10 },
+        ],
+      },
+    }))
+
+    expect(html).not.toContain("审查出现依据")
+    expect(html).not.toContain("抽取设定提案")
+    expect(html).not.toContain("整体治理审核")
+    expect(html).not.toContain("结算资料返回路径")
+    expect(html).not.toContain("最终提交审查")
+    expect(html).toContain("撰写正文")
+    expect(html).toContain("分步治理世界图")
   })
 
   it("updates the process view when another phase run is returned", () => {

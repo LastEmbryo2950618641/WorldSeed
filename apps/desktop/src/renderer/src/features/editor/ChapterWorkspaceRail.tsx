@@ -1,96 +1,97 @@
-import type { ChapterRevisionConversationMessage, ChapterSynopsis } from "@worldseed/contracts"
-import { BookOpenText, FileText, ScrollText } from "lucide-react"
+import { useState } from "react"
+import { BookOpenText, MessageSquare, ScrollText } from "lucide-react"
+import type { ReactNode } from "react"
 
-import { ChapterConversationComposer } from "./ChapterConversationComposer.js"
-import {
-  chapterArtifactStageLabel,
-  type ChapterMarkdownKind,
-} from "./synopsis-path.js"
-import type { RelatedChapterArtifact } from "./ChapterArtifactRelatedRail.js"
+export type ChapterRailTab = "outline" | "synopsis" | "conversation"
 
 type Props = Readonly<{
-  messages: readonly ChapterRevisionConversationMessage[]
-  revisionTaskId: string | undefined
-  busy: boolean
-  chapterSynopsis: ChapterSynopsis | undefined
-  synopsisPanelOpen: boolean
-  relatedArtifacts?: readonly RelatedChapterArtifact[]
-  currentKind?: ChapterMarkdownKind
-  currentPath?: string
-  onToggleSynopsisPanel(): void
-  onSend(message: string): Promise<void>
-  onInspectDiff(messageId: string): void
-  onOpenRelated?(path: string): void
+  conversation: ReactNode
+  synopsisMarkdown?: string
+  outlineMarkdown?: string
+  synopsisPath?: string
+  outlinePath?: string
+  activeTab?: ChapterRailTab
+  onOpenFile?(path: string): void
 }>
 
+const TABS: ReadonlyArray<Readonly<{
+  id: ChapterRailTab
+  label: string
+  testId: string
+}>> = [
+  { id: "outline", label: "剧情细纲", testId: "chapter-rail-tab-outline" },
+  { id: "synopsis", label: "剧情梗概", testId: "chapter-rail-tab-synopsis" },
+  { id: "conversation", label: "Agent 对话", testId: "chapter-rail-tab-conversation" },
+]
+
 export function ChapterWorkspaceRail(props: Props): React.JSX.Element {
-  const related = (props.relatedArtifacts ?? []).filter((item) => item.path !== props.currentPath)
+  const [uncontrolledTab, setUncontrolledTab] = useState<ChapterRailTab>("conversation")
+  const tab = props.activeTab ?? uncontrolledTab
+  const setTab = (next: ChapterRailTab): void => {
+    if (props.activeTab === undefined) setUncontrolledTab(next)
+  }
+
   return <aside className="chapter-workspace-rail" data-testid="chapter-workspace-rail">
-    <div className="chapter-workspace-rail-toolbar">
-      <button
-        type="button"
-        className={props.synopsisPanelOpen ? "active" : ""}
-        data-testid="chapter-synopsis-toggle"
-        onClick={props.onToggleSynopsisPanel}
-      >
-        <BookOpenText size={14} aria-hidden="true" /> 剧情梗概
-      </button>
+    <div className="chapter-rail-tabs" data-testid="chapter-rail-tabs" role="tablist" aria-label="章节侧栏">
+      {TABS.map((item) => {
+        const selected = tab === item.id
+        return <button
+          key={item.id}
+          type="button"
+          role="tab"
+          className={selected ? "active" : ""}
+          aria-selected={selected}
+          data-testid={item.testId}
+          onClick={() => { setTab(item.id); }}
+        >
+          {item.id === "outline"
+            ? <ScrollText size={12} aria-hidden="true" />
+            : item.id === "synopsis"
+              ? <BookOpenText size={12} aria-hidden="true" />
+              : <MessageSquare size={12} aria-hidden="true" />}
+          {item.label}
+        </button>
+      })}
     </div>
-    {related.length > 0
-      ? <div className="chapter-workspace-related-strip" data-testid="chapter-workspace-related-strip">
-          {props.currentKind === undefined
-            ? null
-            : <span className="chapter-artifact-stage-chip">当前：{chapterArtifactStageLabel(props.currentKind)}</span>}
-          {related.map((item) => <RelatedStripCard
-            key={item.path}
-            item={item}
-            onOpen={props.onOpenRelated}
-          />)}
-        </div>
-      : null}
-    {props.synopsisPanelOpen
-      ? <div className="chapter-synopsis-panel" data-testid="chapter-synopsis-panel">
-          {props.chapterSynopsis === undefined
-            ? <p className="chapter-synopsis-empty">本章无剧情梗概记录</p>
-            : <pre className="chapter-synopsis-markdown">{props.chapterSynopsis.synopsisMarkdown}</pre>}
-        </div>
-      : <ChapterConversationComposer
-          variant="rail"
-          messages={props.messages}
-          revisionTaskId={props.revisionTaskId}
-          busy={props.busy}
-          onSend={props.onSend}
-          onInspectDiff={props.onInspectDiff}
+    {tab === "conversation"
+      ? props.conversation
+      : <ChapterRailDocumentPane
+          kind={tab}
+          markdown={tab === "outline" ? props.outlineMarkdown : props.synopsisMarkdown}
+          filePath={tab === "outline" ? props.outlinePath : props.synopsisPath}
+          onOpenFile={props.onOpenFile}
         />}
   </aside>
 }
 
-function RelatedStripCard(props: Readonly<{
-  item: RelatedChapterArtifact
-  onOpen?(path: string): void
+function ChapterRailDocumentPane(props: Readonly<{
+  kind: "outline" | "synopsis"
+  markdown: string | undefined
+  filePath: string | undefined
+  onOpenFile?(path: string): void
 }>): React.JSX.Element {
-  const item = props.item
-  return <section className="chapter-artifact-related-card compact" data-testid={`chapter-artifact-related-${item.kind}`}>
-    <div className="chapter-artifact-related-card-head">
-      {item.kind === "plot_synopsis"
-        ? <BookOpenText size={13} aria-hidden="true" />
-        : item.kind === "plot_outline"
-          ? <ScrollText size={13} aria-hidden="true" />
-          : <FileText size={13} aria-hidden="true" />}
-      <strong>{chapterArtifactStageLabel(item.kind)}</strong>
-      {!item.present ? <em className="missing">尚未创建</em> : null}
-      {item.present && props.onOpen !== undefined
-        ? <button type="button" onClick={() => { props.onOpen?.(item.path); }}>打开</button>
+  const title = props.kind === "outline" ? "剧情细纲" : "剧情梗概"
+  const empty = props.markdown === undefined || props.markdown.trim().length === 0
+  const filePath = props.filePath
+  return <div
+    className="chapter-rail-document"
+    data-testid={props.kind === "outline" ? "chapter-outline-panel" : "chapter-synopsis-panel"}
+    role="tabpanel"
+  >
+    <div className="chapter-rail-document-head">
+      <strong>{title}</strong>
+      {filePath !== undefined && props.onOpenFile !== undefined
+        ? <button
+            type="button"
+            className="chapter-rail-document-open"
+            onClick={() => { props.onOpenFile?.(filePath); }}
+          >
+            在编辑器打开
+          </button>
         : null}
     </div>
-    {item.present && item.content !== undefined && item.content.trim().length > 0
-      ? <pre className="chapter-artifact-related-preview">{truncatePreview(item.content, 1_200)}</pre>
-      : null}
-  </section>
-}
-
-function truncatePreview(content: string, maxChars: number): string {
-  const normalized = content.replace(/\r\n/gu, "\n").trim()
-  if (normalized.length <= maxChars) return normalized
-  return `${normalized.slice(0, maxChars)}…`
+    {empty
+      ? <p className="chapter-synopsis-empty">本章无{title}记录</p>
+      : <pre className="chapter-synopsis-markdown">{props.markdown}</pre>}
+  </div>
 }

@@ -255,8 +255,6 @@ export class FakeAiModelAdapter implements AIModelPort {
           recommendation: "no_issue",
           finalSelfReview: "The proposed revision was checked for continuity using only the supplied revision context.",
         }
-      case "revision_assist":
-        return this.createRevisionAssistArtifact(input)
       case "synopsis_discuss":
         return this.createSynopsisDiscussArtifact(input)
       case "graph_governance":
@@ -603,55 +601,6 @@ export class FakeAiModelAdapter implements AIModelPort {
     }
   }
 
-  private createRevisionAssistArtifact(input: TurnPhaseInput): {
-    assistantMessage: string
-    proposedHeading?: string
-    proposedBody: string
-    finalSelfReview: string
-  } {
-    const assist = input.revisionAssist
-    const userMessage = input.userInput.trim()
-    const heading = assist?.heading ?? "未命名章节"
-    const workingBody = assist?.workingBody ?? assist?.committedBody ?? ""
-    const countChars = (text: string): number => text.replace(/\s+/gu, "").length
-    const currentCount = countChars(workingBody)
-
-    if (/2000|字数|太短|扩充|扩写|加长/u.test(userMessage)) {
-      const target = Number.parseInt(userMessage.match(/(\d{3,5})/u)?.[1] ?? "2000", 10)
-      const safeTarget = Number.isFinite(target) ? target : 2000
-      const expansion = buildExpansionParagraphs(Math.max(200, safeTarget - currentCount), userMessage)
-      const proposedBody = `${workingBody.trim()}\n\n${expansion}`.trim()
-      const nextCount = countChars(proposedBody)
-      return {
-        assistantMessage: `我已把正文从约 ${String(currentCount)} 字扩展到约 ${String(nextCount)} 字，补充了场景细节、人物动作与环境描写。请预览修订建议，满意后再点击「应用到修订稿」。`,
-        proposedHeading: heading,
-        proposedBody,
-        finalSelfReview: "Expanded the chapter body toward the requested length without replacing unrelated paragraphs.",
-      }
-    }
-
-    if (/悬疑|悬念|紧张|惊悚/u.test(userMessage)) {
-      const paragraphs = workingBody.trim().split(/\n{2,}/u).filter((part) => part.length > 0)
-      const suspenseLead = "风先停了一瞬，像是有人在暗处屏住了呼吸。旅人还没看清那盏灯，就先听见了比雨更轻、却更靠近的脚步。"
-      const proposedBody = [suspenseLead, ...paragraphs.slice(1)].join("\n\n")
-      return {
-        assistantMessage: "我重写了开头，把悬疑感前置：先写异常氛围与未现身的威胁，再接入原有情节。若方向合适，可应用到修订稿继续微调。",
-        proposedHeading: heading,
-        proposedBody,
-        finalSelfReview: "Rewrote the opening for suspense while preserving the remaining committed paragraphs.",
-      }
-    }
-
-    const addition = `（按你的要求「${userMessage.slice(0, 48)}${userMessage.length > 48 ? "…" : ""}」补充：这里展开了相关情节，并与上文自然衔接。）`
-    const proposedBody = `${workingBody.trim()}\n\n${addition}`.trim()
-    return {
-      assistantMessage: `我根据「${userMessage.slice(0, 40)}${userMessage.length > 40 ? "…" : ""}」在工作稿末尾增补了一段，并保留原有正文。请查看修订建议后决定是否应用。`,
-      proposedHeading: heading,
-      proposedBody,
-      finalSelfReview: "Appended a targeted paragraph responding to the latest user instruction.",
-    }
-  }
-
   private createSynopsisDiscussArtifact(input: TurnPhaseInput): {
     assistantMessage: string
     chapterTitle?: string
@@ -659,7 +608,8 @@ export class FakeAiModelAdapter implements AIModelPort {
     synopsisBody?: string
     choices?: Array<{
       label: string
-      action: "start_turn" | "continue_discuss" | "promote_staging" | "confirm_arc_plan" | "confirm_synopsis"
+      action: "start_turn" | "continue_discuss" | "promote_staging" | "confirm_arc_plan" | "confirm_synopsis" | "set_focus" | "promote_draft_to_body"
+      chapterSequence?: number
     }>
     goalProposals?: Array<{ payload: { kind: string; [key: string]: unknown }; reason?: string }>
     outlineBody?: string
@@ -667,6 +617,11 @@ export class FakeAiModelAdapter implements AIModelPort {
       target: "outline"
       baseDigest?: string
       ops: Array<{ oldText: string; newText: string }>
+    }
+    chapterDraftProposal?: {
+      base: "body" | "draft"
+      heading: string
+      body: string
     }
     stagingDelta?: {
       notes?: Array<{
@@ -800,10 +755,27 @@ export class FakeAiModelAdapter implements AIModelPort {
           }],
         }
       : undefined
+    const wantsBodyDraft = !wantsRefreshChoices
+      && !wantsPromote
+      && !wantsArcPlan
+      && !isHandoff
+      && /(?:修订|修改|改写).*(?:正文|这一章)|改正文|把开头写|如何改这一章|改这一章/u.test(userMessage)
+    const committedBody = discuss?.chapterBodyMarkdown?.trim()
+      ?? discuss?.latestDraftMarkdown?.trim()
+      ?? ""
+    const draftBase = discuss?.latestDraftMarkdown?.trim() || committedBody
+    const rawHeading = discuss?.heading?.trim() || heading.trim() || chapterLabel
+    const draftHeading = rawHeading.startsWith("第") ? rawHeading : `${chapterLabel} ${rawHeading}`
+    const draftBody = wantsBodyDraft
+      ? `${stripMarkdownHeading(draftBase || "雨夜里，旧站台尽头亮起一盏无人认领的灯。")}\n\n雨停之后，巷口的灯还亮着。`
+      : undefined
+    const wantsSetFocus = !discuss?.focusLocked && /(?:把焦点|换到|调整到)第[一二三四五六七八九十\d]+章/u.test(userMessage)
     const stagingEntryId = "staging-note-1"
     return {
       assistantMessage: isHandoff
         ? "已收到推演交接。我已对照正文摘要更新弧大纲与下一章建议，不会自动开始正式推演。"
+        : wantsBodyDraft
+        ? "已根据你的要求改完本章正文，并自动写入新草稿。正式正文尚未覆盖；确认后才会备份当前正文并用草稿覆盖。"
         : wantsPromote
         ? "我已整理待写入设定草案。请点击「把草案写入设定集」完成写入；推演目标仍会以提案形式等待你二次采纳。"
         : wantsArcPlan
@@ -817,15 +789,32 @@ export class FakeAiModelAdapter implements AIModelPort {
           : settingsIndexEvidence === undefined
             ? `我已更新「${synopsisHeading}」的剧情梗概。这是定本章方向，不是写入设定集；可选用这份梗概写细纲，或跳过细纲按梗概开推。`
             : `我已对照设定集索引整理「${synopsisHeading}」的剧情梗概。这是定本章方向，不是写入设定集；可选用这份梗概写细纲，或跳过细纲按梗概开推。`,
-      ...(discuss?.userEditedSinceAgent === true || wantsPromote || isHandoff || synopsisConfirmed
+      ...(discuss?.userEditedSinceAgent === true || wantsPromote || isHandoff || synopsisConfirmed || wantsBodyDraft
         ? {}
         : { chapterTitle, synopsisBody }),
-      ...(synopsisConfirmed && !wantsPromote && !isHandoff && !wantsArcPlan && !useBodyEdits
+      ...(synopsisConfirmed && !wantsPromote && !isHandoff && !wantsArcPlan && !useBodyEdits && !wantsBodyDraft
         ? { outlineBody }
         : {}),
-      ...(bodyEdits === undefined ? {} : { bodyEdits }),
+      ...(bodyEdits === undefined || wantsBodyDraft ? {} : { bodyEdits }),
+      ...(draftBody === undefined
+        ? {}
+        : {
+            chapterDraftProposal: {
+              base: (discuss?.latestDraftMarkdown?.trim().length ?? 0) > 0 ? "draft" as const : "body" as const,
+              heading: draftHeading,
+              body: draftBody,
+            },
+          }),
       ...(workDisplayName === undefined || workDisplayName === currentWorkName ? {} : { workDisplayName }),
-      choices: wantsPromote
+      choices: wantsBodyDraft
+        ? [
+            { label: "是否确认用这份草稿覆盖正式正文（当前正文将备份为旧版本）", action: "promote_draft_to_body" as const },
+            { label: "继续改草稿", action: "continue_discuss" as const },
+            ...(wantsSetFocus
+              ? [{ label: "是否将焦点调整到第2章", action: "set_focus" as const, chapterSequence: 2 }]
+              : []),
+          ]
+        : wantsPromote
         ? [
             { label: "把草案写入设定集", action: "promote_staging" as const },
             { label: "再修改梗概", action: "continue_discuss" as const },
@@ -917,9 +906,17 @@ export class FakeAiModelAdapter implements AIModelPort {
         ? "Prepared staging promote proposal for user confirmation; did not write settings yet."
         : isHandoff
           ? "Completed turn handoff analysis without beginTurn."
+        : wantsBodyDraft
+          ? "Returned a full chapterDraftProposal; official chapter file is unchanged until promote."
         : "Returned synopsis-level draft and confirm_synopsis choice without outlineBody.",
     }
   }
+}
+
+function stripMarkdownHeading(markdown: string): string {
+  const normalized = markdown.replaceAll("\r\n", "\n").trim()
+  const match = normalized.match(/^#\s+[^\n]+\n*/u)
+  return match === null ? normalized : normalized.slice(match[0].length).trim()
 }
 
 function phaseArtifacts(input: TurnPhaseInput): Partial<Record<AIPhase, unknown>> {
@@ -937,27 +934,4 @@ function estimateTokens(value: unknown): number {
 function chineseNumber(value: number): string {
   const numbers = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
   return numbers[value] ?? String(value)
-}
-
-function buildExpansionParagraphs(minChars: number, userMessage: string): string {
-  const seeds = [
-    "雨丝在站台铁架上汇成细流，灯光把每一滴水都照成短暂坠落的星。",
-    "旅人注意到轨道尽头的阴影里，似乎有人刚刚离开，却来不及留下脚印。",
-    "旧广播喇叭偶尔嘶鸣，像是从另一个年代借来的回声，提醒这里并非完全无人。",
-    "风从隧道口涌出，带着潮湿金属与远火的气息，把人的呼吸也吹得发紧。",
-    "站台的时钟停在某一刻，指针的阴影却仍在缓慢移动，仿佛时间本身也在犹豫。",
-  ]
-  const chunks: string[] = []
-  let total = 0
-  let index = 0
-  while (total < minChars && index < 24) {
-    const paragraph = seeds[index % seeds.length] ?? seeds[0] ?? ""
-    chunks.push(paragraph)
-    total += paragraph.replace(/\s+/gu, "").length
-    index += 1
-  }
-  if (userMessage.length > 0) {
-    chunks.push(`以上增补围绕你的要求：${userMessage.slice(0, 60)}${userMessage.length > 60 ? "…" : ""}`)
-  }
-  return chunks.join("\n\n")
 }

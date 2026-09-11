@@ -147,13 +147,6 @@ export type TurnPhaseInput = Readonly<{
     baseContent: string
     proposedContent: string
   }>
-  revisionAssist?: Readonly<{
-    chapterId: string
-    heading: string
-    committedBody: string
-    workingBody: string
-    conversationHistory: readonly Readonly<{ role: "user" | "assistant"; content: string }>[]
-  }>
   synopsisDiscuss?: Readonly<{
     heading: string
     chapterSequence: number
@@ -161,6 +154,10 @@ export type TurnPhaseInput = Readonly<{
     outlineMarkdown?: string
     /** Read-only committed body of the focused chapter, when published. */
     chapterBodyMarkdown?: string
+    /** Latest revision draft body for the focused chapter, when a revision exists. */
+    latestDraftMarkdown?: string
+    focusKind?: "plot_synopsis" | "plot_outline" | "chapter_body"
+    focusLocked?: boolean
     outlineDigest?: string
     userEditedSinceAgent: boolean
     userEditedOutlineSinceAgent?: boolean

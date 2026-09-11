@@ -146,34 +146,3 @@ export async function seedCommittedChapter(harness: ChapterHarness): Promise<{
   const data = read.data as { body: string; heading: string }
   return { chapterId: chapter.chapterId, sourceId: chapter.sourceId, body: data.body, heading: data.heading }
 }
-
-export async function conversationSend(
-  harness: ChapterHarness,
-  chapterId: string,
-  message: string,
-) {
-  return harness.facade.handle({
-    protocolVersion: PROTOCOL_VERSION,
-    requestId: randomUUID(),
-    method: "chapter.revision.conversation.send",
-    payload: {
-      projectId: harness.projectId,
-      workspaceRootRef: harness.workspaceRootRef,
-      chapterId,
-      message,
-    },
-  })
-}
-
-export async function conversationList(harness: ChapterHarness, chapterId: string) {
-  return harness.facade.handle({
-    protocolVersion: PROTOCOL_VERSION,
-    requestId: randomUUID(),
-    method: "chapter.revision.conversation.list",
-    payload: {
-      projectId: harness.projectId,
-      workspaceRootRef: harness.workspaceRootRef,
-      chapterId,
-    },
-  })
-}

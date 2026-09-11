@@ -1,8 +1,15 @@
-import type { ChapterRevisionConversationMessage } from "@worldseed/contracts"
+import type { RevisionDraftVersion } from "@worldseed/contracts"
 
 export type DraftVersionSource = "baseline" | "agent" | "manual" | "rollback"
 
 export const COMMITTED_DRAFT_VERSION_ID = "proto-v0"
+
+export type VersionMarkKind = "ordinal" | "current" | "covered"
+
+export type VersionMark = Readonly<{
+  kind: VersionMarkKind
+  text: string
+}>
 
 export type PrototypeDraftVersion = Readonly<{
   versionId: string
@@ -14,6 +21,10 @@ export type PrototypeDraftVersion = Readonly<{
   messageId: string | undefined
   createdAtMs: number
   updatedAtMs?: number
+  isCurrentOfficial?: boolean
+  sequenceNo?: number
+  title?: string
+  marks?: readonly VersionMark[]
 }>
 
 export type DiffLine = Readonly<{
@@ -21,12 +32,122 @@ export type DiffLine = Readonly<{
   text: string
 }>
 
+export function fromPersistedDraftVersions(
+  versions: readonly RevisionDraftVersion[],
+): PrototypeDraftVersion[] {
+  return versions.map((version, index) => ({
+    versionId: version.versionId,
+    parentVersionId: version.parentVersionId ?? undefined,
+    source: version.source,
+    label: displayPersistedDraftLabel(version, index),
+    heading: version.heading,
+    body: version.body,
+    messageId: version.messageId ?? undefined,
+    createdAtMs: version.createdAtMs,
+    ...(version.isCurrentOfficial === undefined ? {} : { isCurrentOfficial: version.isCurrentOfficial }),
+  }))
+}
+
+function draftSourceTag(source: DraftVersionSource | RevisionDraftVersion["source"]): string {
+  if (source === "agent") return " AI"
+  if (source === "rollback") return " 回退"
+  return ""
+}
+
+export function isCoveringDraft(version: Readonly<{ source: DraftVersionSource; isCurrentOfficial?: boolean }>): boolean {
+  return version.source !== "baseline" && version.isCurrentOfficial === true
+}
+
+export function preferredWorkingDraftId(drafts: readonly PrototypeDraftVersion[]): string | undefined {
+  for (let index = drafts.length - 1; index >= 0; index -= 1) {
+    const version = drafts[index]
+    if (version !== undefined && !isCoveringDraft(version)) return version.versionId
+  }
+  return drafts.at(-1)?.versionId
+}
+
+export function draftDisplayModeForSelection(
+  drafts: readonly PrototypeDraftVersion[],
+  versionId: string,
+): "edit" | "view" {
+  if (drafts.length === 0) return "edit"
+  const version = drafts.find((item) => item.versionId === versionId)
+  if (version === undefined || isCoveringDraft(version)) return "view"
+  return version.versionId === drafts.at(-1)?.versionId ? "edit" : "view"
+}
+
+export function joinVersionLabel(title: string, marks: readonly VersionMark[]): string {
+  return [title, ...marks.map((mark) => mark.text)].join(" · ")
+}
+
+function withVersionPresentation(
+  version: PrototypeDraftVersion,
+  input: Readonly<{ title: string; sequenceNo: number; marks: readonly VersionMark[] }>,
+): PrototypeDraftVersion {
+  return {
+    ...version,
+    sequenceNo: input.sequenceNo,
+    title: input.title,
+    marks: input.marks,
+    label: joinVersionLabel(input.title, input.marks),
+  }
+}
+
+function sortByCreatedAt(versions: readonly PrototypeDraftVersion[]): PrototypeDraftVersion[] {
+  return [...versions].sort((left, right) => {
+    if (left.createdAtMs !== right.createdAtMs) return left.createdAtMs - right.createdAtMs
+    return left.versionId.localeCompare(right.versionId)
+  })
+}
+
+export function presentOfficialAxis(versions: readonly PrototypeDraftVersion[]): PrototypeDraftVersion[] {
+  const ordered = sortByCreatedAt(versions)
+  const currentId = ordered.find((version) => version.isCurrentOfficial === true)?.versionId
+    ?? ordered.at(-1)?.versionId
+  return ordered.map((version, index) => {
+    const sequenceNo = index + 1
+    const current = version.versionId === currentId
+    return withVersionPresentation(version, {
+      title: current ? "当前正文" : "正文",
+      sequenceNo,
+      marks: [{ kind: current ? "current" : "ordinal", text: `v${String(sequenceNo)}` }],
+    })
+  })
+}
+
+export function presentDraftAxis(versions: readonly PrototypeDraftVersion[]): PrototypeDraftVersion[] {
+  const ordered = sortByCreatedAt(versions.filter((version) => version.source !== "baseline"))
+  return ordered.map((version, index) => {
+    const sequenceNo = index + 1
+    const marks: VersionMark[] = [{ kind: "ordinal", text: `v${String(sequenceNo)}` }]
+    if (isCoveringDraft(version)) marks.push({ kind: "covered", text: "已覆盖正文" })
+    return withVersionPresentation(version, {
+      title: "草稿",
+      sequenceNo,
+      marks,
+    })
+  })
+}
+
+function displayPersistedDraftLabel(
+  version: RevisionDraftVersion,
+  index: number,
+): string {
+  if (isCoveringDraft(version)) {
+    return `${version.label}${draftSourceTag(version.source)} · 已覆盖正文`
+  }
+  if (version.source === "baseline" && index === 0) {
+    return version.isCurrentOfficial === false ? "历史正文" : "正文"
+  }
+  if (version.source === "baseline") return `历史正文 ${String(index + 1)}`
+  return `${version.label}${draftSourceTag(version.source)}${version.isLatest ? " 最新" : ""}`
+}
+
 export function buildPrototypeDraftVersions(input: Readonly<{
   committedHeading: string
   committedBody: string
-  messages: readonly ChapterRevisionConversationMessage[]
 }>): PrototypeDraftVersion[] {
-  const versions: PrototypeDraftVersion[] = [{
+  return [{
     versionId: COMMITTED_DRAFT_VERSION_ID,
     parentVersionId: undefined,
     source: "baseline",
@@ -35,29 +156,19 @@ export function buildPrototypeDraftVersions(input: Readonly<{
     body: input.committedBody,
     messageId: undefined,
     createdAtMs: 0,
+    isCurrentOfficial: true,
   }]
-  let parentId = COMMITTED_DRAFT_VERSION_ID
-  let index = 1
-  for (const message of input.messages) {
-    if (message.role !== "assistant" || message.proposal === undefined) continue
-    const versionId = `proto-${message.messageId}`
-    versions.push({
-      versionId,
-      parentVersionId: parentId,
-      source: "agent",
-      label: `v${String(index)} AI`,
-      heading: message.proposal.heading ?? input.committedHeading,
-      body: message.proposal.body,
-      messageId: message.messageId,
-      createdAtMs: message.createdAtMs,
-    })
-    parentId = versionId
-    index += 1
-  }
-  if (versions.length > 1) {
-    relabelLatestDraftVersion(versions)
-  }
-  return versions
+}
+
+export function splitChapterPickerVersions(versions: readonly PrototypeDraftVersion[]): Readonly<{
+  official: PrototypeDraftVersion[]
+  drafts: PrototypeDraftVersion[]
+}> {
+  const drafts = presentDraftAxis(versions)
+  const official = presentOfficialAxis(versions.filter((version) => (
+    version.source === "baseline" || version.isCurrentOfficial === true
+  )))
+  return { official, drafts }
 }
 
 export function relabelLatestDraftVersion(versions: PrototypeDraftVersion[]): PrototypeDraftVersion[] {
@@ -74,7 +185,7 @@ export function relabelLatestDraftVersion(versions: PrototypeDraftVersion[]): Pr
       }
       continue
     }
-    if (isLast && version.source !== "baseline" && !version.label.endsWith(" 最新")) {
+    if (isLast && version.source !== "baseline" && !isCoveringDraft(version) && !version.label.endsWith(" 最新")) {
       versions[index] = { ...version, label: `${version.label} 最新` }
     }
   }
