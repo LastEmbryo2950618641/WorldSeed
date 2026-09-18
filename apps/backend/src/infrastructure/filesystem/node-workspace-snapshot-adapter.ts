@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer"
 import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
 
-import { digest, normalizeWorkspacePath } from "../../core/index.js"
+import { digest, isSharedPresentationPath, normalizeWorkspacePath } from "../../core/index.js"
 import type { WorkspacePort, WorkspaceSnapshot, WorkspaceSnapshotPort } from "../../application/index.js"
 
 const baseRulesPath = "世界推演规则/基础规则/base-rules.md"
@@ -16,7 +16,7 @@ export class NodeWorkspaceSnapshotAdapter implements WorkspaceSnapshotPort {
       throw new Error(`Cannot save invalid Markdown workspace: ${report.issues.map((issue) => issue.path).join(", ")}`)
     }
     const paths = report.inventory
-      .filter((entry) => entry.kind === "file" && entry.path !== baseRulesPath)
+      .filter((entry) => entry.kind === "file" && entry.path !== baseRulesPath && !isSharedPresentationPath(entry.path))
       .map((entry) => entry.path)
       .sort()
     const files = await Promise.all(paths.map(async (relativePath) => {
@@ -57,10 +57,13 @@ async function replaceWorkspaceFiles(
   current: WorkspaceSnapshot,
   target: WorkspaceSnapshot,
 ): Promise<void> {
-  const targetByPath = new Map(target.files.map((file) => [normalizeHistoryPath(file.relativePath), file]))
-  if (targetByPath.size !== target.files.length) throw new Error("History snapshot contains duplicate workspace paths")
+  // Legacy snapshots may contain project-local copies of the now shared presets.
+  const targetFiles = target.files.filter((file) => !isSharedPresentationPath(normalizeHistoryPath(file.relativePath)))
+  const targetByPath = new Map(targetFiles.map((file) => [normalizeHistoryPath(file.relativePath), file]))
+  if (targetByPath.size !== targetFiles.length) throw new Error("History snapshot contains duplicate workspace paths")
   for (const file of current.files) {
     const relativePath = normalizeHistoryPath(file.relativePath)
+    if (isSharedPresentationPath(relativePath)) continue
     if (!targetByPath.has(relativePath)) await rm(resolveInside(root, relativePath), { force: true })
   }
   for (const [relativePath, file] of targetByPath) {

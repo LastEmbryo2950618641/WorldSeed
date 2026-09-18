@@ -84,6 +84,7 @@ export type DesktopModelProfiles = Readonly<{
 export type InventoryEntry = Readonly<{ path: string; kind: "directory" | "file" }>
 export type WorkspaceIssue = Readonly<{ code: string; path: string; message: string }>
 export type WorkspaceReport = Readonly<{
+  sharedPresentationRoot?: string
   inventory: readonly InventoryEntry[]
   issues: readonly WorkspaceIssue[]
 }>

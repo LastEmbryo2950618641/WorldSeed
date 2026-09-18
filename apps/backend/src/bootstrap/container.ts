@@ -28,6 +28,7 @@ import {
 import type { Kysely } from "kysely"
 import type { RegistryDatabase } from "../infrastructure/sqlite/database-types.js"
 import { ProjectRuntime } from "./project-runtime.js"
+import { SharedPresentationLibrary } from "../infrastructure/filesystem/shared-presentation-library.js"
 
 export type BackendContainerOptions = Readonly<{
   applicationDataRoot: string
@@ -41,7 +42,8 @@ export type BackendContainerOptions = Readonly<{
 }>
 
 export class BackendContainer {
-  public readonly workspace = new NodeWorkspaceAdapter()
+  public readonly workspace: NodeWorkspaceAdapter
+  private readonly sharedPresentation: SharedPresentationLibrary
   public readonly internalStore: NodeInternalStoreAdapter
   public readonly model: AIModelPort
   public readonly modelCatalog: ModelCatalogPort
@@ -60,6 +62,11 @@ export class BackendContainer {
     registryDatabase: Kysely<RegistryDatabase>,
   ) {
     this.registryDatabase = registryDatabase
+    this.sharedPresentation = new SharedPresentationLibrary(
+      resolve(options.applicationDataRoot),
+      resolve(options.promptPackageRoot, "resources/presentation"),
+    )
+    this.workspace = new NodeWorkspaceAdapter(this.sharedPresentation.root)
     this.internalStore = new NodeInternalStoreAdapter(options.applicationDataRoot)
     this.model = options.model ?? createModelFromEnvironment(
       options.promptPackageRoot,
@@ -82,7 +89,17 @@ export class BackendContainer {
   public static async open(options: BackendContainerOptions): Promise<BackendContainer> {
     const applicationDataRoot = resolve(options.applicationDataRoot)
     const registryDatabase = await openRegistryDatabase(join(applicationDataRoot, "registry.sqlite"))
-    return new BackendContainer(options, registryDatabase)
+    try {
+      const container = new BackendContainer(options, registryDatabase)
+      await container.sharedPresentation.initialize()
+      const projects = await registryDatabase.selectFrom("registered_projects")
+        .select("workspace_root_ref").orderBy("workspace_root_ref").execute()
+      for (const project of projects) await container.sharedPresentation.migrate(project.workspace_root_ref)
+      return container
+    } catch (error) {
+      await registryDatabase.destroy()
+      throw error
+    }
   }
 
   public async createProject(input: Omit<CreateProjectInput, "defaults" | "nowMs">): Promise<CreatedProject> {
@@ -97,6 +114,7 @@ export class BackendContainer {
   }
 
   public async openProject(workspaceRootRef: string): Promise<CreatedProject> {
+    await this.sharedPresentation.migrate(workspaceRootRef)
     const defaults = await this.resolveWorkspaceDefaults()
     const opened = await this.lifecycle.openByWorkspace(workspaceRootRef, this.now(), defaults)
     await this.openRuntime(opened.internalStore, opened.manifest.workspaceRootRef, opened.manifest.id)

@@ -30,6 +30,7 @@ import {
   deriveVolumeDirectoryPath,
   fixedWorkspaceEntries,
   isChapterBodyMarkdownPath,
+  isSharedPresentationPath,
   isChapterPlanningMarkdownPath,
   isVolumeDirectoryPath,
   normalizeWorkspacePath,
@@ -45,6 +46,15 @@ import type {
 } from "../../application/index.js"
 
 export class NodeWorkspaceAdapter implements WorkspacePort {
+  public constructor(private readonly sharedPresentationRoot?: string) {}
+
+  private async documentRoot(workspaceRootRef: string, path: string): Promise<string> {
+    const root = await realpath(resolve(workspaceRootRef))
+    return this.sharedPresentationRoot !== undefined && isSharedPresentationPath(normalizeWorkspacePath(path))
+      ? realpath(this.sharedPresentationRoot)
+      : root
+  }
+
   public async createLayout(
     workspaceRootRef: string,
     defaults: WorkspaceDefaultDocuments,
@@ -58,6 +68,7 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     }
 
     for (const entry of fixedWorkspaceEntries) {
+      if (this.sharedPresentationRoot !== undefined && isSharedPresentationPath(entry.relativePath)) continue
       const path = resolveInside(root, entry.relativePath)
       if (entry.entryKind === "directory") {
         await mkdir(path, { recursive: true })
@@ -91,26 +102,28 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       encoding: "utf8",
       flag: "wx",
     })
-    await writeFile(resolveInside(root, AUTO_DESCRIPTION_RULE_PATH), AUTO_DESCRIPTION_RULE_MARKDOWN, {
-      encoding: "utf8",
-      flag: "wx",
-    })
-    await writeFile(resolveInside(root, SENSORY_DESCRIPTION_RULE_PATH), SENSORY_DESCRIPTION_RULE_MARKDOWN, {
-      encoding: "utf8",
-      flag: "wx",
-    })
-    await writeFile(resolveInside(root, DEAI_DESCRIPTION_RULE_PATH), DEAI_DESCRIPTION_RULE_MARKDOWN, {
-      encoding: "utf8",
-      flag: "wx",
-    })
-    await writeFile(resolveInside(root, "表现输出/描写规则/默认描写规则.md"), defaults.descriptionRules, {
-      encoding: "utf8",
-      flag: "wx",
-    })
-    await writeFile(resolveInside(root, "表现输出/笔风规则/默认笔风规则.md"), defaults.proseStyleRules, {
-      encoding: "utf8",
-      flag: "wx",
-    })
+    if (this.sharedPresentationRoot === undefined) {
+      await writeFile(resolveInside(root, AUTO_DESCRIPTION_RULE_PATH), AUTO_DESCRIPTION_RULE_MARKDOWN, {
+        encoding: "utf8",
+        flag: "wx",
+      })
+      await writeFile(resolveInside(root, SENSORY_DESCRIPTION_RULE_PATH), SENSORY_DESCRIPTION_RULE_MARKDOWN, {
+        encoding: "utf8",
+        flag: "wx",
+      })
+      await writeFile(resolveInside(root, DEAI_DESCRIPTION_RULE_PATH), DEAI_DESCRIPTION_RULE_MARKDOWN, {
+        encoding: "utf8",
+        flag: "wx",
+      })
+      await writeFile(resolveInside(root, "表现输出/描写规则/默认描写规则.md"), defaults.descriptionRules, {
+        encoding: "utf8",
+        flag: "wx",
+      })
+      await writeFile(resolveInside(root, "表现输出/笔风规则/默认笔风规则.md"), defaults.proseStyleRules, {
+        encoding: "utf8",
+        flag: "wx",
+      })
+    }
     await writeFile(resolveInside(root, "暂存区/readme.md"), defaults.stagingReadme, {
       encoding: "utf8",
       flag: "wx",
@@ -157,13 +170,15 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       defaults.settingsRevisionGuide,
     )
     await mkdir(resolveInside(root, "表现输出/本作品描写"), { recursive: true })
-    await mkdir(resolveInside(root, "表现输出/描写规则"), { recursive: true })
-    await mkdir(resolveInside(root, "表现输出/笔风规则"), { recursive: true })
-    await writeFileIfMissing(resolveInside(root, AUTO_DESCRIPTION_RULE_PATH), AUTO_DESCRIPTION_RULE_MARKDOWN)
-    await writeFileIfMissing(resolveInside(root, SENSORY_DESCRIPTION_RULE_PATH), SENSORY_DESCRIPTION_RULE_MARKDOWN)
-    await writeFileIfMissing(resolveInside(root, DEAI_DESCRIPTION_RULE_PATH), DEAI_DESCRIPTION_RULE_MARKDOWN)
-    await writeFileIfMissing(resolveInside(root, "表现输出/描写规则/默认描写规则.md"), defaults.descriptionRules)
-    await writeFileIfMissing(resolveInside(root, "表现输出/笔风规则/默认笔风规则.md"), defaults.proseStyleRules)
+    if (this.sharedPresentationRoot === undefined) {
+      await mkdir(resolveInside(root, "表现输出/描写规则"), { recursive: true })
+      await mkdir(resolveInside(root, "表现输出/笔风规则"), { recursive: true })
+      await writeFileIfMissing(resolveInside(root, AUTO_DESCRIPTION_RULE_PATH), AUTO_DESCRIPTION_RULE_MARKDOWN)
+      await writeFileIfMissing(resolveInside(root, SENSORY_DESCRIPTION_RULE_PATH), SENSORY_DESCRIPTION_RULE_MARKDOWN)
+      await writeFileIfMissing(resolveInside(root, DEAI_DESCRIPTION_RULE_PATH), DEAI_DESCRIPTION_RULE_MARKDOWN)
+      await writeFileIfMissing(resolveInside(root, "表现输出/描写规则/默认描写规则.md"), defaults.descriptionRules)
+      await writeFileIfMissing(resolveInside(root, "表现输出/笔风规则/默认笔风规则.md"), defaults.proseStyleRules)
+    }
     await mkdir(resolveInside(root, "暂存区"), { recursive: true })
     await writeFileIfMissing(resolveInside(root, "暂存区/readme.md"), defaults.stagingReadme)
     await writeFileIfMissing(resolveInside(root, "暂存区/本章讨论笔记.md"), defaults.stagingNotes)
@@ -174,9 +189,14 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
 
   public async validate(workspaceRootRef: string): Promise<WorkspaceValidationReport> {
     const root = await realpath(resolve(workspaceRootRef))
-    const { inventory, issues: scanIssues } = await scanWorkspace(root)
+    const { inventory, issues: scanIssues } = await scanWorkspace(root, this.sharedPresentationRoot !== undefined)
+    if (this.sharedPresentationRoot !== undefined) {
+      const shared = await scanWorkspace(await realpath(this.sharedPresentationRoot))
+      inventory.push(...shared.inventory.filter((entry) => isSharedPresentationPath(entry.path)))
+      scanIssues.push(...shared.issues)
+    }
     const issues = [...scanIssues, ...validateWorkspaceInventory(inventory)]
-    issues.push(...await validateFixedWorkspaceEntries(root, issues))
+    issues.push(...await validateFixedWorkspaceEntries(root, issues, this.sharedPresentationRoot))
     const baseRulesPath = resolveInside(root, "世界推演规则/基础规则/base-rules.md")
     let baseRulesDigest = "missing"
     try {
@@ -192,6 +212,7 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     }
     return {
       workspaceRootRef: root,
+      ...(this.sharedPresentationRoot === undefined ? {} : { sharedPresentationRoot: this.sharedPresentationRoot }),
       inventory,
       issues,
       baseRulesDigest,
@@ -199,7 +220,7 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
   }
 
   public async readMarkdown(workspaceRootRef: string, relativePath: string): Promise<string> {
-    const root = await realpath(resolve(workspaceRootRef))
+    const root = await this.documentRoot(workspaceRootRef, relativePath)
     const normalized = normalizeWorkspacePath(relativePath)
     if (!normalized.endsWith(".md")) {
       throw new Error("Only Markdown files can be read from the user workspace")
@@ -209,7 +230,7 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
   }
 
   public async saveUserMarkdown(workspaceRootRef: string, relativePath: string, content: string): Promise<void> {
-    const root = await realpath(resolve(workspaceRootRef))
+    const root = await this.documentRoot(workspaceRootRef, relativePath)
     const normalized = assertWorkspaceMutationAllowed(relativePath, "file", "user")
     const path = resolveInside(root, normalized)
     await assertParentChainContainsNoLinks(root, path)
@@ -218,7 +239,7 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
   }
 
   public async createUserDirectory(workspaceRootRef: string, relativePath: string): Promise<void> {
-    const root = await realpath(resolve(workspaceRootRef))
+    const root = await this.documentRoot(workspaceRootRef, relativePath)
     const normalized = assertUserCanCreateDirectory(relativePath)
     if (isVolumeDirectoryPath(normalized)) {
       const folderName = normalized.slice("章节正文/".length)
@@ -231,9 +252,10 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
   }
 
   public async removeUserMarkdown(workspaceRootRef: string, relativePath: string): Promise<void> {
-    const root = await realpath(resolve(workspaceRootRef))
+    const root = await this.documentRoot(workspaceRootRef, relativePath)
     const normalized = assertUserCanDeleteMarkdown(relativePath)
     const path = resolveInside(root, normalized)
+    await assertParentChainContainsNoLinks(root, path)
     try {
       await unlink(path)
     } catch (error) {
@@ -464,7 +486,6 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     destination: string,
     sourcePaths: readonly string[],
   ): Promise<number> {
-    const root = await realpath(resolve(workspaceRootRef))
     const copies = await Promise.all(sourcePaths.map(async (sourcePath) => {
       const source = await realpath(resolve(sourcePath))
       const sourceStats = await lstat(source)
@@ -473,10 +494,11 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       }
       const targetRelativePath = normalizeWorkspacePath(`${destination}/${basename(source)}`)
       assertUserCanCreateMarkdown(targetRelativePath)
-      return { source, target: resolveInside(root, targetRelativePath) }
+      const root = await this.documentRoot(workspaceRootRef, targetRelativePath)
+      return { source, root, target: resolveInside(root, targetRelativePath) }
     }))
     for (const copy of copies) {
-      await assertParentChainContainsNoLinks(root, copy.target)
+      await assertParentChainContainsNoLinks(copy.root, copy.target)
       await mkdir(resolve(copy.target, ".."), { recursive: true })
       await copyFile(copy.source, copy.target, constants.COPYFILE_EXCL)
     }
@@ -494,15 +516,15 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       throw new Error("Imported folder must be a regular directory")
     }
     const files = await scanImportFolder(sourceRoot, sourceRoot)
-    const root = await realpath(resolve(workspaceRootRef))
-    const copies = files.map((source) => {
+    const copies = await Promise.all(files.map(async (source) => {
       const sourceRelativePath = relative(sourceRoot, source).replaceAll("\\", "/")
       const targetRelativePath = normalizeWorkspacePath(`${destination}/${sourceRelativePath}`)
       assertUserCanCreateMarkdown(targetRelativePath)
-      return { source, target: resolveInside(root, targetRelativePath) }
-    })
+      const root = await this.documentRoot(workspaceRootRef, targetRelativePath)
+      return { source, root, target: resolveInside(root, targetRelativePath) }
+    }))
     for (const copy of copies) {
-      await assertParentChainContainsNoLinks(root, copy.target)
+      await assertParentChainContainsNoLinks(copy.root, copy.target)
       await mkdir(resolve(copy.target, ".."), { recursive: true })
       await copyFile(copy.source, copy.target, constants.COPYFILE_EXCL)
     }
@@ -602,7 +624,7 @@ function isNotFoundError(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT"
 }
 
-async function scanWorkspace(root: string): Promise<{
+async function scanWorkspace(root: string, omitSharedPresentation = false): Promise<{
   inventory: WorkspaceInventoryEntry[]
   issues: WorkspaceValidationIssue[]
 }> {
@@ -613,6 +635,7 @@ async function scanWorkspace(root: string): Promise<{
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name)
       const relativePath = relative(root, path).replaceAll("\\", "/")
+      if (omitSharedPresentation && isSharedPresentationPath(relativePath)) continue
       const stats = await lstat(path)
       if (stats.isSymbolicLink()) {
         issues.push({ code: "invalid_path", path: relativePath, message: "Symbolic links and directory junctions are not allowed" })
@@ -636,6 +659,7 @@ async function scanWorkspace(root: string): Promise<{
 async function validateFixedWorkspaceEntries(
   root: string,
   existingIssues: readonly WorkspaceValidationIssue[],
+  sharedPresentationRoot?: string,
 ): Promise<WorkspaceValidationIssue[]> {
   const issueKeys = new Set(existingIssues.map((issue) => `${issue.code}:${issue.path}`))
   const missingIssues: WorkspaceValidationIssue[] = []
@@ -645,7 +669,9 @@ async function validateFixedWorkspaceEntries(
       continue
     }
     try {
-      const stats = await lstat(resolveInside(root, entry.relativePath))
+      const documentRoot = sharedPresentationRoot !== undefined && isSharedPresentationPath(entry.relativePath)
+        ? sharedPresentationRoot : root
+      const stats = await lstat(resolveInside(documentRoot, entry.relativePath))
       if (entry.entryKind === "directory" && stats.isDirectory()) {
         continue
       }

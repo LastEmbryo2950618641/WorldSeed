@@ -26,6 +26,7 @@ export type WorkspaceDefaultDocuments = Readonly<{
 
 export type WorkspaceValidationReport = Readonly<{
   workspaceRootRef: string
+  sharedPresentationRoot?: string
   inventory: readonly WorkspaceInventoryEntry[]
   issues: readonly WorkspaceValidationIssue[]
   baseRulesDigest: string

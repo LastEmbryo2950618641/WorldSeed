@@ -218,6 +218,9 @@ function TreeRow({
         </span>
         <span className="tree-row-label">{node.name}</span>
       </button>
+      {node.path === "表现输出/描写规则" || node.path === "表现输出/笔风规则"
+        ? <UiTooltip label="所有作品共享，修改会对所有作品生效"><span className="tree-row-virtual-badge">共享</span></UiTooltip>
+        : null}
       {lockKind === "platform_readonly" || lockKind === "chapter_workflow"
         ? <LockBadge kind={lockKind} />
         : null}

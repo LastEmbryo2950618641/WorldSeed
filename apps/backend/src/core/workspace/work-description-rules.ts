@@ -3,6 +3,11 @@
 export const WORK_DESCRIPTION_RULES_DIR = "表现输出/本作品描写"
 export const DESCRIPTION_RULES_DIR = "表现输出/描写规则"
 export const PROSE_STYLE_RULES_DIR = "表现输出/笔风规则"
+export function isSharedPresentationPath(path: string): boolean {
+  const normalized = normalizeWorkspaceRelativePath(path)
+  return [DESCRIPTION_RULES_DIR, PROSE_STYLE_RULES_DIR]
+    .some((directory) => normalized === directory || normalized.startsWith(`${directory}/`))
+}
 export const AUTO_DESCRIPTION_RULE_PATH = `${DESCRIPTION_RULES_DIR}/自动.md`
 export const SENSORY_DESCRIPTION_RULE_PATH = `${DESCRIPTION_RULES_DIR}/感官描写.md`
 export const DEAI_DESCRIPTION_RULE_PATH = `${DESCRIPTION_RULES_DIR}/去AI味.md`

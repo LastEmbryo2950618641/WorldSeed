@@ -1803,6 +1803,11 @@ export function App(): React.JSX.Element {
     </>
   }
 
+  const sharedRuleSelected = selectedPath?.startsWith("表现输出/描写规则/") === true
+    || selectedPath?.startsWith("表现输出/笔风规则/") === true
+  const documentRoot = sharedRuleSelected
+    ? report.sharedPresentationRoot ?? project.workspaceRootRef
+    : project.workspaceRootRef
   const readOnly = selectedPath?.startsWith("世界推演规则/基础规则/") === true
     || (selectedPath?.startsWith("章节正文/") === true && !isChapterPlanningMarkdownPath(selectedPath))
   const dirty = content !== savedContent
@@ -2150,7 +2155,7 @@ export function App(): React.JSX.Element {
     </PanelGroup>
     <footer className="statusbar">
       <span>UTF-8</span><span>LF</span><span>Markdown</span><span className={dirty ? "unsaved" : "saved"}>{dirty ? <Cloud size={13} /> : <Save size={13} />}{dirty ? "未保存" : "已保存"}</span>
-      <span className="status-path"><FolderOpen size={13} />{selectedPath === undefined ? project.workspaceRootRef : `${project.workspaceRootRef}\\${selectedPath.replaceAll("/", "\\")}`}</span>
+      <span className="status-path"><FolderOpen size={13} />{selectedPath === undefined ? project.workspaceRootRef : `${documentRoot}\\${selectedPath.replaceAll("/", "\\")}`}</span>
       <span>继承环境：本轮 RuleSnapshot</span><span>归档：空闲</span>
     </footer>
     <AppDialogsHost
