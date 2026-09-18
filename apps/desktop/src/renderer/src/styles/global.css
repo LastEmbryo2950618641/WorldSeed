@@ -2388,7 +2388,7 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
 }
 .right-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(108px, 1.5fr);
   background: var(--bg-sidebar);
   border-bottom: 1px solid var(--border-subtle);
   min-width: 0;
@@ -2427,6 +2427,39 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   justify-content: center;
   flex: 0 0 auto;
 }
+
+.graph-revision-panel { min-width: 0; height: 100%; overflow-y: auto; padding: 14px 12px; }
+.graph-revision-heading, .graph-revision-title, .graph-revision-task footer, .graph-revision-task footer > div {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.graph-revision-heading { padding-bottom: 12px; border-bottom: 1px solid var(--border-subtle); }
+.graph-revision-heading strong { font-size: 14px; }
+.graph-revision-heading strong span, .graph-revision-task time { color: var(--text-muted); font-size: 11px; }
+.graph-revision-panel button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 5px 7px; border: 1px solid var(--border-subtle); border-radius: 4px; background: transparent; color: var(--text); }
+.graph-revision-panel button:disabled { opacity: .4; cursor: default; }
+.graph-revision-task { padding: 15px 0; border-bottom: 1px solid var(--border-subtle); min-width: 0; }
+.graph-revision-title { align-items: flex-start; }
+.graph-revision-title strong { font-size: 13px; overflow-wrap: anywhere; }
+.graph-revision-status { flex-shrink: 0; font-size: 11px; color: var(--text-muted); }
+.graph-revision-status.is-completed { color: #41b98b; }
+.graph-revision-status.is-running { color: #9b9aff; }
+.graph-revision-progress { display: flex; align-items: center; gap: 6px; font-size: 12px; margin: 12px 0 6px; overflow-wrap: anywhere; }
+.graph-revision-progress svg { flex-shrink: 0; }
+.graph-revision-activity { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: 11px; line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; }
+.graph-revision-task progress { width: 100%; height: 5px; accent-color: var(--accent); display: block; margin-bottom: 10px; }
+.graph-revision-task p { font-size: 12px; line-height: 1.6; margin: 8px 0; overflow-wrap: anywhere; }
+.graph-revision-blocker { color: #e3b761; }
+.graph-revision-error { color: #f18b8b; white-space: pre-wrap; overflow-wrap: anywhere; }
+.graph-revision-empty { color: var(--text-muted); font-size: 13px; }
+.graph-revision-task details { font-size: 12px; margin: 10px 0; }
+.graph-revision-task summary { cursor: pointer; color: var(--text-muted); }
+.graph-revision-task ol { padding-left: 18px; }
+.graph-revision-task li { padding: 4px 0; }
+.graph-revision-task li > span:last-child { color: var(--text-muted); margin-left: 8px; }
+.graph-revision-task footer { margin-top: 12px; flex-wrap: wrap; }
+.graph-revision-task footer > div { margin-left: auto; }
+.graph-revision-spinner { animation: graph-revision-spin 1s linear infinite; }
+@keyframes graph-revision-spin { to { transform: rotate(360deg); } }
 .right-tab-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2442,6 +2475,10 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   }
 }
 .right-content { min-height: 0; overflow: hidden; }
+@container right-rail (max-width: 400px) {
+  .right-tabs > .ui-tooltip-anchor:not(:last-child) .right-tab-label { display: none; }
+  .right-tabs > .ui-tooltip-anchor:last-child .right-tab-label { display: inline; }
+}
 .world-summary { border-top: 1px solid var(--border-subtle); background: var(--bg-sidebar); padding: 7px 10px; display: grid; gap: 4px; font-size: 10.5px; color: var(--text-muted); }
 .world-summary span { display: flex; justify-content: space-between; gap: 10px; }
 .world-summary strong { color: var(--text-secondary); font-weight: 600; text-align: right; }

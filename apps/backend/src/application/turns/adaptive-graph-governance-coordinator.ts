@@ -1,6 +1,10 @@
 import { graphGovernanceArtifactSchema, type GraphGovernanceArtifact } from "@worldseed/prompt-contracts"
 
-export type AdaptiveGraphGovernanceMode = "no_change" | "local_governance" | "full_governance"
+export type AdaptiveGraphGovernanceMode =
+  | "no_change"
+  | "local_governance"
+  | "compact_governance"
+  | "full_governance"
 
 export type AdaptiveGraphGovernanceCandidate = GraphGovernanceArtifact
 
@@ -32,17 +36,12 @@ export function decideAdaptiveGraphGovernance(
   }
 
   if (artifact.executionMode === "local_governance") {
+    let requiresCompactSettlement = false
     if (artifact.affectedFrontierRefs.length > 0) {
-      return {
-        mode: "full_governance",
-        fallbackReason: "Local governance changed an existing frontier and requires the full settlement chain",
-      }
+      requiresCompactSettlement = true
     }
     if (artifact.mutations.length > 0 && artifact.sceneSpacetimeBindings.length === 0) {
-      return {
-        mode: "full_governance",
-        fallbackReason: "Local governance mutations have no scene-spacetime binding",
-      }
+      requiresCompactSettlement = true
     }
     const settledMutationIndexes = artifact.mutationSpacetimeSettlements.flatMap((settlement) => settlement.mutationIndexes)
     if (settledMutationIndexes.length !== artifact.mutations.length
@@ -57,10 +56,7 @@ export function decideAdaptiveGraphGovernance(
       artifact.decisionRecords.flatMap((record) => record.mutationIndexes),
     )
     if (artifact.mutations.some((_, index) => !decidedMutationIndexes.has(index))) {
-      return {
-        mode: "full_governance",
-        fallbackReason: "Local governance mutations have no decision record",
-      }
+      requiresCompactSettlement = true
     }
     if (sourceUnitCount > 0) {
       const settledSourceUnitIndexes = new Set(
@@ -70,10 +66,14 @@ export function decideAdaptiveGraphGovernance(
       )
       if (Array.from({ length: sourceUnitCount }, (_, index) => index)
         .some((index) => !settledSourceUnitIndexes.has(index))) {
-        return {
-          mode: "full_governance",
-          fallbackReason: "Local governance does not return every submitted source unit",
-        }
+        requiresCompactSettlement = true
+      }
+    }
+    if (requiresCompactSettlement) {
+      return {
+        mode: "compact_governance",
+        artifact,
+        fallbackReason: "Local governance needs compact dependency, spacetime, review, and frontier settlement",
       }
     }
   }

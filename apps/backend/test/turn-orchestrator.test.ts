@@ -63,6 +63,47 @@ afterEach(async () => {
 })
 
 describe("TurnOrchestrator", () => {
+  it.each(["usage", "overflow"] as const)("compacts turn history using %s and preserves the task during retry", async (mode) => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    let secondTurn = false
+    let rejected = false
+    let failedTaskId: string | undefined
+    let retriedTaskId: string | undefined
+    let failedMessageCount = 0
+    const model: AIModelPort = {
+      info: { ...fake.info, contextWindowTokens: 1_000_000 },
+      execute: async (request, options) => {
+        if (secondTurn && request.phase === "interpret" && mode === "overflow") {
+          if (!rejected) {
+            rejected = true
+            failedTaskId = request.taskId
+            failedMessageCount = options?.contextMessages?.length ?? 0
+            throw new Error("400 maximum context length is 1048576 tokens; requested 1056215 tokens")
+          }
+          retriedTaskId = request.taskId
+          expect(options?.contextMessages?.length ?? 0).toBeLessThan(failedMessageCount)
+        }
+        const execution = await fake.execute(request, options)
+        return { ...execution, usage: { ...execution.usage, lastRequestInputTokens: !secondTurn && mode === "usage" ? 950_000 : 10_000 } }
+      },
+    }
+    const first = await fixture.createOrchestrator(model, fixture.commit).execute({
+      projectId: fixture.projectId, workspaceRootRef: fixture.workspaceRoot, internalStore: fixture.store,
+      userInput: "世界从雨夜站台开始。", chapterSequence: 1,
+    })
+    await fixture.database.updateTable("model_context_messages").set({ token_estimate: 1 }).execute()
+    secondTurn = true
+    const result = await fixture.createOrchestrator(model, fixture.commit).execute({
+      workflow: "query", projectId: fixture.projectId, workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store, userInput: "查询当前世界", chapterSequence: 2,
+    })
+    expect(result.kind).toBe("query")
+    const old = await fixture.database.selectFrom("model_context_messages").selectAll().where("task_id", "=", first.taskId).execute()
+    expect(old.some((m) => m.hidden_at !== null)).toBe(true)
+    if (mode === "overflow") expect(retriedTaskId).toBe(failedTaskId)
+  })
+
   it("loads mandatory workspace documents before the first model call", async () => {
     const fixture = await createFixture()
     await fixture.workspace.saveUserMarkdown(
@@ -1084,7 +1125,7 @@ describe("TurnOrchestrator", () => {
     expect(retrievalRequest.remainingBudget?.retrievalExecutionDeadlineAtMs).toBeTypeOf("number")
     expect(retrievalRequest.remainingBudget?.retrievalPhaseDeadlineAtMs).toBeTypeOf("number")
     expect(context?.segments).toHaveLength(14)
-    expect(context?.budget.maxTokens).toBe(62_080)
+    expect(context?.budget.maxTokens).toBe(57_600)
     expect(context?.ruleSnapshotId).toBeDefined()
     expect(await fixture.database.selectFrom("ai_decision_records").selectAll().execute()).toHaveLength(1)
     expect(await fixture.database.selectFrom("settlement_records").selectAll().execute()).toHaveLength(4)
@@ -4046,6 +4087,9 @@ describe("TurnOrchestrator", () => {
       total + estimateModelMessageTokens(message.content_text ?? "")
     ), 0)
     const smallContextWindow = Math.max(100_000, Math.floor(actualFirstTurnTokens * 0.75))
+    await fixture.database.updateTable("phase_runs").set({
+      usage_json: sql<string>`json_set(usage_json, '$.lastRequestInputTokens', ${Math.ceil(smallContextWindow * 0.98)})`,
+    }).where("task_id", "=", first.taskId).execute()
     await fixture.database.updateTable("model_context_messages").set({ token_estimate: 1 }).execute()
     const underestimatedMessageCount = (await fixture.database.selectFrom("model_context_messages")
       .select(sql<number>`count(*)`.as("count")).executeTakeFirstOrThrow()).count
@@ -4218,6 +4262,132 @@ describe("TurnOrchestrator", () => {
     expect(await fixture.database.selectFrom("graph_revisions").selectAll().execute()).toHaveLength(10)
     expect(await fixture.database.selectFrom("tasks").select("status").where("id", "=", result.taskId).executeTakeFirstOrThrow())
       .toEqual({ status: "completed" })
+  })
+
+  it("commits the rebuilt compact candidate and preserves temporal review advice", async () => {
+    const fixture = await createFixture()
+    const fake = new FakeAiModelAdapter(randomUUID)
+    const first = await fixture.createOrchestrator(fake, fixture.commit).execute({
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "先建立一章可供修订的正文。",
+      chapterSequence: 1,
+      allowWorkspaceChapterReads: false,
+    })
+    if (first.kind !== "turn") throw new Error("Expected a committed turn")
+    const chapter = (await fixture.documentRepository.listCommittedChapters(fixture.projectId))[0]
+    if (chapter === undefined) throw new Error("Expected a committed chapter")
+    const sourceUnits = await fixture.documentRepository.listSourceUnits(fixture.projectId, chapter.sourceId)
+    const observedPhases: string[] = []
+    const model: AIModelPort = {
+      info: fake.info,
+      execute: async (request, options) => {
+        observedPhases.push(request.phase)
+        const execution = await fake.execute(request, options)
+        if (execution.result.artifact === undefined) return execution
+        let artifact = execution.result.artifact
+        if (request.phase === "graph_governance") {
+          artifact = { ...asRecordForTest(artifact), decisionRecords: [] }
+        }
+        if (request.phase === "dependency_audit") {
+          artifact = {
+            ...asRecordForTest(artifact),
+            temporalClaims: [{
+              claimRef: "claim:revision:1",
+              sceneIndex: 0,
+              sourceUnitIndexes: [0],
+              proseExcerpt: "此前留下的时间痕迹仍然存在。",
+              referenceDescription: "相对于修订后场景入口",
+              referenceRefs: [],
+              evidenceRefs: [],
+              timelineRefs: [],
+              relationDescription: "相对时间应与修订后入口一致",
+              verdict: "uncertain",
+              reason: "需要重新结算时间入口",
+              missingEvidence: [],
+            }],
+          }
+        }
+        if (request.phase === "graph_spacetime_settlement") {
+          const spacetime = asRecordForTest(artifact)
+          artifact = {
+            ...spacetime,
+            sceneSpacetimeBindings: (spacetime.sceneSpacetimeBindings as readonly Record<string, unknown>[]).map((binding) => ({
+              ...binding,
+              explanation: "Compact spacetime result selected the revised scene anchor",
+            })),
+          }
+        }
+        if (request.phase === "graph_governance_review") {
+          const review = asRecordForTest(artifact)
+          artifact = {
+            ...review,
+            temporalClaimAssessments: (review.temporalClaimAssessments as readonly Record<string, unknown>[]).map((assessment) => ({
+              ...assessment,
+              verdict: "conflict",
+              reason: "The relative time conflicts with the revised scene entry",
+              advice: "Align the relative time with the revised scene entry",
+            })),
+          }
+        }
+        const result = { ...execution.result, artifact }
+        return {
+          ...execution,
+          result,
+          contextExchange: {
+            ...execution.contextExchange,
+            responseMessage: {
+              ...execution.contextExchange.responseMessage,
+              content: JSON.stringify(result),
+            },
+          },
+        }
+      },
+    }
+
+    const result = await fixture.createOrchestrator(model, fixture.commit).execute({
+      workflow: "revision",
+      adaptiveGraphGovernance: true,
+      projectId: fixture.projectId,
+      workspaceRootRef: fixture.workspaceRoot,
+      internalStore: fixture.store,
+      userInput: "# 第一章 修订版\n\n用户新增了一个需要重新结算时间的局部事实。",
+      chapterSequence: 1,
+      existingSourceUnitIds: sourceUnits.map((unit) => unit.id),
+      allowWorkspaceChapterReads: false,
+    })
+
+    expect(result).toMatchObject({ kind: "evolution" })
+    expect(observedPhases).toContain("graph_spacetime_settlement")
+    const phaseRuns = await fixture.persistence.listPhaseRuns(result.taskId)
+    const spacetimeRun = phaseRuns.find((run) => run.phase === "graph_spacetime_settlement" && run.status === "completed")
+    const spacetimeArtifact = asRecordForTest(asRecordForTest(spacetimeRun?.result).artifact)
+    expect((spacetimeArtifact.sceneSpacetimeBindings as readonly Record<string, unknown>[])[0]?.explanation)
+      .toBe("Compact spacetime result selected the revised scene anchor")
+    const commitRun = phaseRuns
+      .find((run) => run.phase === "commit_review" && run.status === "completed")
+    const commitRequestArtifacts = asRecordForTest(asRecordForTest(asRecordForTest(commitRun?.request).input).artifacts)
+    expect(commitRequestArtifacts).toHaveProperty(
+      "graph_governance.sceneSpacetimeBindings.0.explanation",
+      "Compact spacetime result selected the revised scene anchor",
+    )
+    expect(await fixture.database.selectFrom("scene_spacetime_bindings").select("reason")
+      .where("scope_id", "=", result.scopeId).execute()).toEqual([
+      { reason: "Compact spacetime result selected the revised scene anchor" },
+    ])
+    const commitArtifact = asRecordForTest(asRecordForTest(commitRun?.result).artifact)
+    expect(commitArtifact.continuityAdvice).toEqual([
+      expect.objectContaining({
+        verdict: "conflict",
+        summary: "The relative time conflicts with the revised scene entry",
+        suggestedDirection: "Align the relative time with the revised scene entry",
+      }),
+    ])
+    const settlementRun = phaseRuns
+      .find((run) => run.phase === "settlement_review" && run.status === "completed")
+    expect(asRecordForTest(asRecordForTest(settlementRun?.result).artifact))
+      .toMatchObject({ sourceReturnComplete: true, semanticCoverageComplete: false })
   })
 })
 

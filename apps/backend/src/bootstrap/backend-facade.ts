@@ -463,71 +463,34 @@ export class BackendFacade {
           ...(payload.deadlineMs === undefined ? {} : { deadlineMs: payload.deadlineMs }),
         }, this.resolveModel(payload.model))
       }
+      case "chapter.graphRevision.list": {
+        const payload = chapterListPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.listGraphRevisionTasks()
+      }
+      case "chapter.graphRevision.cancel": {
+        const payload = chapterRetireRevisionPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        await runtime.cancelGraphRevision(payload.revisionTaskId)
+        return runtime.listGraphRevisionTasks()
+      }
+      case "chapter.graphRevision.retry": {
+        const payload = chapterReviewRevisionPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.retryGraphRevision(payload.revisionTaskId, this.resolveModel(payload.model))
+      }
       case "chapter.submitRevision": {
         const payload = chapterSubmitRevisionPayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
-        const service = runtime.createChapterRevisionService()
-        const revision = await service.submit({
+        return runtime.submitChapterRevision({
           revisionTaskId: payload.revisionTaskId,
           workspaceRootRef: payload.workspaceRootRef,
           mode: payload.mode,
           forced: payload.forced,
+          model: this.resolveModel(payload.model),
           ...(payload.reviewId === undefined ? {} : { reviewId: payload.reviewId }),
           ...(payload.note === undefined ? {} : { note: payload.note }),
         })
-        if (revision.status === "graph_sync_pending") {
-          runtimeLog("debug", "backend-facade", "chapter.revision.graph-sync.scheduled", {
-            revisionTaskId: payload.revisionTaskId,
-          })
-          void service.submit({
-            revisionTaskId: payload.revisionTaskId,
-            workspaceRootRef: payload.workspaceRootRef,
-            mode: payload.mode,
-            forced: payload.forced,
-            model: this.resolveModel(payload.model),
-            ...(payload.reviewId === undefined ? {} : { reviewId: payload.reviewId }),
-            ...(payload.note === undefined ? {} : { note: payload.note }),
-          }).then(async (completedRevision) => {
-            if (completedRevision.status !== "completed") return
-            runtimeLog("info", "backend-facade", "chapter.revision.graph-sync.completed", {
-              revisionTaskId: completedRevision.revisionTaskId,
-            })
-            try {
-              await runtime.saveAutomaticHistory({
-                operationId: completedRevision.revisionTaskId,
-                name: `章节修订 ${completedRevision.chapterId}`,
-                taskId: completedRevision.revisionTaskId,
-                createdAtMs: this.container.now(),
-              })
-            } catch (error) {
-              runtimeLog("error", "backend-facade", "chapter.revision.history.failed", {
-                revisionTaskId: completedRevision.revisionTaskId,
-                error: errorDetails(error),
-              })
-            }
-          }).catch((error) => {
-            runtimeLog("error", "backend-facade", "chapter.revision.graph-sync.failed", {
-              revisionTaskId: payload.revisionTaskId,
-              error: errorDetails(error),
-            })
-          })
-        }
-        if (revision.status === "completed") {
-          try {
-            await runtime.saveAutomaticHistory({
-              operationId: revision.revisionTaskId,
-              name: `章节修订 ${revision.chapterId}`,
-              taskId: revision.revisionTaskId,
-              createdAtMs: this.container.now(),
-            })
-          } catch (error) {
-            runtimeLog("error", "backend-facade", "chapter.revision.history.failed", {
-              revisionTaskId: revision.revisionTaskId,
-              error: errorDetails(error),
-            })
-          }
-        }
-        return revision
       }
       case "chapter.retireRevision": {
         const payload = chapterRetireRevisionPayloadSchema.parse(request.payload)

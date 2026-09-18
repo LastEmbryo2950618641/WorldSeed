@@ -31,6 +31,33 @@ describe("graph governance stage projections", () => {
     expect(JSON.stringify(first)).not.toContain('"mutations"')
   })
 
+  it("keeps the governance projection stable when probe executions arrive incrementally", () => {
+    const withoutProbe = buildGraphGovernanceReviewProjection({
+      scopeId: "scope_1", artifacts: stagedArtifacts(), sourceUnitCount: 0, verificationProbeExecutions: [],
+    })
+    const withProbe = buildGraphGovernanceReviewProjection({
+      scopeId: "scope_1", artifacts: stagedArtifacts(), sourceUnitCount: 0,
+      verificationProbeExecutions: [{
+        probeIndex: 0,
+        requestId: "request_1",
+        operationId: "operation_1",
+        descriptor: {
+          purpose: "current_state",
+          sceneBindingIndexes: [],
+          mutationSpacetimeSettlementIndexes: [0],
+        },
+        status: "completed",
+        returnedReadRefs: [],
+        returnedGraphRefs: ["local:occurrence"],
+        returnedProposalRefs: [],
+        resultDigest: "probe-result",
+      }],
+    })
+
+    expect(withProbe.projectionDigest).toBe(withoutProbe.projectionDigest)
+    expect(withProbe.verificationProbeExecutions).toEqual([])
+  })
+
   it("builds minimal settlement and frontier responsibility projections", () => {
     const artifacts = stagedArtifacts()
     const settlement = buildSettlementReviewProjection({ scopeId: "scope_1", artifacts, sourceUnitCount: 0 })

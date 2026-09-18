@@ -55,6 +55,7 @@ const MODEL_CREDENTIAL_PAYLOAD_SCHEMAS = {
   "world.evolve": worldEvolvePayloadSchema,
   "chapter.reviewRevision": chapterReviewRevisionPayloadSchema,
   "chapter.submitRevision": chapterSubmitRevisionPayloadSchema,
+  "chapter.graphRevision.retry": chapterReviewRevisionPayloadSchema,
   "synopsis.conversation.send": synopsisConversationSendPayloadSchema,
   "synopsis.conversation.refreshChoices": synopsisConversationRefreshChoicesPayloadSchema,
   "synopsis.conversation.beginTurn": synopsisBeginTurnPayloadSchema,

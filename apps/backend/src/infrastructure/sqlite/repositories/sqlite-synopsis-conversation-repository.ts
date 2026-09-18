@@ -270,6 +270,15 @@ export class SqliteSynopsisConversationRepository {
     return rows.map(mapDiscussContextMessage)
   }
 
+  public async loadDiscussContextInputTokens(projectId: ProjectId, sessionId: string): Promise<number | undefined> {
+    const latest = await this.database.selectFrom("synopsis_discuss_context_messages")
+      .select(["session_id", "hidden_at"])
+      .where("project_id", "=", projectId).where("kind", "=", "phase_response")
+      .orderBy("created_at_ms", "desc").orderBy("sequence_no", "desc").executeTakeFirst()
+    if (latest?.session_id !== sessionId || latest.hidden_at !== null) return undefined
+    return (await this.loadDiscussUsage(projectId))?.lastRequestInputTokens
+  }
+
   public async appendDiscussContextMessages(input: Readonly<{
     sessionId: string
     projectId: ProjectId

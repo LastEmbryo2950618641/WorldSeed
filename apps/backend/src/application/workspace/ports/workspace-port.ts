@@ -64,6 +64,13 @@ export interface WorkspacePort {
   saveSynopsisMarkdown(workspaceRootRef: string, relativePath: string, content: string): Promise<void>
   removeSynopsisMarkdown(workspaceRootRef: string, relativePath: string): Promise<void>
   publishChapter(workspaceRootRef: string, relativePath: string, content: string): Promise<void>
+  validatePublishedChapterReplacement(
+    workspaceRootRef: string,
+    currentRelativePath: string,
+    nextRelativePath: string,
+    expectedDigest: string,
+    content: string,
+  ): Promise<void>
   replacePublishedChapter(
     workspaceRootRef: string,
     currentRelativePath: string,

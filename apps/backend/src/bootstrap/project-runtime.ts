@@ -7,6 +7,8 @@ import type {
   ResettableRuntimeMetricId,
   RuntimeMetricsSnapshot,
   TaskStatus,
+  ChapterRevision,
+  GraphRevisionTask,
 } from "@worldseed/contracts"
 import { PROTOCOL_VERSION } from "@worldseed/contracts"
 
@@ -66,10 +68,140 @@ import { buildTurnMonitorPhases } from "../application/chapters/turn-handoff.js"
 import type { Kysely } from "kysely"
 import type { ProjectDatabase } from "../infrastructure/sqlite/database-types.js"
 import { runtimeLog } from "../infrastructure/diagnostics/index.js"
+import { graphRevisionProgress } from "../application/chapters/graph-revision-progress.js"
+import { createGraphRevisionModel } from "../application/chapters/graph-revision-model.js"
 import type { HistoryBranchSummary, HistoryCheckoutResult, HistoryEntrySummary, HistoryOverview, HistoryRetentionPreview } from "@worldseed/contracts"
 
 export class ProjectRuntime {
   private closed = false
+  private readonly revisionJobs = new Map<string, {
+    controller: AbortController
+    ready: Promise<ChapterRevision>
+    done: Promise<void>
+    activity?: GraphRevisionTask["activity"]
+  }>()
+
+  public async listGraphRevisionTasks(): Promise<readonly GraphRevisionTask[]> {
+    const rows = await this.database.selectFrom("chapter_revision_tasks as r")
+      .select(["r.id", "r.chapter_id", "r.heading", "r.graph_sync_task_id", "r.graph_sync_status",
+        "r.status as revision_status", "r.decision", "r.updated_at"])
+      .where("r.project_id", "=", this.projectId)
+      .where((eb) => eb.or([eb("r.decision", "=", "submit"), eb("r.graph_sync_task_id", "is not", null)]))
+      .orderBy("r.updated_at", "desc").execute()
+    const syncIds = rows.flatMap((row) => row.graph_sync_task_id === null ? [] : [row.graph_sync_task_id])
+    const taskRows = rows.length === 0 ? [] : await this.database.selectFrom("tasks")
+      .select(["id", "status", "error_json"]).where("project_id", "=", this.projectId)
+      .where("id", "in", [...rows.map((row) => row.id), ...syncIds]).execute()
+    const byId = new Map(taskRows.map((task) => [task.id, task]))
+    const runs = syncIds.length === 0 ? [] : await this.database.selectFrom("phase_runs")
+      .select(["task_id", "phase", "status", "attempt"])
+      .where("project_id", "=", this.projectId).where("task_id", "in", syncIds)
+      .orderBy("started_at", "asc").execute()
+    return rows.map((revision): GraphRevisionTask => {
+      const task = byId.get(revision.graph_sync_task_id ?? "")
+      const row = { ...revision, task_status: task?.status, error_json: task?.error_json ?? null, revision_error: byId.get(revision.id)?.error_json ?? null }
+      const complete = row.graph_sync_status === "completed" || row.revision_status === "completed"
+      const retired = row.revision_status === "retired"
+      const live = this.revisionJobs.has(row.id)
+      const status = complete ? "completed" : retired ? "retired"
+        : row.task_status === "cancelled" ? "cancelled"
+          : live ? "running" : row.graph_sync_status === "running" || row.revision_status === "committing_content" ? "interrupted"
+            : row.graph_sync_status === "failed" ? "failed" : "pending"
+      let error: string | undefined
+      if (!live && row.revision_status === "committing_content") error = "章节内容提交尚未完成，需重试恢复；图同步尚未开始。"
+      const errorJson = row.revision_error ?? row.error_json
+      if (!complete && !retired && errorJson !== null) {
+        const stored: unknown = JSON.parse(errorJson)
+        if (typeof stored === "object" && stored !== null && "message" in stored && typeof stored.message === "string") error = stored.message
+      }
+      const progress = graphRevisionProgress(runs.filter((run) => run.task_id === row.graph_sync_task_id), complete)
+      const activity = this.revisionJobs.get(row.id)?.activity
+      return {
+        revisionTaskId: row.id, chapterId: row.chapter_id, heading: row.heading,
+        ...(row.graph_sync_task_id === null ? {} : { graphSyncTaskId: row.graph_sync_task_id }),
+        status, blocksTurn: row.decision === "submit" && !complete && !retired,
+        canCancel: !complete && !retired && row.task_status !== "committing" && row.revision_status !== "committing_content" && (live || status === "pending" || status === "interrupted"),
+        canRetry: !complete && !retired && this.revisionJobs.size === 0,
+        ...(error === undefined ? {} : { error }), updatedAtMs: row.updated_at,
+        ...(activity === undefined ? {} : { activity }),
+        progress,
+      }
+    })
+  }
+
+  public submitChapterRevision(input: Parameters<ChapterRevisionService["submit"]>[0]): Promise<ChapterRevision> {
+    const active = this.revisionJobs.get(input.revisionTaskId)
+    if (active !== undefined) return active.ready
+    if (this.revisionJobs.size > 0) return Promise.reject(new Error("另一个图修订任务正在运行，请等待完成或先取消"))
+    const controller = new AbortController()
+    let resolveReady!: (revision: ChapterRevision) => void
+    let rejectReady!: (error: unknown) => void
+    const ready = new Promise<ChapterRevision>((resolve, reject) => { resolveReady = resolve; rejectReady = reject })
+    const done = Promise.resolve().then(async () => {
+      const repository = new SqliteChapterRevisionRepository(this.database)
+      const previous = await repository.find(input.revisionTaskId)
+      if (previous === undefined || previous.projectId !== this.projectId) throw new Error("图修订任务不存在")
+      if (previous.decision === "submit" && previous.status !== "completed" && previous.status !== "retired" && previous.graphSyncTaskId !== undefined) {
+        const oldTask = await this.taskScopes.findTask(previous.graphSyncTaskId)
+        if (oldTask?.status === "completed") {
+          const completed = await this.createChapterRevisionService().completeGraphSync(previous.graphSyncTaskId)
+          if (completed !== undefined) { resolveReady(completed); return }
+        }
+        // Retrying graph work starts a fresh isolated scope; committed chapter content is retained.
+        if (oldTask !== undefined) {
+          const scope = await this.taskScopes.findScope(oldTask.scopeId)
+          if (scope?.visibility === "pending") await new SqliteScopeCommitRepository(this.database).retire(oldTask.scopeId, Date.now())
+          await this.persistenceUpdateTask(oldTask.taskId, "cancelled")
+        }
+        await repository.updateState({ revisionTaskId: previous.revisionTaskId, status: "awaiting_user_decision", graphSyncStatus: "failed", graphSyncTaskId: randomUUID(), updatedAtMs: Date.now() })
+      }
+      const service = this.createChapterRevisionService()
+      await this.database.updateTable("tasks").set({ error_json: null }).where("id", "=", input.revisionTaskId).execute()
+      const { model, ...preparation } = input
+      const prepared = await service.submit(preparation)
+      resolveReady(prepared)
+      controller.signal.throwIfAborted()
+      const result = prepared.status === "graph_sync_pending" && model !== undefined
+        ? await service.submit({ ...input, signal: controller.signal }) : prepared
+      if (result.status === "completed") {
+        await this.saveAutomaticHistory({ operationId: result.revisionTaskId, name: `章节修订 ${result.chapterId}`, taskId: result.revisionTaskId, createdAtMs: Date.now() })
+      }
+    }).catch(async (error: unknown) => {
+      rejectReady(error)
+      await this.database.updateTable("tasks").set({ error_json: JSON.stringify({ message: error instanceof Error ? error.message : String(error) }) })
+        .where("id", "=", input.revisionTaskId).execute()
+      runtimeLog("error", "graph-revision", "execution.stopped", { revisionTaskId: input.revisionTaskId, error: error instanceof Error ? error.message : String(error) })
+    }).finally(() => { this.revisionJobs.delete(input.revisionTaskId) })
+    this.revisionJobs.set(input.revisionTaskId, { controller, ready, done })
+    return ready
+  }
+
+  public async retryGraphRevision(revisionTaskId: string, model: AIModelPort): Promise<ChapterRevision> {
+    const revision = await new SqliteChapterRevisionRepository(this.database).find(revisionTaskId)
+    if (revision === undefined || revision.projectId !== this.projectId || revision.decision !== "submit") throw new Error("没有可重试的图修订任务")
+    return this.submitChapterRevision({
+      revisionTaskId, workspaceRootRef: this.workspaceRootRef, model,
+      mode: revision.submissionMode ?? "direct", forced: revision.submissionMode !== "reviewed",
+      ...(revision.review === undefined ? {} : { reviewId: revision.review.reviewId }),
+    })
+  }
+
+  public async cancelGraphRevision(revisionTaskId: string): Promise<void> {
+    const repository = new SqliteChapterRevisionRepository(this.database)
+    const revision = await repository.find(revisionTaskId)
+    if (revision === undefined || revision.projectId !== this.projectId) throw new Error("图修订任务不存在")
+    if (revision.decision !== "submit") throw new Error("该修订尚未提交图同步")
+    if (revision.status === "completed" || revision.status === "retired") return
+    const task = revision.graphSyncTaskId === undefined ? undefined : await this.taskScopes.findTask(revision.graphSyncTaskId)
+    if (task?.status === "committing" || revision.status === "committing_content") throw new Error("正在提交结果，请等待提交完成")
+    const job = this.revisionJobs.get(revisionTaskId)
+    job?.controller.abort(new Error("用户取消图同步"))
+    await job?.done
+    const latest = await repository.find(revisionTaskId)
+    if (latest?.status === "completed") return
+    if (latest?.graphSyncTaskId !== undefined) await this.persistenceUpdateTask(latest.graphSyncTaskId, "cancelled")
+    await repository.updateState({ revisionTaskId, status: "awaiting_user_decision", graphSyncStatus: "failed", updatedAtMs: Date.now() })
+  }
 
   private constructor(
     public readonly projectId: ProjectId,
@@ -151,14 +283,16 @@ export class ProjectRuntime {
     return this.taskScopes.findLatestTask(this.projectId)
   }
 
-  public recoverStaleRunningTasks(
+  public async recoverStaleRunningTasks(
     activeTaskIds: readonly string[],
     updatedAtMs: number,
     interruption: unknown,
   ): Promise<readonly StoredTask[]> {
+    const activeRevisions = this.revisionJobs.size === 0 ? [] : await this.database.selectFrom("chapter_revision_tasks")
+      .select("graph_sync_task_id").where("id", "in", [...this.revisionJobs.keys()]).execute()
     return this.taskScopes.recoverStaleRunningTasks({
       projectId: this.projectId,
-      activeTaskIds,
+      activeTaskIds: [...activeTaskIds, ...activeRevisions.flatMap((row) => row.graph_sync_task_id === null ? [] : [row.graph_sync_task_id])],
       updatedAtMs,
       interruption,
     })
@@ -490,7 +624,11 @@ export class ProjectRuntime {
         const chapterSequence = index?.sequence ?? Math.max(1, (await documents.listCommittedChapters(input.revision.projectId))
           .findIndex((chapter) => chapter.chapterId === input.revision.chapterId) + 1)
         const content = await this.internalStorePort.readDocument(input.revision.contentRef)
-        const orchestrator = this.createTurnOrchestrator(input.model, randomUUID, Date.now)
+        const model = createGraphRevisionModel(input.model, (activity) => {
+          const job = this.revisionJobs.get(input.revision.revisionTaskId)
+          if (job !== undefined) job.activity = activity
+        })
+        const orchestrator = this.createTurnOrchestrator(model, randomUUID, Date.now)
         const orchestratorInput = {
           workflow: "revision",
           adaptiveGraphGovernance: true,
@@ -511,9 +649,9 @@ export class ProjectRuntime {
         } as const
         const existingTask = await this.taskScopes.findTask(input.graphSyncTaskId)
         if (existingTask === undefined) {
-          await orchestrator.execute(orchestratorInput)
+          await orchestrator.execute(orchestratorInput, { ...(input.signal === undefined ? {} : { signal: input.signal }) })
         } else {
-          await orchestrator.resume(orchestratorInput)
+          await orchestrator.resume(orchestratorInput, "retry_phase", { ...(input.signal === undefined ? {} : { signal: input.signal }) })
         }
       },
     })
@@ -656,6 +794,8 @@ export class ProjectRuntime {
   public async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    for (const job of this.revisionJobs.values()) job.controller.abort(new Error("应用关闭，图同步已中断"))
+    await Promise.all([...this.revisionJobs.values()].map((job) => job.done))
     await this.database.destroy()
   }
 

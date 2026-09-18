@@ -21,6 +21,7 @@ export type ContextCompactionInput = Readonly<{
   triggerRatio: number
   targetRatio: number
   incomingTokenEstimate: number
+  force?: boolean
 }>
 
 export class ContextWindowManager {
@@ -45,7 +46,7 @@ export class ContextWindowManager {
         reason: "Protected system rules, current turn, and incoming request exceed the model context window",
       }
     }
-    if (initialTokens < thresholdTokens) {
+    if (input.force !== true && initialTokens < thresholdTokens) {
       return completePlan("none", [], currentMessages, initialTokens, thresholdTokens, targetTokens, protectedTokens)
     }
 

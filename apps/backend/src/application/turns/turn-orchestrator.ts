@@ -108,6 +108,7 @@ import { VerificationProbeCoordinator, type ReadExecutionRecord } from "./verifi
 import {
   collectReadableEvidenceIds,
   ContextWindowManager,
+  executeWithContextCompaction,
   estimateModelMessageTokens,
   mergeEvidenceVersions,
 } from "../context/index.js"
@@ -116,8 +117,18 @@ import {
   findGraphCapacityViolations,
   type GraphCapacityAssessment,
 } from "./graph-capacity-policy.js"
-import { applyGraphCapacityRewrite, assembleGraphGovernanceArtifact, replayGraphCapacityRewrites } from "./graph-governance-assembler.js"
-import { buildStageProjection, readPriorFrontierStates } from "./graph-governance-stage-projection.js"
+import {
+  applyGraphCapacityRewrite,
+  assembleGraphGovernanceArtifact,
+  projectGraphRetrievalDesignFromGovernance,
+  projectGraphStructurePlanFromGovernance,
+  replayGraphCapacityRewrites,
+} from "./graph-governance-assembler.js"
+import {
+  buildCommitReviewProjection,
+  buildStageProjection,
+  readPriorFrontierStates,
+} from "./graph-governance-stage-projection.js"
 import { canonicalizeRetrievalProjections } from "./retrieval-projection-canonicalizer.js"
 import { decideAdaptiveGraphGovernance } from "./adaptive-graph-governance-coordinator.js"
 import { ChapterContextResolver } from "../chapters/chapter-context-resolver.js"
@@ -186,12 +197,25 @@ const evolutionExecutionPhases: readonly AIPhase[] = [
   "commit_review",
 ]
 
-const revisionExecutionPhases: readonly AIPhase[] = [
+export const revisionExecutionPhases: readonly AIPhase[] = [
   "interpret",
   "rule_assembly",
   "source_retrieval",
   "emergence_planning",
   "emergence_review",
+  "dependency_audit",
+  "graph_structure_plan",
+  "graph_capacity_rewrite",
+  "graph_spacetime_settlement",
+  "graph_retrieval_design",
+  "graph_governance_review",
+  "settlement_review",
+  "frontier_settlement",
+  "commit_review",
+]
+
+export const adaptiveRevisionExecutionPhases: readonly AIPhase[] = [
+  "graph_governance",
   "dependency_audit",
   "graph_structure_plan",
   "graph_capacity_rewrite",
@@ -211,13 +235,13 @@ const phaseInternalArtifactDependencies = {
   emergence_review: ["source_retrieval", "emergence_planning"],
   draft: ["interpret", "rule_assembly", "source_retrieval", "emergence_planning", "emergence_review"],
   chapter_naming: ["draft"],
-  dependency_audit: ["source_retrieval", "emergence_planning", "emergence_review", "draft"],
+  dependency_audit: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "graph_governance"],
   settings_extraction: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "dependency_audit"],
   response_review: ["source_retrieval", "draft", "dependency_audit"],
   graph_governance: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "dependency_audit"],
-  graph_structure_plan: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "dependency_audit"],
+  graph_structure_plan: ["source_retrieval", "emergence_planning", "emergence_review", "draft", "dependency_audit", "graph_governance"],
   graph_capacity_rewrite: ["graph_structure_plan"],
-  graph_spacetime_settlement: ["dependency_audit", "graph_structure_plan"],
+  graph_spacetime_settlement: ["dependency_audit", "graph_structure_plan", "graph_governance"],
   graph_retrieval_design: ["graph_structure_plan", "graph_spacetime_settlement"],
   graph_governance_review: ["dependency_audit", "graph_structure_plan", "graph_spacetime_settlement", "graph_retrieval_design", "graph_governance"],
   semantic_review: ["draft", "dependency_audit", "settings_extraction", "graph_governance"],
@@ -247,14 +271,18 @@ function executionPhasesFor(workflow: WorldWorkflow, includeAdaptiveRevisionRout
     case "query": return queryExecutionPhases
     case "evolution": return evolutionExecutionPhases
     case "revision": return includeAdaptiveRevisionRoute
-      ? ["graph_governance", ...revisionExecutionPhases]
+      ? adaptiveRevisionExecutionPhases
       : revisionExecutionPhases
   }
 }
 
+function isAdaptiveRevisionMode(value: boolean | "compact" | undefined): value is true | "compact" {
+  return value === true || value === "compact"
+}
+
 export type TurnOrchestratorInput = Readonly<{
   workflow?: WorldWorkflow
-  adaptiveGraphGovernance?: boolean
+      adaptiveGraphGovernance?: boolean | "compact"
   projectId: ProjectId
   workspaceRootRef: string
   internalStore: InternalProjectStore
@@ -616,7 +644,9 @@ export class TurnOrchestrator {
       budget,
       startPhaseIndex: 0,
       queryDraftAuditRounds: 0,
-      ...(input.adaptiveGraphGovernance === true ? { adaptiveGraphGovernance: true } : {}),
+      ...(input.adaptiveGraphGovernance === true || input.adaptiveGraphGovernance === "compact"
+        ? { adaptiveGraphGovernance: input.adaptiveGraphGovernance }
+        : {}),
       ...(hooks?.signal === undefined ? {} : { signal: hooks.signal }),
     }
     if (workflow === "revision" && input.adaptiveGraphGovernance === true) {
@@ -690,11 +720,27 @@ export class TurnOrchestrator {
 
       if (decision.mode === "full_governance") {
         delete state.artifacts.graph_governance
-        return this.continueExecution({ ...input, adaptiveGraphGovernance: false }, {
+        return await (this.continueExecution({ ...input, adaptiveGraphGovernance: false }, {
           ...state,
           startPhaseIndex: 0,
           adaptiveGraphGovernance: false,
-        }) as Promise<WorldEvolutionExecutionResult>
+        }) as Promise<WorldEvolutionExecutionResult>)
+      }
+
+      if (decision.mode === "compact_governance" && decision.artifact !== undefined) {
+        this.log("info", "revision.graph_governance.compact_route", {
+          taskId: state.taskId,
+          phaseRunId: result.phaseRunId,
+          mutationCount: decision.artifact.mutations.length,
+          affectedFrontierCount: decision.artifact.affectedFrontierRefs.length,
+          sceneBindingCount: decision.artifact.sceneSpacetimeBindings.length,
+          reason: decision.fallbackReason,
+        })
+        return await (this.continueExecution({ ...input, adaptiveGraphGovernance: "compact" }, {
+          ...state,
+          startPhaseIndex: 1,
+          adaptiveGraphGovernance: "compact",
+        }) as Promise<WorldEvolutionExecutionResult>)
       }
 
       if (decision.mode === "no_change") {
@@ -775,9 +821,14 @@ export class TurnOrchestrator {
     taskId: string,
   ): Promise<void> {
     const messages = await this.dependencies.persistence.listModelContextMessages(chainId)
+    const observedInputTokens = await this.dependencies.persistence.readLatestContextInputTokens?.(chainId)
+    const triggerRatio = input.projectSettings?.execution.contextCompactionThresholdRatio
+      ?? defaultProjectSettings.execution.contextCompactionThresholdRatio
+    if (observedInputTokens === undefined || observedInputTokens < requireModelContextWindowTokens(this.dependencies.model) * triggerRatio) return
     const hydrated = await this.chapterContext.hydrateNarrativeMessages(input.projectId, messages)
     const compaction = this.contextWindow.plan({
       messages: hydrated,
+      force: true,
       contextWindowTokens: requireModelContextWindowTokens(this.dependencies.model),
       triggerRatio: input.projectSettings?.execution.contextCompactionThresholdRatio
         ?? defaultProjectSettings.execution.contextCompactionThresholdRatio,
@@ -821,7 +872,7 @@ export class TurnOrchestrator {
     const workflow = input.workflow ?? "turn"
     const executionPhases = executionPhasesFor(
       workflow,
-      workflow === "revision" && input.adaptiveGraphGovernance === true,
+      workflow === "revision" && isAdaptiveRevisionMode(input.adaptiveGraphGovernance),
     )
     if (input.taskId === undefined) throw new Error("A taskId is required to resume a turn")
     const task = await this.dependencies.taskScopes.findTask(input.taskId)
@@ -1054,7 +1105,11 @@ export class TurnOrchestrator {
         emergencePlanningArtifactSchema.parse(artifacts.emergence_planning),
       )
     }
-    this.materializeStagedGraphGovernanceArtifacts(artifacts, latestInput.sourceUnitIds.length)
+    this.materializeStagedGraphGovernanceArtifacts(
+      artifacts,
+      latestInput.sourceUnitIds.length,
+      input.adaptiveGraphGovernance === "compact",
+    )
     const dependencyAuditIndex = executionPhases.indexOf("dependency_audit")
     const dependencyAudit = artifacts.dependency_audit === undefined
       ? undefined
@@ -1233,7 +1288,7 @@ export class TurnOrchestrator {
         this.log("warn", "graph.spacetime.resume_rewound", {
           taskId: input.taskId,
           invalidatedPhaseRunIds: [...invalidatedPhaseRunIds],
-          error: invalidSpacetimeError instanceof Error ? invalidSpacetimeError.message : String(invalidSpacetimeError),
+          error: errorMessage(invalidSpacetimeError),
           resumePhase: "graph_spacetime_settlement",
         })
       }
@@ -1303,7 +1358,7 @@ export class TurnOrchestrator {
         this.log("warn", "graph.retrieval.resume_rewound", {
           taskId: input.taskId,
           invalidatedPhaseRunIds: [...invalidatedPhaseRunIds],
-          error: invalidRetrievalError instanceof Error ? invalidRetrievalError.message : String(invalidRetrievalError),
+          error: errorMessage(invalidRetrievalError),
           resumePhase: "graph_retrieval_design",
         })
       }
@@ -1391,7 +1446,9 @@ export class TurnOrchestrator {
       },
       startPhaseIndex,
       queryDraftAuditRounds: restoredQueryDraftAuditRounds,
-      ...(input.adaptiveGraphGovernance === true ? { adaptiveGraphGovernance: true } : {}),
+      ...(isAdaptiveRevisionMode(input.adaptiveGraphGovernance)
+        ? { adaptiveGraphGovernance: input.adaptiveGraphGovernance }
+        : {}),
       ...(queryRevisionFeedback === undefined ? {} : { queryRevisionFeedback }),
       ...(graphCapacityFeedback === undefined ? {} : { graphCapacityFeedback }),
       ...(hooks?.signal === undefined ? {} : { signal: hooks.signal }),
@@ -1400,7 +1457,7 @@ export class TurnOrchestrator {
 
   private async continueExecution(input: TurnOrchestratorInput, state: TurnExecutionState): Promise<WorkflowExecutionResult> {
     const workflow = input.workflow ?? "turn"
-    const executionPhases = executionPhasesFor(workflow, state.adaptiveGraphGovernance === true)
+    const executionPhases = executionPhasesFor(workflow, isAdaptiveRevisionMode(state.adaptiveGraphGovernance))
     let {
       context,
       sourceUnitIds,
@@ -1424,6 +1481,27 @@ export class TurnOrchestrator {
         const phase = executionPhases[phaseIndex]
         if (phase === undefined) break
         throwIfExecutionCancelled(state.signal)
+        const compactRevision = workflow === "revision" && state.adaptiveGraphGovernance === "compact"
+        if (compactRevision && phase === "graph_structure_plan") {
+          const mechanical = await this.executeMechanicalRevisionPhase({
+            input, state, context, artifacts, readEvidence, visibleEvidence, phase,
+            usage: windowUsage,
+            artifact: projectGraphStructurePlanFromGovernance(
+              graphGovernanceArtifactSchema.parse(artifacts.graph_governance),
+            ),
+            reason: "Projected structure plan from the adaptive graph governance candidate",
+          })
+          context = mechanical.context
+          readEvidence = [...mechanical.readEvidence]
+          visibleEvidence = [...mechanical.visibleEvidence]
+          windowUsage = addPhaseUsage(windowUsage, mechanical.usage)
+          totalUsage = addPhaseUsage(totalUsage, mechanical.usage)
+          artifacts[phase] = mechanical.artifact
+          phaseRunIds.push(mechanical.phaseRunId)
+          phaseRuns.set(phase, mechanical.phaseRunId)
+          phaseIndex += 1
+          continue
+        }
         if (phase === "graph_capacity_rewrite") {
           const structure = graphStructurePlanArtifactSchema.parse(artifacts.graph_structure_plan)
           const capacityAssessment = await this.assessGraphStructureCapacity(input, structure)
@@ -1439,9 +1517,33 @@ export class TurnOrchestrator {
           })
           if (capacityAssessment.violations.length === 0) {
             graphCapacityFeedback = undefined
+            if (compactRevision) {
+              const mechanical = await this.executeMechanicalRevisionPhase({
+                input, state, context, artifacts, readEvidence, visibleEvidence, phase,
+                usage: windowUsage,
+                artifact: {
+                  hotspotRefs: [structure.proposals[0]?.proposalRef ?? "proposal:mutation:1"],
+                  affectedProposalRefs: [structure.proposals[0]?.proposalRef ?? "proposal:mutation:1"],
+                  removeProposalRefs: [],
+                  upsertProposals: [],
+                  reason: "Compact revision capacity assessment found no degree violation",
+                  selfReview: "No graph proposal requires a capacity rewrite",
+                },
+                reason: "Compact revision capacity assessment passed without a model rewrite",
+              })
+              context = mechanical.context
+              readEvidence = [...mechanical.readEvidence]
+              visibleEvidence = [...mechanical.visibleEvidence]
+              windowUsage = addPhaseUsage(windowUsage, mechanical.usage)
+              totalUsage = addPhaseUsage(totalUsage, mechanical.usage)
+              artifacts[phase] = mechanical.artifact
+              phaseRunIds.push(mechanical.phaseRunId)
+              phaseRuns.set(phase, mechanical.phaseRunId)
+            }
             phaseIndex += 1
             continue
           }
+          state.compactCapacityRewritten = compactRevision
           if (graphGovernanceRounds > defaultTurnExecutionProfile.maxGraphGovernanceRounds) {
             throw new GraphCapacityExceededError(capacityAssessment.violations)
           }
@@ -1474,7 +1576,105 @@ export class TurnOrchestrator {
           })
         }
         if (phase === "frontier_settlement") {
-          this.materializeStagedGraphGovernanceArtifacts(artifacts, sourceUnitIds.length)
+          this.materializeStagedGraphGovernanceArtifacts(
+            artifacts,
+            sourceUnitIds.length,
+            compactRevision,
+          )
+        }
+        if (compactRevision && phase === "graph_retrieval_design" && state.compactCapacityRewritten !== true) {
+          const mechanical = await this.executeMechanicalRevisionPhase({
+            input, state, context, artifacts, readEvidence, visibleEvidence, phase,
+            usage: windowUsage,
+            artifact: projectGraphRetrievalDesignFromGovernance(
+              graphGovernanceArtifactSchema.parse(artifacts.graph_governance),
+              graphStructurePlanArtifactSchema.parse(artifacts.graph_structure_plan),
+            ),
+            reason: "Projected retrieval design from the adaptive graph governance candidate",
+          })
+          context = mechanical.context
+          readEvidence = [...mechanical.readEvidence]
+          visibleEvidence = [...mechanical.visibleEvidence]
+          windowUsage = addPhaseUsage(windowUsage, mechanical.usage)
+          totalUsage = addPhaseUsage(totalUsage, mechanical.usage)
+          artifacts[phase] = mechanical.artifact
+          phaseRunIds.push(mechanical.phaseRunId)
+          phaseRuns.set(phase, mechanical.phaseRunId)
+          this.materializeStagedGraphGovernanceArtifacts(artifacts, sourceUnitIds.length, true)
+          phaseIndex += 1
+          continue
+        }
+        if (compactRevision && phase === "settlement_review") {
+          const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
+          const review = graphGovernanceReviewArtifactSchema.parse(artifacts.graph_governance_review)
+          const mechanical = await this.executeMechanicalRevisionPhase({
+            input, state, context, artifacts, readEvidence, visibleEvidence, phase,
+            usage: windowUsage,
+            artifact: synthesizeCompactSettlementReview(governance, review, sourceUnitIds.length),
+            reason: "Compact revision projected settlement coverage from the final candidate and independent review",
+          })
+          context = mechanical.context
+          readEvidence = [...mechanical.readEvidence]
+          visibleEvidence = [...mechanical.visibleEvidence]
+          windowUsage = addPhaseUsage(windowUsage, mechanical.usage)
+          totalUsage = addPhaseUsage(totalUsage, mechanical.usage)
+          artifacts[phase] = mechanical.artifact
+          phaseRunIds.push(mechanical.phaseRunId)
+          phaseRuns.set(phase, mechanical.phaseRunId)
+          phaseIndex += 1
+          continue
+        }
+        if (compactRevision && phase === "frontier_settlement") {
+          const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
+          if (governance.affectedFrontierRefs.length > 0) {
+            const frontierEvidence = await this.readAffectedFrontierEvidence(context, input, governance.affectedFrontierRefs)
+            context = frontierEvidence.context
+            readEvidence = uniqueTurnReadEvidence([...readEvidence, ...frontierEvidence.evidence])
+            visibleEvidence = uniqueTurnReadEvidence([...visibleEvidence, ...frontierEvidence.evidence])
+          }
+          if (governance.affectedFrontierRefs.length === 0) {
+            const mechanical = await this.executeMechanicalRevisionPhase({
+              input, state, context, artifacts, readEvidence, visibleEvidence, phase,
+              usage: windowUsage,
+              artifact: { frontiers: [] },
+              reason: "Compact revision did not affect an existing frontier",
+            })
+            context = mechanical.context
+            readEvidence = [...mechanical.readEvidence]
+            visibleEvidence = [...mechanical.visibleEvidence]
+            windowUsage = addPhaseUsage(windowUsage, mechanical.usage)
+            totalUsage = addPhaseUsage(totalUsage, mechanical.usage)
+            artifacts[phase] = mechanical.artifact
+            phaseRunIds.push(mechanical.phaseRunId)
+            phaseRuns.set(phase, mechanical.phaseRunId)
+            phaseIndex += 1
+            continue
+          }
+        }
+        if (compactRevision && phase === "commit_review") {
+          const review = graphGovernanceReviewArtifactSchema.parse(artifacts.graph_governance_review)
+          const projection = buildCommitReviewProjection({ scopeId: state.scopeId, artifacts })
+          const mechanical = await this.executeMechanicalRevisionPhase({
+            input, state, context, artifacts, readEvidence, visibleEvidence, phase,
+            usage: windowUsage,
+            artifact: {
+              recommendation: review.recommendation === "revise" ? "revise" : "commit",
+              ...(review.recommendation === "revise" ? { revisionTargetPhase: "graph_governance" } : {}),
+              continuityAdvice: projection.continuityAdvice,
+              finalSelfReview: "Compact revision commit advisory synthesized after structural, spacetime, retrieval, review, and frontier gates",
+            },
+            reason: "Synthesized commit review from compact graph governance review",
+          })
+          context = mechanical.context
+          readEvidence = [...mechanical.readEvidence]
+          visibleEvidence = [...mechanical.visibleEvidence]
+          windowUsage = addPhaseUsage(windowUsage, mechanical.usage)
+          totalUsage = addPhaseUsage(totalUsage, mechanical.usage)
+          artifacts[phase] = mechanical.artifact
+          phaseRunIds.push(mechanical.phaseRunId)
+          phaseRuns.set(phase, mechanical.phaseRunId)
+          phaseIndex += 1
+          continue
         }
         const phaseStartedAtMs = this.dependencies.now()
         const phaseRunId = this.dependencies.createId()
@@ -1514,10 +1714,12 @@ export class TurnOrchestrator {
         windowUsage = addPhaseUsage(windowUsage, result.usage)
         totalUsage = addPhaseUsage(totalUsage, result.usage)
         if (phase === "graph_capacity_rewrite") {
-          artifacts.graph_structure_plan = applyGraphCapacityRewrite(
-            graphStructurePlanArtifactSchema.parse(artifacts.graph_structure_plan),
-            graphCapacityRewriteArtifactSchema.parse(result.artifact),
-          )
+          if (state.adaptiveGraphGovernance !== "compact" || state.compactCapacityRewritten === true) {
+            artifacts.graph_structure_plan = applyGraphCapacityRewrite(
+              graphStructurePlanArtifactSchema.parse(artifacts.graph_structure_plan),
+              graphCapacityRewriteArtifactSchema.parse(result.artifact),
+            )
+          }
         }
         if (phase === "emergence_planning") {
           artifacts.emergence_review = synthesizePassedEmergenceReview(
@@ -1525,7 +1727,11 @@ export class TurnOrchestrator {
           )
         }
         if (phase === "graph_retrieval_design") {
-          this.materializeStagedGraphGovernanceArtifacts(artifacts, sourceUnitIds.length)
+          this.materializeStagedGraphGovernanceArtifacts(
+            artifacts,
+            sourceUnitIds.length,
+            compactRevision,
+          )
         }
         if (phase === "graph_governance_review") {
           const review = graphGovernanceReviewArtifactSchema.parse(result.artifact)
@@ -2120,6 +2326,7 @@ export class TurnOrchestrator {
       state.sourceUnitIds,
       readEvidence,
       state.createdAtMs,
+      state.adaptiveGraphGovernance === "compact" ? "compact" : "full",
     )
     await this.dependencies.commit.commit(state.scopeId)
     await this.dependencies.persistence.updateTask(state.taskId, "completed", "commit_review", this.dependencies.now())
@@ -2148,6 +2355,134 @@ export class TurnOrchestrator {
       modelProvider: this.dependencies.model.info?.provider ?? "unknown",
       modelName: this.dependencies.model.info?.model ?? "unknown",
       ...cacheRateResult(totalUsage),
+    }
+  }
+
+  private async executeMechanicalRevisionPhase(input: {
+    input: TurnOrchestratorInput
+    state: TurnExecutionState
+    context: TurnContext
+    artifacts: Partial<Record<AIPhase, unknown>>
+    readEvidence: readonly TurnReadEvidence[]
+    visibleEvidence: readonly TurnReadEvidence[]
+    phase: AIPhase
+    artifact: unknown
+    usage: PhaseUsage
+    reason: string
+  }): Promise<ExecutePhaseResult> {
+    const phaseRunId = this.dependencies.createId()
+    const attempt = (input.state.phaseAttempts.get(input.phase) ?? 0) + 1
+    input.state.phaseAttempts.set(input.phase, attempt)
+    const artifact = parsePhaseArtifact(input.phase, input.artifact)
+    const prompt = await this.dependencies.prompts.loadPhase(input.phase)
+    const nowMs = this.dependencies.now()
+    const request: PhaseRequestEnvelope = {
+      schemaVersion: SCHEMA_VERSION,
+      envelopeId: this.dependencies.createId(),
+      projectId: input.input.projectId,
+      taskId: input.state.taskId,
+      turnId: input.state.turnId,
+      contextId: input.state.contextId,
+      scopeId: input.state.scopeId,
+      phase: input.phase,
+      protocolVersion: PROTOCOL_VERSION,
+      promptRef: prompt.ref,
+      promptDigest: prompt.digest,
+      contextViewRef: digest({ contextId: input.state.contextId, segments: input.context.segments }),
+      committedReadIds: collectReadableEvidenceIds(
+        input.context.readLedger,
+        [...input.readEvidence, ...input.visibleEvidence],
+      ).committedReadIds,
+      visiblePendingIds: collectReadableEvidenceIds(
+        input.context.readLedger,
+        [...input.readEvidence, ...input.visibleEvidence],
+      ).visiblePendingIds,
+      remainingBudget: remainingBudget(input.state.budget, input.usage),
+      input: {
+        workflow: "revision",
+        userInput: input.input.userInput,
+        chapterSequence: input.input.chapterSequence,
+        sourceId: input.state.sourceId,
+        sourceUnitIds: input.state.sourceUnitIds,
+        readEvidence: input.readEvidence,
+        retrievalGaps: input.state.retrievalGaps,
+        artifacts: input.artifacts,
+        workspaceCatalog: input.state.catalogSnapshot,
+        mechanicalRevisionPhase: input.phase,
+        mechanicalReason: input.reason,
+      },
+    }
+    await this.dependencies.persistence.updateTask(input.state.taskId, "running", input.phase, nowMs)
+    await this.dependencies.persistence.startPhaseRun({
+      phaseRunId,
+      projectId: input.input.projectId,
+      taskId: input.state.taskId,
+      contextId: input.state.contextId,
+      phase: input.phase,
+      attempt,
+      request,
+      startedAtMs: nowMs,
+    })
+    const result: PhaseResultEnvelope = {
+      schemaVersion: SCHEMA_VERSION,
+      envelopeId: this.dependencies.createId(),
+      contextId: input.state.contextId,
+      phase: input.phase,
+      outcome: "continue",
+      artifact,
+      requestedReads: [],
+      citedReadIds: [],
+      producedArtifactIds: [],
+      decisionRecordIds: [],
+      unresolvedDependencies: [],
+      reason: input.reason,
+      selfReview: "The mechanical compact-revision phase preserves model-authored governance and only projects deterministic stage data",
+    }
+    const contextWithResult = appendContextSegments(input.context, [{
+      segmentId: this.dependencies.createId(),
+      kind: "phase_result",
+      ownerIds: [phaseRunId],
+      visibility: "pending",
+      canonicalDigest: digest(result),
+      tokenEstimate: estimateTokens(result),
+      sequence: input.context.segments.length,
+    }])
+    const finishedAtMs = this.dependencies.now()
+    await this.dependencies.persistence.finishPhaseRun({
+      phaseRunId,
+      status: "completed",
+      result,
+      usage: {},
+      finishedAtMs,
+    })
+    await this.dependencies.persistence.saveContext(contextWithResult, finishedAtMs)
+    await this.dependencies.persistence.saveTaskCheckpoint({
+      projectId: input.input.projectId,
+      taskId: input.state.taskId,
+      phaseRunId,
+      phase: input.phase,
+      context: contextWithResult,
+      modelContextChainId: input.state.modelContextChainId,
+      savedAtMs: finishedAtMs,
+    })
+    await this.dependencies.persistence.updateTask(input.state.taskId, "running", input.phase, finishedAtMs)
+    this.log("debug", "revision.compact_phase.mechanical", {
+      taskId: input.state.taskId,
+      phase: input.phase,
+      phaseRunId,
+      reason: input.reason,
+    })
+    return {
+      phaseRunId,
+      context: contextWithResult,
+      readEvidence: input.readEvidence,
+      visibleEvidence: input.visibleEvidence,
+      retrievalGaps: [],
+      artifact,
+      outcome: "continue",
+      reason: input.reason,
+      selfReview: result.selfReview,
+      usage: emptyPhaseUsage(),
     }
   }
 
@@ -2346,49 +2681,8 @@ export class TurnOrchestrator {
         const hydratedMessages = await this.chapterContext.hydrateNarrativeMessages(input.input.projectId, persistedContextMessages)
         const hydratedContextContent = new Map(hydratedMessages.map((message) => [message.messageId, message.content]))
         const contextMessagesForCompaction = hydratedMessages
-        const compaction = this.contextWindow.plan({
-          messages: contextMessagesForCompaction,
-          currentTurnId: currentContext.turnId,
-          contextWindowTokens: requireModelContextWindowTokens(this.dependencies.model),
-          triggerRatio: input.input.projectSettings?.execution.contextCompactionThresholdRatio
-            ?? defaultProjectSettings.execution.contextCompactionThresholdRatio,
-          targetRatio: input.input.projectSettings?.execution.contextCompressionTargetRatio
-            ?? defaultProjectSettings.execution.contextCompressionTargetRatio,
-          incomingTokenEstimate: estimateModelMessageTokens(JSON.stringify({ phase: input.phase, prompt: prompt.text, request })),
-        })
-        this.log("debug", "context.compaction.evaluated", {
-          taskId: currentContext.taskId,
-          phase: input.phase,
-          chainId: input.modelContextChainId,
-          messageCount: persistedContextMessages.length,
-          compactionPhase: compaction.phase,
-          estimatedTokens: compaction.estimatedTokens,
-          thresholdTokens: compaction.thresholdTokens,
-          targetTokens: compaction.targetTokens,
-          hiddenMessageCount: compaction.hiddenMessageIds.length,
-          protectedTokens: compaction.protectedTokens,
-          blocked: compaction.blocked,
-        })
-        if (compaction.blocked) {
-          throw new Error(compaction.reason ?? "Protected model context exceeds the configured model window")
-        }
-        if (compaction.hiddenMessageIds.length > 0) {
-          await this.dependencies.persistence.hideModelContextMessages(
-            input.modelContextChainId,
-            compaction.hiddenMessageIds,
-            this.dependencies.now(),
-          )
-          this.log("info", "context.compaction.applied", {
-            taskId: currentContext.taskId,
-            phase: input.phase,
-            chainId: input.modelContextChainId,
-            compactionPhase: compaction.phase,
-            hiddenMessageIds: compaction.hiddenMessageIds,
-            visibleMessageCount: compaction.visibleMessages.length,
-            estimatedTokens: compaction.estimatedTokens,
-          })
-        }
-        const contextMessages = compaction.visibleMessages.map((message) => ({
+        const lastRequestInputTokens = await this.dependencies.persistence.readLatestContextInputTokens?.(input.modelContextChainId)
+        const contextMessages = contextMessagesForCompaction.map((message) => ({
           messageId: message.messageId,
           sequence: message.sequence,
           role: message.role,
@@ -2398,15 +2692,25 @@ export class TurnOrchestrator {
           ...(message.phase === undefined ? {} : { phase: message.phase }),
           content: hydratedContextContent.get(message.messageId) as string,
         }))
-        execution = await this.dependencies.model.execute(
+        execution = await executeWithContextCompaction({
+          model: this.dependencies.model,
           request,
-          {
+          ...(lastRequestInputTokens === undefined ? {} : { lastRequestInputTokens }),
+          triggerRatio: input.input.projectSettings?.execution.contextCompactionThresholdRatio
+            ?? defaultProjectSettings.execution.contextCompactionThresholdRatio,
+          targetRatio: input.input.projectSettings?.execution.contextCompressionTargetRatio
+            ?? defaultProjectSettings.execution.contextCompressionTargetRatio,
+          onCompacted: async (event) => {
+            await this.dependencies.persistence.hideModelContextMessages(input.modelContextChainId, event.hiddenMessageIds, this.dependencies.now())
+            this.log("info", "context.compaction.applied", { taskId: currentContext.taskId, phase: input.phase, ...event })
+          },
+          options: {
             contextChainId: input.modelContextChainId,
             contextMessages,
             phasePrompt: prompt,
             ...(input.signal === undefined ? {} : { signal: input.signal }),
           },
-        )
+        })
         throwIfExecutionCancelled(input.signal)
       } catch (error) {
         this.log("error", "phase.model_request.failed", {
@@ -2878,8 +3182,9 @@ export class TurnOrchestrator {
   private materializeStagedGraphGovernanceArtifacts(
     artifacts: Partial<Record<AIPhase, unknown>>,
     sourceUnitCount: number,
+    replaceGovernance = false,
   ): void {
-    if (artifacts.graph_governance === undefined
+    if ((replaceGovernance || artifacts.graph_governance === undefined)
       && artifacts.graph_structure_plan !== undefined
       && artifacts.graph_spacetime_settlement !== undefined
       && artifacts.graph_retrieval_design !== undefined) {
@@ -2997,9 +3302,28 @@ export class TurnOrchestrator {
     context: TurnContext,
     input: TurnOrchestratorInput,
   ): Promise<Readonly<{ context: TurnContext; evidence: TurnReadEvidence[] }>> {
+    return this.readFrontierEvidence(context, input)
+  }
+
+  private async readAffectedFrontierEvidence(
+    context: TurnContext,
+    input: TurnOrchestratorInput,
+    affectedFrontierRefs: readonly string[],
+  ): Promise<Readonly<{ context: TurnContext; evidence: TurnReadEvidence[] }>> {
+    if (affectedFrontierRefs.length === 0) return { context, evidence: [] }
+    return this.readFrontierEvidence(context, input, new Set(affectedFrontierRefs))
+  }
+
+  private async readFrontierEvidence(
+    context: TurnContext,
+    input: TurnOrchestratorInput,
+    onlyFrontierRefs?: ReadonlySet<string>,
+  ): Promise<Readonly<{ context: TurnContext; evidence: TurnReadEvidence[] }>> {
     const limit = input.projectSettings?.retrieval.maxCandidates
       ?? defaultProjectSettings.retrieval.maxCandidates
-    const frontiers = await this.dependencies.persistence.listSchedulableFrontiers(input.projectId, limit)
+    const effectiveLimit = Math.max(limit, onlyFrontierRefs?.size ?? 0)
+    const frontiers = (await this.dependencies.persistence.listSchedulableFrontiers(input.projectId, effectiveLimit))
+      .filter((frontier) => onlyFrontierRefs === undefined || onlyFrontierRefs.has(frontier.frontierAnchorRef))
     if (frontiers.length === 0) return { context, evidence: [] }
     const anchorIds = [...new Set(frontiers.flatMap((frontier) => [
       frontier.frontierAnchorRef,
@@ -4151,12 +4475,14 @@ export class TurnOrchestrator {
     sourceUnitIds: readonly string[],
     readEvidence: readonly TurnReadEvidence[],
     createdAtMs: number,
-    mode: "full" | "local" = "full",
+    mode: "full" | "compact" | "local" = "full",
   ): Promise<string[]> {
     const governance = graphGovernanceArtifactSchema.parse(artifacts.graph_governance)
-    if (mode === "full") {
+    if (mode === "full" || mode === "compact") {
+      if (mode === "full") {
       emergencePlanningArtifactSchema.parse(artifacts.emergence_planning)
       emergenceReviewArtifactSchema.parse(artifacts.emergence_review)
+      }
       const dependencyAudit = dependencyAuditArtifactSchema.parse(artifacts.dependency_audit)
       assertSpacetimeGovernanceCoverage(dependencyAudit, governance, sourceUnitIds.length)
       const semantic = semanticReviewArtifactSchema.parse(artifacts.semantic_review)
@@ -4178,7 +4504,7 @@ export class TurnOrchestrator {
     const readableGraphIds = new Set(readEvidence
       .filter((evidence) => evidence.ownerKind === "node" || evidence.ownerKind === "link")
       .map((evidence) => evidence.ownerId))
-    const approvedAffectedFrontierRefs = mode === "full"
+    const approvedAffectedFrontierRefs = mode === "full" || mode === "compact"
       ? semanticReviewArtifactSchema.parse(artifacts.semantic_review).approvedAffectedFrontierRefs
       : []
     for (const state of readPriorFrontierStates(readEvidence, approvedAffectedFrontierRefs)) {
@@ -4686,7 +5012,8 @@ type TurnExecutionState = {
   budgetWindowUsage: PhaseUsage
   budget: ModelCallBudget
   startPhaseIndex: number
-  adaptiveGraphGovernance?: boolean
+  adaptiveGraphGovernance?: boolean | "compact"
+  compactCapacityRewritten?: boolean
   graphCapacityFeedback?: GraphCapacityFeedback
   queryDraftAuditRounds: number
   queryRevisionFeedback?: TurnPhaseInput["revisionFeedback"]
@@ -5573,6 +5900,53 @@ function synthesizePassedSettlementReview(sourceUnitCount: number): SettlementRe
     semanticCoverageComplete: true,
     spacetimeBindingsComplete: true,
     mutationSpacetimeSettlementsComplete: true,
+  }
+}
+
+function synthesizeCompactSettlementReview(
+  governance: GraphGovernanceArtifact,
+  review: ReturnType<typeof graphGovernanceReviewArtifactSchema.parse>,
+  sourceUnitCount: number,
+): SettlementReviewArtifact {
+  const expectedSourceIndexes = Array.from({ length: sourceUnitCount }, (_, index) => index)
+  const settledSourceUnitIndexes = [...new Set(governance.settlementRecords
+    .filter((record) => record.graphRefs.length > 0 && record.sourceUnitIndex < sourceUnitCount)
+    .map((record) => record.sourceUnitIndex))]
+    .sort((left, right) => left - right)
+  const settledSourceSet = new Set(settledSourceUnitIndexes)
+  const uncoveredSourceUnitIndexes = expectedSourceIndexes.filter((index) => !settledSourceSet.has(index))
+  const settledMutationIndexes = new Set(governance.mutationSpacetimeSettlements
+    .flatMap((settlement) => settlement.mutationIndexes))
+  const mutationSpacetimeSettlementsComplete = governance.mutations.every((_, index) => (
+    settledMutationIndexes.has(index)
+  ))
+  const spacetimeBindingsComplete = governance.mutations.length === 0
+    || (governance.sceneSpacetimeBindings.length > 0 && mutationSpacetimeSettlementsComplete)
+  const retrievalProjectionComplete = governance.mutations.length === 0
+    || (governance.retrievalProjections.length > 0 && review.graphStillDiscoverable)
+  const semanticCoverageComplete = review.recommendation !== "revise"
+    && review.continuityPreserved
+    && review.spacetimeContinuityPreserved
+    && review.temporalClaimAssessments.every((assessment) => assessment.verdict === "pass")
+  return {
+    settledSourceUnitIndexes,
+    uncoveredSourceUnitIndexes,
+    sourceReturnComplete: uncoveredSourceUnitIndexes.length === 0 && review.sourceReturnComplete,
+    retrievalProjectionComplete,
+    semanticCoverageComplete,
+    spacetimeBindingsComplete,
+    mutationSpacetimeSettlementsComplete,
+  }
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === "string") return error
+  try {
+    const serialized = JSON.stringify(error)
+    return typeof serialized === "string" ? serialized : "Unknown error"
+  } catch {
+    return "Unknown error"
   }
 }
 

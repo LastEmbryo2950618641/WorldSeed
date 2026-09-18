@@ -27,8 +27,7 @@ import { synopsisDiscussArtifactSchema } from "@worldseed/prompt-contracts"
 import { defaultProjectSettings } from "@worldseed/config"
 
 import {
-  ContextWindowManager,
-  estimateModelMessageTokens,
+  executeWithContextCompaction,
 } from "../context/index.js"
 import {
   assembleSynopsisPlaceholderDocument,
@@ -166,7 +165,6 @@ export type SynopsisConversationServiceDependencies = Readonly<{
 }>
 
 export class SynopsisConversationService {
-  private readonly contextWindow = new ContextWindowManager()
 
   public constructor(private readonly dependencies: SynopsisConversationServiceDependencies) {}
 
@@ -1471,6 +1469,7 @@ export class SynopsisConversationService {
         ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
       })]
     const sendTurnId = this.dependencies.createId()
+    let lastRequestInputTokens = await this.dependencies.conversation.loadDiscussContextInputTokens(input.projectId, input.sessionId)
     const contextId = this.dependencies.createId()
     let retrievalGaps: TurnRetrievalGap[] = []
     let remainingCalls = maxModelCalls
@@ -1596,34 +1595,12 @@ export class SynopsisConversationService {
         },
       })
       storedContext = [...await this.dependencies.conversation.listDiscussContextMessages(input.sessionId)]
-      const compaction = this.contextWindow.plan({
-        messages: storedContext,
-        currentTurnId: sendTurnId,
-        contextWindowTokens: input.model.info?.contextWindowTokens ?? 64_000,
-        triggerRatio: settings?.execution.contextCompactionThresholdRatio
-          ?? defaultProjectSettings.execution.contextCompactionThresholdRatio,
-        targetRatio: settings?.execution.contextCompressionTargetRatio
-          ?? defaultProjectSettings.execution.contextCompressionTargetRatio,
-        incomingTokenEstimate: estimateModelMessageTokens(input.userMessage),
-      })
-      if (compaction.blocked) {
-        throw new SynopsisInvalidStateError(
-          compaction.reason ?? "创作台会话链超过模型上下文窗口，请新开会话后再试。",
-        )
-      }
-      if (compaction.hiddenMessageIds.length > 0) {
-        await this.dependencies.conversation.hideDiscussContextMessages(
-          input.sessionId,
-          compaction.hiddenMessageIds,
-          this.dependencies.now(),
-        )
-      }
       const contextMessages = [
-        ...toVisibleDiscussContextMessages(compaction.visibleMessages),
+        ...toVisibleDiscussContextMessages(storedContext),
         ...(attempt > 0 || readEvidence.length > 0
           ? [{
               messageId: this.dependencies.createId(),
-              sequence: compaction.visibleMessages.length,
+              sequence: storedContext.length,
               role: "system" as const,
               kind: "system_rules" as const,
               content: [
@@ -1642,41 +1619,65 @@ export class SynopsisConversationService {
       synopsisConversationStreamHub.beginThinkingRound(input.projectId, thinkingRound, this.dependencies.now())
       let execution
       try {
-        execution = await input.model.execute(request, {
-          phasePrompt,
-          forceThinking: true,
-          contextChainId: input.sessionId,
-          onSchemaRepair: () => {
-            streamedContent = ""
-            synopsisConversationStreamHub.beginSchemaRepair(input.projectId, this.dependencies.now())
+        execution = await executeWithContextCompaction({
+          model: input.model,
+          request,
+          ...(lastRequestInputTokens === undefined ? {} : { lastRequestInputTokens }),
+          triggerRatio: settings?.execution.contextCompactionThresholdRatio
+            ?? defaultProjectSettings.execution.contextCompactionThresholdRatio,
+          targetRatio: settings?.execution.contextCompressionTargetRatio
+            ?? defaultProjectSettings.execution.contextCompressionTargetRatio,
+          onCompacted: async (event) => {
+            if (isSynopsisSendCancelled(input.projectId)) throw new SynopsisSendCancelledError()
+            await this.dependencies.conversation.hideDiscussContextMessages(input.sessionId, event.hiddenMessageIds, this.dependencies.now())
+            lastRequestInputTokens = undefined
+            // Bootstrap files may have existed only in the removed history.
+            const bootstrapEvidence = await this.bootstrapSynopsisEvidence({
+              projectId: input.projectId, workspaceRootRef: input.workspaceRootRef, catalog,
+              ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
+            })
+            readEvidence = [...bootstrapEvidence, ...readEvidence.filter((item) => !bootstrapEvidence.some((entry) => entry.ownerId === item.ownerId))]
+            request.input = { ...request.input as object, readEvidence }
+            request.committedReadIds = readEvidence.map((item) => item.readId)
+            runtimeLog("info", "synopsis-conversation", "context.compaction.applied", { projectId: input.projectId, sessionId: input.sessionId, ...event })
           },
-          onPartial: (partial) => {
-            const stamp = this.dependencies.now()
-            if (partial.reasoningDelta !== undefined) {
-              streamedReasoning += partial.reasoningDelta
-              if (streamedReasoning.trimStart().startsWith("{")) {
-                const display = normalizeThinkingDisplayText(streamedReasoning)
-                  ?? normalizeThinkingDisplayText(streamedContent)
-                if (display !== undefined) {
-                  synopsisConversationStreamHub.setThinking(input.projectId, display, stamp)
+          options: {
+            phasePrompt,
+            forceThinking: true,
+            contextChainId: input.sessionId,
+            onSchemaRepair: () => {
+              if (isSynopsisSendCancelled(input.projectId)) throw new SynopsisSendCancelledError()
+              streamedContent = ""
+              synopsisConversationStreamHub.beginSchemaRepair(input.projectId, this.dependencies.now())
+            },
+            onPartial: (partial) => {
+              const stamp = this.dependencies.now()
+              if (partial.reasoningDelta !== undefined) {
+                streamedReasoning += partial.reasoningDelta
+                if (streamedReasoning.trimStart().startsWith("{")) {
+                  const display = normalizeThinkingDisplayText(streamedReasoning)
+                    ?? normalizeThinkingDisplayText(streamedContent)
+                  if (display !== undefined) {
+                    synopsisConversationStreamHub.setThinking(input.projectId, display, stamp)
+                  }
+                } else {
+                  synopsisConversationStreamHub.appendThinking(input.projectId, partial.reasoningDelta, stamp)
                 }
-              } else {
-                synopsisConversationStreamHub.appendThinking(input.projectId, partial.reasoningDelta, stamp)
               }
-            }
-            if (partial.contentDelta !== undefined) {
-              streamedContent += partial.contentDelta
-              synopsisConversationStreamHub.appendContent(input.projectId, partial.contentDelta, stamp)
-              if (streamedReasoning.length === 0 || streamedReasoning.trimStart().startsWith("{")) {
-                const display = normalizeThinkingDisplayText(streamedReasoning)
-                  ?? normalizeThinkingDisplayText(streamedContent)
-                if (display !== undefined) {
-                  synopsisConversationStreamHub.setThinking(input.projectId, display, stamp)
+              if (partial.contentDelta !== undefined) {
+                streamedContent += partial.contentDelta
+                synopsisConversationStreamHub.appendContent(input.projectId, partial.contentDelta, stamp)
+                if (streamedReasoning.length === 0 || streamedReasoning.trimStart().startsWith("{")) {
+                  const display = normalizeThinkingDisplayText(streamedReasoning)
+                    ?? normalizeThinkingDisplayText(streamedContent)
+                  if (display !== undefined) {
+                    synopsisConversationStreamHub.setThinking(input.projectId, display, stamp)
+                  }
                 }
               }
-            }
+            },
+            contextMessages,
           },
-          contextMessages,
         })
       } catch (error) {
         if (isMissingSynopsisArtifactError(error) && missingArtifactRetries < 2 && remainingCalls > 1) {
@@ -1701,6 +1702,7 @@ export class SynopsisConversationService {
         }
         throw error
       }
+      lastRequestInputTokens = execution.usage.lastRequestInputTokens
       if (execution.contextExchange !== undefined) {
         await this.dependencies.conversation.appendDiscussContextMessages({
           sessionId: input.sessionId,

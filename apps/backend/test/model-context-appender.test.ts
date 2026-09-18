@@ -49,10 +49,35 @@ describe("ModelContextAppender", () => {
     expect(secondInput.workspaceCatalog).toBeUndefined()
     expect(secondInput.readEvidence).toEqual([evidence("evidence_2")])
     expect(secondInput.artifacts).toEqual({
-      interpret: { intent: "observe" },
       rule_assembly: { selectedWorkspacePaths: [] },
     })
     expect(secondDelta.committedReadIds).toEqual(["evidence_2"])
+  })
+
+  it("does not resend an unchanged artifact when a later phase consumes it", () => {
+    const appender = new ModelContextAppender()
+    const request = createRequest()
+    const first = createModelRequest([], { dependency_audit: { sceneContinuity: [] } })
+    const firstDelta = appender.createDelta(
+      { ...request, phase: "graph_structure_plan" },
+      first,
+      [systemMessage()],
+    )
+    const firstMessage = visibleMessage({
+      messageId: "00000000-0000-4000-8000-000000000014",
+      sequence: 1,
+      kind: "phase_request",
+      phase: "graph_structure_plan",
+      content: appender.formatDelta(firstDelta),
+    })
+
+    const later = appender.createDelta(
+      { ...request, phase: "graph_spacetime_settlement" },
+      first,
+      [systemMessage(), firstMessage],
+    ) as { input: Record<string, unknown> }
+
+    expect(later.input.artifacts).toBeUndefined()
   })
 
   it("omits unchanged artifacts within one phase and reappends changed artifacts", () => {

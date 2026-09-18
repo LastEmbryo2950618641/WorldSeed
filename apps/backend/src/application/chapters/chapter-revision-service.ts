@@ -86,6 +86,7 @@ export type ChapterRevisionServiceDependencies = Readonly<{
     sourceUnitIds: readonly string[]
     model: AIModelPort
     graphSyncTaskId: string
+    signal?: AbortSignal
   }>): Promise<void>
 }>
 
@@ -451,6 +452,7 @@ export class ChapterRevisionService {
     reviewId?: string
     note?: string
     model?: AIModelPort
+    signal?: AbortSignal
   }>): Promise<ChapterRevision> {
     const revision = await this.requireRevision(input.revisionTaskId)
     if (isFinalized(revision)) return toPublicRevision(revision)
@@ -474,6 +476,15 @@ export class ChapterRevisionService {
     if (input.mode === "direct" && !input.forced) {
       throw new RevisionConflictError("Direct submission must be recorded as a user-forced edit")
     }
+    const heading = revision.heading
+    const volumeFolderName = extractVolumeFolderNameFromPath(base.publishPath) ?? DEFAULT_VOLUME_FOLDER_NAME
+    const nextPublishPath = deriveChapterPublishPath(heading, volumeFolderName)
+    if (revision.decision !== "submit") {
+      const content = await this.dependencies.internalStore.readDocument(revision.contentRef)
+      await this.dependencies.workspace.validatePublishedChapterReplacement(
+        input.workspaceRootRef, base.publishPath, nextPublishPath, revision.baseContentDigest || base.digest, content,
+      )
+    }
     let withDecision = revision
     if (revision.decision !== "submit") {
       const reason = chapterRevisionDecisionReasonSchema.parse(input.forced ? "user_forced_edit" : "user_reviewed_edit")
@@ -493,13 +504,11 @@ export class ChapterRevisionService {
       withDecision = await this.dependencies.revisions.saveDecision(decision)
     }
     await this.ensureFinalization(withDecision)
-    const heading = revision.heading
-    const volumeFolderName = extractVolumeFolderNameFromPath(base.publishPath) ?? DEFAULT_VOLUME_FOLDER_NAME
     await this.commitContent(
       revision,
       input.workspaceRootRef,
       base.publishPath,
-      deriveChapterPublishPath(heading, volumeFolderName),
+      nextPublishPath,
       heading,
       base.digest,
     )
@@ -538,7 +547,12 @@ export class ChapterRevisionService {
           sourceUnitIds: sourceUnits.map((unit) => unit.id),
           model: input.model,
           graphSyncTaskId,
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
         })
+        const task = await this.dependencies.taskScopes.findTask(graphSyncTaskId)
+        if (task !== undefined && task.status !== "completed") {
+          throw new RevisionInvalidStateError("图同步尚未完成，请在图修订任务中重试")
+        }
         await this.dependencies.revisions.updateState({
           revisionTaskId: committedRevision.revisionTaskId,
           status: "completed",
@@ -620,7 +634,7 @@ export class ChapterRevisionService {
     heading: string,
     expectedBaseDigest: string,
   ): Promise<void> {
-    const existing = await this.dependencies.revisions.find(revision.revisionTaskId)
+    let existing = await this.dependencies.revisions.find(revision.revisionTaskId)
     if (existing === undefined) throw new RevisionNotFoundError(revision.revisionTaskId)
     if (existing.status === "graph_sync_pending" || existing.status === "graph_sync_running") return
     if (existing.graphSyncStatus === "failed") {
@@ -633,7 +647,14 @@ export class ChapterRevisionService {
       return
     }
     if (existing.status === "committing_content") {
-      await this.dependencies.commit.resetPending(revision.contentScopeId)
+      const scope = await this.dependencies.taskScopes.findScope(revision.contentScopeId)
+      if (scope?.visibility === "committed") {
+        existing = await this.dependencies.revisions.updateState({
+          revisionTaskId: revision.revisionTaskId, status: "content_committed", updatedAtMs: this.dependencies.now(),
+        })
+      } else {
+        await this.dependencies.commit.resetPending(revision.contentScopeId)
+      }
     }
     await this.dependencies.revisions.updateState({
       revisionTaskId: revision.revisionTaskId,

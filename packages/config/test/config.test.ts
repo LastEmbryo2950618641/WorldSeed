@@ -34,7 +34,7 @@ describe("current configuration", () => {
     })
     expect(defaultProjectSettings.execution).toMatchObject({
       maxModelCalls: 400,
-      contextCompactionThresholdRatio: 0.97,
+      contextCompactionThresholdRatio: 0.9,
       contextCompressionTargetRatio: 0.5,
       outputTokenLimitMode: "model",
       maxWallTimeMs: 7_200_000,

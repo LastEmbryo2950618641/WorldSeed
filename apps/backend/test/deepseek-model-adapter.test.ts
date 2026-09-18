@@ -7,6 +7,7 @@ import { defaultDeepSeekRuntimeConfig } from "@worldseed/config"
 import { PROTOCOL_VERSION, type PhaseRequestEnvelope, type PhaseResultEnvelope } from "@worldseed/contracts"
 import { APIConnectionError } from "openai"
 import { describe, expect, it } from "vitest"
+import { createGraphRevisionModel } from "../src/application/chapters/graph-revision-model.js"
 
 import {
   DeepSeekAiModelAdapter,
@@ -21,6 +22,28 @@ import {
 const promptRoot = fileURLToPath(new URL("../../../packages/prompt-contracts/", import.meta.url))
 
 describe("DeepSeekAiModelAdapter", () => {
+  it("resends visible evidence after removing historical phase exchanges from graph sync", async () => {
+    const evidence = modelEvidence("evidence_42", "Current graph evidence")
+    const request = createRequest({ committedReadIds: ["evidence_42"], input: { ...createRequest().input as object, workflow: "revision", readEvidence: [evidence] } })
+    const fake = await new FakeAiModelAdapter().execute(request)
+    let prompt = ""
+    const adapter = new DeepSeekAiModelAdapter(defaultDeepSeekRuntimeConfig,
+      { getSecret: () => Promise.resolve("test-key") }, new NodePromptResourceAdapter(promptRoot),
+      { complete: (input) => {
+        prompt = input.messages.map((message) => message.content).join("\n")
+        return Promise.resolve({ content: JSON.stringify(toModelResult(fake.result)) })
+      } },
+    )
+    await createGraphRevisionModel(adapter, () => undefined).execute(request, { contextMessages: [
+      { messageId: randomUUID(), sequence: 0, role: "system", kind: "system_rules", content: "Retained system rules" },
+      { messageId: randomUUID(), sequence: 1, role: "user", kind: "phase_request", taskId: "old-task", content: `Worldseed context delta JSON:\n${JSON.stringify({ input: { readEvidence: [evidence], userInput: "Historical request must not leak" } })}` },
+    ] })
+    expect(prompt).toContain("Retained system rules")
+    expect(prompt).toContain('"readId":"evidence_42"')
+    expect(prompt).toContain("Current graph evidence")
+    expect(prompt).not.toContain("Historical request must not leak")
+  })
+
   it("creates a runtime adapter from the model selected in the desktop UI", () => {
     const adapter = createModelFromSelection(promptRoot, {
       baseUrl: "https://api.deepseek.com",
@@ -2045,6 +2068,80 @@ describe("DeepSeekAiModelAdapter", () => {
 
     expect(execution.result.reason).toBe("完成")
     expect(execution.result.selfReview).toBe("检查完成")
+  })
+
+  it("recovers misplaced discussion self-review without consuming a model retry", async () => {
+    const request = createRequest({ phase: "synopsis_discuss" })
+    let calls = 0
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 0 },
+      { getSecret: () => Promise.resolve("test-key") }, new NodePromptResourceAdapter(promptRoot),
+      { complete: () => {
+        calls++
+        return Promise.resolve({ content: JSON.stringify({ outcome: "continue", artifact: { assistantMessage: "已更新细纲。" }, finalSelfReview: "已检查引用。", requestedReads: [], citedReadIds: [], unresolvedDependencies: [], reason: "完成", selfReview: "完成" }) })
+      } },
+    )
+    const result = await adapter.execute(request)
+    expect(result.result.artifact).toMatchObject({ finalSelfReview: "已检查引用。" })
+    const savedResponse = JSON.parse(result.contextExchange?.responseMessage.content ?? "null") as Record<string, unknown>
+    expect(savedResponse).not.toHaveProperty("finalSelfReview")
+    expect(calls).toBe(1)
+  })
+
+  it("reserves one bounded citation repair for discussion after unrelated format repairs", async () => {
+    const request = createRequest({ phase: "synopsis_discuss", committedReadIds: ["evidence_42"], input: {
+      ...createRequest().input as object, readEvidence: [modelEvidence("evidence_42", "Current evidence")],
+    } })
+    let calls = 0
+    let repair = ""
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 1 },
+      { getSecret: () => Promise.resolve("test-key") }, new NodePromptResourceAdapter(promptRoot),
+      { complete: (input) => {
+        calls++
+        repair = input.messages.at(-1)?.content ?? ""
+        return Promise.resolve({ content: calls === 1 ? '{"outcome":' : JSON.stringify({ outcome: "continue", artifact: { assistantMessage: "已更新细纲。", finalSelfReview: "已检查。" }, requestedReads: [], citedReadIds: calls === 2 ? ["read-2", "read-4", "read-6"] : ["evidence_42"], unresolvedDependencies: [], reason: "完成", selfReview: "完成" }), usage: { prompt_tokens: 10, completion_tokens: 5 } })
+      } },
+    )
+    const result = await adapter.execute(request)
+    expect(calls).toBe(3)
+    expect(result.usage).toMatchObject({ modelCalls: 3, inputTokens: 30, outputTokens: 15, lastRequestInputTokens: 10 })
+    expect(result.result.citedReadIds).toEqual(["evidence_42"])
+    expect(repair).toContain("evidence_42")
+    expect(repair).toContain("Never infer")
+  })
+
+  it("never accepts unknown discussion citations even after the dedicated repair", async () => {
+    let calls = 0
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 1 },
+      { getSecret: () => Promise.resolve("test-key") }, new NodePromptResourceAdapter(promptRoot),
+      { complete: () => {
+        calls++
+        return Promise.resolve({ content: JSON.stringify({ outcome: "continue", artifact: { assistantMessage: "已更新。", finalSelfReview: "已检查。" }, requestedReads: [], citedReadIds: ["read-999"], unresolvedDependencies: [], reason: "完成", selfReview: "完成" }) })
+      } },
+    )
+    await expect(adapter.execute(createRequest({ phase: "synopsis_discuss" }))).rejects.toThrow("not readable evidence")
+    expect(calls).toBe(3)
+  })
+
+  it.each(["calls", "deadline", "cancel"] as const)("does not start a citation repair after exhausting %s", async (limit) => {
+    const request = createRequest({ phase: "synopsis_discuss" })
+    const controller = new AbortController()
+    let calls = 0
+    const adapter = new DeepSeekAiModelAdapter(
+      { ...defaultDeepSeekRuntimeConfig, maxSchemaRepairAttempts: 0 },
+      { getSecret: () => Promise.resolve("test-key") }, new NodePromptResourceAdapter(promptRoot),
+      { complete: () => {
+        calls++
+        if (limit === "deadline") request.remainingBudget.deadlineAtMs = Date.now() - 1
+        if (limit === "cancel") controller.abort(new Error("Cancelled fixture"))
+        return Promise.resolve({ content: JSON.stringify({ outcome: "continue", artifact: { assistantMessage: "Updated.", finalSelfReview: "Reviewed." }, requestedReads: [], citedReadIds: ["read-999"], unresolvedDependencies: [], reason: "Done", selfReview: "Done" }) })
+      } },
+    )
+    if (limit === "calls") request.remainingBudget.remainingCalls = 1
+    await expect(adapter.execute(request, { signal: controller.signal })).rejects.toThrow(limit === "cancel" ? "Cancelled fixture" : "not readable evidence")
+    expect(calls).toBe(1)
   })
 
   it("repairs a response that cites a retrieval-gap request as evidence", async () => {

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react"
 import { Activity, AlertCircle, Check, Circle, GitBranch, History, Network, Orbit, X } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { aiPhaseValues, type HistoryOverview, type ProjectSettings, type ResettableRuntimeMetricId } from "@worldseed/contracts"
+import { aiPhaseValues, type ChapterReviewRevisionPayload, type HistoryOverview, type ProjectSettings, type ResettableRuntimeMetricId } from "@worldseed/contracts"
 
 import type { GraphSlice, OpenProject, PhaseRunSnapshot, TaskSnapshot } from "../../api/client.js"
 import type { SynopsisConversationStreamSnapshot } from "@worldseed/contracts"
@@ -10,11 +10,13 @@ import { UiTooltip, uiTooltipRich } from "../../components/UiTooltip.js"
 import { useWorkbenchStore, type RightTab } from "../../state/workbench-store.js"
 import { WorldGraph } from "./WorldGraph.js"
 import { HistoryPanel } from "./HistoryPanel.js"
+import { GraphRevisionTasksPanel } from "./GraphRevisionTasksPanel.js"
 import { RuntimeMonitor, TaskCheckpointDialog } from "./TaskCheckpointPrototype.js"
 
 type Props = Readonly<{
   task: TaskSnapshot | undefined
   project?: OpenProject | undefined
+  revisionModel?: ChapterReviewRevisionPayload["model"]
   graphSlice: GraphSlice | undefined
   graphSettings?: ProjectSettings["graph"] | undefined
   historyRetentionLimit?: number | null | undefined
@@ -84,6 +86,7 @@ const visibleTopLevelPhases = aiPhaseValues.filter((phase) => (
 export function RightRail({
   task,
   project,
+  revisionModel,
   graphSlice,
   graphSettings,
   historyRetentionLimit = null,
@@ -136,8 +139,10 @@ export function RightRail({
       <Tab id="graph" tab={tab} onChange={setTab} icon={<Network size={15} />} label="世界图" />
       <Tab id="evolution" tab={tab} onChange={setTab} icon={<Orbit size={15} />} label="自洽演化" />
       <Tab id="history" tab={tab} onChange={setTab} icon={<History size={15} />} label="历史" />
+      <Tab id="graph-revisions" tab={tab} onChange={setTab} icon={<GitBranch size={15} />} label="图修订任务" />
     </div>
     <div className="right-content">
+      {tab === "graph-revisions" ? <GraphRevisionTasksPanel key={project?.projectId} project={project} model={revisionModel} onChanged={onRefreshWorkspace} /> : null}
       {tab === "process" ? <ProcessPanel
         task={task}
         onResetMetrics={onResetTaskMetrics}
@@ -176,8 +181,8 @@ export function RightRail({
     onResume={onResumeTask ?? (() => Promise.reject(new Error("恢复接口尚未连接")))}
     onResetMetrics={onResetTaskMetrics ?? (() => Promise.reject(new Error("指标重置接口尚未连接")))}
     onRollbackRound={onReturnPreviousRound ?? (() => Promise.reject(new Error("回退本轮接口尚未连接")))}
-    onRefreshTask={onRefreshTask}
-    onRefreshWorkspace={onRefreshWorkspace}
+    {...(onRefreshTask === undefined ? {} : { onRefreshTask })}
+    {...(onRefreshWorkspace === undefined ? {} : { onRefreshWorkspace })}
   /> : null}</>
 }
 

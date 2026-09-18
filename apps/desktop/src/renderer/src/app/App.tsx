@@ -2119,6 +2119,7 @@ export function App(): React.JSX.Element {
                       onOpenFile={(path) => { void openFile(path); }}
                     />}
                 defaultPanel={<RightRail
+          revisionModel={activeModelProfile === undefined ? undefined : modelSelection(activeModelProfile)}
           task={task}
                   project={project}
           graphSlice={graphSlice}

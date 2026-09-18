@@ -160,7 +160,7 @@ export const defaultProjectSettings = Object.freeze(projectSettingsSchema.parse(
   version: 2,
   execution: {
     maxModelCalls: defaultTurnExecutionProfile.maxTurnModelCalls,
-    contextCompactionThresholdRatio: 0.97,
+    contextCompactionThresholdRatio: 0.9,
     contextCompressionTargetRatio: 0.5,
     outputTokenLimitMode: "model",
     maxWallTimeMs: defaultTurnExecutionProfile.maxTurnWallTimeMs,

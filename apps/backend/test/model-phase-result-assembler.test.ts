@@ -1,7 +1,36 @@
 import { describe, expect, it } from "vitest"
 import type { PhaseRequestEnvelope } from "@worldseed/contracts"
 
-import { assembleModelPhaseResult } from "../src/infrastructure/models/deepseek/model-phase-result-assembler.js"
+import { assembleModelPhaseResult, parseModelPhaseResult } from "../src/infrastructure/models/deepseek/model-phase-result-assembler.js"
+
+describe("discussion result normalization", () => {
+  const result = { outcome: "continue", artifact: { assistantMessage: "Updated." }, finalSelfReview: "Reviewed.",
+    requestedReads: [], citedReadIds: [], unresolvedDependencies: [], reason: "Done.", selfReview: "Done." }
+  it("accepts identical duplicated self-review without mutating provider data", () => {
+    const value = { ...result, artifact: { ...result.artifact, finalSelfReview: result.finalSelfReview } }
+    const parsed = parseModelPhaseResult(value, "synopsis_discuss")
+    expect(parsed).not.toHaveProperty("finalSelfReview")
+    expect(parsed.artifact).toMatchObject({ finalSelfReview: "Reviewed." })
+    expect(value).toHaveProperty("finalSelfReview", "Reviewed.")
+  })
+  it("still rejects conflicting self-review, other unknown fields, and misplaced fields in other phases", () => {
+    expect(() => parseModelPhaseResult({ ...result, artifact: { ...result.artifact, finalSelfReview: "Conflicting." } }, "synopsis_discuss")).toThrow()
+    expect(() => parseModelPhaseResult({ ...result, unknownField: "Unexpected" }, "synopsis_discuss")).toThrow()
+    expect(() => parseModelPhaseResult(result, "interpret")).toThrow()
+  })
+})
+
+describe("graph governance result normalization", () => {
+  const result = { outcome: "continue", artifact: {}, executionMode: "local_governance",
+    requestedReads: [], citedReadIds: [], unresolvedDependencies: [], reason: "Done", selfReview: "Done" }
+  it("moves a misplaced mode into the graph artifact", () => {
+    expect(parseModelPhaseResult(result, "graph_governance").artifact).toEqual({ executionMode: "local_governance" })
+  })
+  it("does not guess between conflicting graph execution modes", () => {
+    expect(() => parseModelPhaseResult({ ...result, artifact: { executionMode: "full_governance" } }, "graph_governance")).toThrow()
+    expect(() => parseModelPhaseResult(result, "interpret")).toThrow()
+  })
+})
 
 describe("assembleModelPhaseResult", () => {
   it("normalizes a visible evidence alias to its canonical read ID", () => {

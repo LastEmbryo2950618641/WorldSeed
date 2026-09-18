@@ -22,6 +22,36 @@ export type ChapterRevisionStatus = z.infer<typeof chapterRevisionStatusSchema>
 export const chapterGraphSyncStatusSchema = z.enum(["not_started", "pending", "running", "completed", "failed"])
 export type ChapterGraphSyncStatus = z.infer<typeof chapterGraphSyncStatusSchema>
 
+export type GraphRevisionModelActivity = Readonly<{
+  phase: string
+  stage: "waiting" | "thinking" | "responding" | "repairing"
+  attempt: number
+  startedAtMs: number
+  lastActivityAtMs: number
+  reasoningCharacters: number
+  contentCharacters: number
+}>
+
+export type GraphRevisionTask = Readonly<{
+  revisionTaskId: string
+  chapterId: string
+  heading: string
+  graphSyncTaskId?: string
+  status: string
+  blocksTurn: boolean
+  canCancel: boolean
+  canRetry: boolean
+  error?: string
+  updatedAtMs: number
+  activity?: GraphRevisionModelActivity
+  progress: Readonly<{
+    completed: number
+    total: number | null
+    phase?: string
+    phases: readonly Readonly<{ phase: string; status: string; attempt: number }>[]
+  }>
+}>
+
 export const chapterRevisionFinalizationStatusSchema = z.enum([
   "prepared",
   "content_committed",
@@ -207,4 +237,3 @@ export const revisionDraftVersionListResultSchema = z.object({
   versions: z.array(revisionDraftVersionSchema),
 })
 export type RevisionDraftVersionListResult = z.infer<typeof revisionDraftVersionListResultSchema>
-

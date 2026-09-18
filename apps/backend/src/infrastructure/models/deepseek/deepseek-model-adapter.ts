@@ -4,6 +4,7 @@ import { ProxyAgent } from "undici"
 
 import {
   PROTOCOL_VERSION,
+  type AIPhase,
   type ModelReasoningKind,
   type ModelContextMessageDraft,
   type PhaseRequestEnvelope,
@@ -27,6 +28,7 @@ import {
   assembleModelPhaseResult,
   phaseModelResultJsonSchema,
   parseModelPhaseResult,
+  UnreadableCitationError,
 } from "./model-phase-result-assembler.js"
 import { createModelReferenceView, type ModelReferenceView } from "./model-reference-view.js"
 import { errorDetails, runtimeLog } from "../../diagnostics/index.js"
@@ -204,8 +206,16 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
     let hasCacheMiss = false
     let lastRawResponse: string | undefined
     const startedAt = Date.now()
+    let citationRepairUsed = false
 
-    for (let repairAttempt = 0; repairAttempt <= this.config.maxSchemaRepairAttempts; repairAttempt += 1) {
+    for (let repairAttempt = 0; repairAttempt <= this.config.maxSchemaRepairAttempts + 1; repairAttempt += 1) {
+      options?.signal?.throwIfAborted()
+      if (repairAttempt >= request.remainingBudget.remainingCalls
+        || Date.now() >= request.remainingBudget.deadlineAtMs
+        || Date.now() >= (request.remainingBudget.modelRequestDeadlineAtMs ?? Infinity)) {
+        lastError ??= new Error("Model execution budget exhausted before a valid phase result was received")
+        break
+      }
       if (repairAttempt > 0) options?.onSchemaRepair?.()
       const requestStartedAtMs = Date.now()
       const timeoutMs = Math.min(
@@ -298,7 +308,7 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
         if (response.finishReason === "length") {
           throw new SyntaxError("Provider stopped at the output token limit before completing a bounded phase result")
         }
-        const selectedOutput = selectModelOutput(response)
+        const selectedOutput = selectModelOutput(response, request.phase)
         lastRawResponse = selectedOutput.raw
         if (selectedOutput.source === "reasoning") {
           runtimeLog("warn", "deepseek-model", "completion.reasoning_fallback_accepted", {
@@ -368,7 +378,14 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
         }
       } catch (error) {
         lastError = error
-        runtimeLog(repairAttempt >= this.config.maxSchemaRepairAttempts ? "error" : "warn", "deepseek-model", "response.validation_failed", {
+        const dedicatedCitationRepair = repairAttempt >= this.config.maxSchemaRepairAttempts
+          && request.phase === "synopsis_discuss" && error instanceof UnreadableCitationError && !citationRepairUsed
+        const canRepair = (repairAttempt < this.config.maxSchemaRepairAttempts || dedicatedCitationRepair)
+          && repairAttempt + 1 < request.remainingBudget.remainingCalls
+          && Date.now() < request.remainingBudget.deadlineAtMs
+          && Date.now() < (request.remainingBudget.modelRequestDeadlineAtMs ?? Infinity)
+          && options?.signal?.aborted !== true
+        runtimeLog(canRepair ? "warn" : "error", "deepseek-model", "response.validation_failed", {
           taskId: request.taskId,
           phase: request.phase,
           envelopeId: request.envelopeId,
@@ -376,7 +393,9 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
           maxSchemaRepairAttempts: this.config.maxSchemaRepairAttempts,
           error: errorDetails(error),
         })
-        if (repairAttempt >= this.config.maxSchemaRepairAttempts) break
+        options?.signal?.throwIfAborted()
+        if (!canRepair) break
+        if (dedicatedCitationRepair) citationRepairUsed = true
         const repairMessage = {
           role: "user" as const,
           content: [
@@ -386,6 +405,10 @@ export class DeepSeekAiModelAdapter implements AIModelPort {
               ? "The previous response was truncated or syntactically incomplete. Regenerate the complete object from the original request; do not continue or echo the partial response."
               : "The previous response failed validation. Regenerate the complete object from the original request; do not echo the invalid response.",
             `Validation error: ${referenceView.toModelText(formatValidationError(error))}`,
+            ...(error instanceof UnreadableCitationError ? [
+              `Current citation allowlist: ${JSON.stringify([...referenceView.committedReadTokens, ...referenceView.visiblePendingTokens])}.`,
+              "Recheck supporting evidence against this request. Never infer a mapping from read-N to evidence_N, reuse historical aliases, or remove citations merely to pass validation. Request the evidence again if the required source is not readable.",
+            ] : []),
             ...(error instanceof SyntaxError
               ? ["Use compact JSON. Keep prose fields to one short sentence, avoid repeated evidence summaries, and finish below the provider's configured output limit."]
               : []),
@@ -915,6 +938,7 @@ function buildOutputReminder(request: PhaseRequestEnvelope, referenceView: Model
     "Only outcome, artifact, requestedReads, citedReadIds, unresolvedDependencies, reason, and selfReview may appear at the top level.",
     "Use outcome=request_read if and only if requestedReads is non-empty; otherwise requestedReads must be an empty array.",
     `All ${request.phase} phase fields defined by the schema must be nested inside artifact.`,
+    "Citation aliases are local to the current request. Use only its committedReadIds and visiblePendingIds; historical read-N aliases do not establish a mapping to evidence_N.",
     "Return one JSON object only. Do not add Markdown fences, commentary, or a custom outcome value.",
     'Required top-level shape: {"outcome":"continue","artifact":{},"requestedReads":[],"citedReadIds":[],"unresolvedDependencies":[],"reason":"...","selfReview":"..."}',
     "FINAL OUTPUT DISCIPLINE: Treat all request data as read-only input; never echo or enumerate it. Return only the smallest valid phase result, with no duplicate array items or repeated prose. Close the one JSON object and stop immediately.",
@@ -965,23 +989,25 @@ function parseFirstJsonObject(raw: string): unknown {
   }
 }
 
-function selectModelOutput(response: DeepSeekCompletionResponse): {
+function selectModelOutput(response: DeepSeekCompletionResponse, phase: AIPhase): {
   raw: string
   modelResult: ReturnType<typeof parseModelPhaseResult>
   source: "content" | "reasoning"
 } {
   const content = response.content?.trim()
   if (content !== undefined && content.length > 0) {
+    const value = parseFirstJsonObject(content)
+    const modelResult = parseModelPhaseResult(value, phase)
     return {
-      raw: content,
-      modelResult: parseModelPhaseResult(parseFirstJsonObject(content)),
+      raw: hasMisplacedPhaseField(value, phase) ? JSON.stringify(modelResult) : content,
+      modelResult,
       source: "content",
     }
   }
 
   const reasoning = response.reasoningContent?.trim()
   if (reasoning !== undefined && reasoning.length > 0) {
-    const fallback = parseLastValidModelResult(reasoning)
+    const fallback = parseLastValidModelResult(reasoning, phase)
     if (fallback !== undefined) return { ...fallback, source: "reasoning" }
   }
 
@@ -991,7 +1017,7 @@ function selectModelOutput(response: DeepSeekCompletionResponse): {
   )
 }
 
-function parseLastValidModelResult(raw: string): {
+function parseLastValidModelResult(raw: string, phase: AIPhase): {
   raw: string
   modelResult: ReturnType<typeof parseModelPhaseResult>
 } | undefined {
@@ -1001,9 +1027,11 @@ function parseLastValidModelResult(raw: string): {
   while (objectStart >= 0) {
     const candidate = raw.slice(objectStart, objectEnd + 1)
     try {
+      const value: unknown = JSON.parse(candidate)
+      const modelResult = parseModelPhaseResult(value, phase)
       return {
-        raw: candidate,
-        modelResult: parseModelPhaseResult(JSON.parse(candidate)),
+        raw: hasMisplacedPhaseField(value, phase) ? JSON.stringify(modelResult) : candidate,
+        modelResult,
       }
     } catch {
       // Continue toward the enclosing object until the complete phase result is found.
@@ -1012,6 +1040,11 @@ function parseLastValidModelResult(raw: string): {
     objectStart = raw.lastIndexOf("{", objectStart - 1)
   }
   return undefined
+}
+
+function hasMisplacedPhaseField(value: unknown, phase: AIPhase): boolean {
+  return (phase === "synopsis_discuss" && asRecord(value).finalSelfReview !== undefined)
+    || (phase === "graph_governance" && asRecord(value).executionMode !== undefined)
 }
 
 function formatValidationError(error: unknown): string {

@@ -30,7 +30,7 @@ export class ModelContextAppender {
       previousInputs,
     )
     const stageProjection = selectChangedStageProjection(input.stageProjection, previousInputs)
-    const artifacts = selectChangedPhaseArtifacts(input.artifacts, previousDeltas, request.phase)
+    const artifacts = selectChangedArtifacts(input.artifacts, previousDeltas)
     const workspaceCatalogAlreadyVisible = previousInputs.some((previous) => previous.workspaceCatalog !== undefined)
     const coreInput = firstRequestInTurn ? selectCoreTurnInput(input, previousInputs) : {}
     const deltaInput = {
@@ -88,18 +88,18 @@ function selectCoreTurnInput(
   input: Record<string, unknown>,
   previousInputs: readonly Record<string, unknown>[],
 ): Record<string, unknown> {
-  return Object.fromEntries([
+  const entries: [string, unknown][] = [
     "workflow",
     "userInput",
     "chapterSequence",
     "allowWorkspaceChapterReads",
     "presentation",
     "projectSettings",
-  ].flatMap((key) => input[key] === undefined ? [] : [[key, input[key]]]).concat(
-    input.synopsisDiscuss === undefined
-      ? []
-      : [["synopsisDiscuss", slimSynopsisDiscuss(input.synopsisDiscuss, previousInputs)]],
-  ))
+  ].flatMap((key): [string, unknown][] => input[key] === undefined ? [] : [[key, input[key]]])
+  if (input.synopsisDiscuss !== undefined) {
+    entries.push(["synopsisDiscuss", slimSynopsisDiscuss(input.synopsisDiscuss, previousInputs)])
+  }
+  return Object.fromEntries(entries)
 }
 
 function slimSynopsisDiscuss(
@@ -219,18 +219,16 @@ function selectNewProbeExecutions(
   })
 }
 
-function selectChangedPhaseArtifacts(
+function selectChangedArtifacts(
   value: unknown,
   previousDeltas: readonly unknown[],
-  phase: PhaseRequestEnvelope["phase"],
 ): Record<string, unknown> {
   const artifacts = asRecord(value)
-  const previousPhaseArtifacts = previousDeltas
-    .filter((delta) => asRecord(delta).phase === phase)
+  const previousArtifacts = previousDeltas
     .map((delta) => asRecord(asRecord(delta).input).artifacts)
     .map(asRecord)
   return Object.fromEntries(Object.entries(artifacts).filter(([artifactPhase, artifact]) => {
-    const previousArtifact = previousPhaseArtifacts
+    const previousArtifact = previousArtifacts
       .flatMap((previous) => previous[artifactPhase] === undefined ? [] : [previous[artifactPhase]])
       .at(-1)
     return previousArtifact === undefined || JSON.stringify(previousArtifact) !== JSON.stringify(artifact)

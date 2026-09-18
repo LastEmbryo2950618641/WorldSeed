@@ -1,6 +1,6 @@
 import { create } from "zustand"
 
-export type RightTab = "process" | "graph" | "evolution" | "history"
+export type RightTab = "process" | "graph" | "evolution" | "history" | "graph-revisions"
 
 export type ProjectSettingsSection =
   | "execution"

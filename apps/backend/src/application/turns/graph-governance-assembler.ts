@@ -72,6 +72,73 @@ export function replayGraphCapacityRewrites(
   )
 }
 
+export function projectGraphStructurePlanFromGovernance(
+  governanceInput: GraphGovernanceArtifact,
+): GraphStructurePlanArtifact {
+  const governance = graphGovernanceArtifactSchema.parse(governanceInput)
+  const proposalRefs = governance.mutations.map((_, index) => mutationProposalRef(index))
+  const decisionRecords = governance.decisionRecords.map((decision) => ({
+    decisionKind: decision.decisionKind,
+    proposalRefs: uniqueProposalRefs(decision.mutationIndexes.map(mutationProposalRef)),
+    reason: decision.reason,
+    payload: decision.payload,
+    selfReview: decision.selfReview,
+  }))
+  const decidedProposalRefs = new Set(decisionRecords.flatMap((decision) => decision.proposalRefs))
+  governance.mutations.forEach((mutation, index) => {
+    const proposalRef = mutationProposalRef(index)
+    if (decidedProposalRefs.has(proposalRef)) return
+    decisionRecords.push({
+      decisionKind: "adaptive_graph_governance_projection",
+      proposalRefs: [proposalRef],
+      reason: "Projected from the adaptive graph governance candidate for compact staged settlement",
+      payload: { operation: mutation.operation },
+      selfReview: "The projected decision preserves the adaptive governance candidate without inventing a new mutation",
+    })
+  })
+  return graphStructurePlanArtifactSchema.parse({
+    proposals: governance.mutations.map((mutation, index) => ({
+      proposalRef: proposalRefs[index],
+      mutation,
+      reason: "Projected from the adaptive graph governance candidate",
+      selfReview: "The proposal preserves the candidate operation and target",
+    })),
+    affectedFrontierRefs: governance.affectedFrontierRefs,
+    archiveOutletRefs: governance.archiveOutletRefs,
+    decisionRecords,
+  })
+}
+
+export function projectGraphRetrievalDesignFromGovernance(
+  governanceInput: GraphGovernanceArtifact,
+  structure: GraphStructurePlanArtifact,
+): GraphRetrievalDesignArtifact {
+  const governance = graphGovernanceArtifactSchema.parse(governanceInput)
+  graphStructurePlanArtifactSchema.parse(structure)
+  return graphRetrievalDesignArtifactSchema.parse({
+    projections: governance.retrievalProjections.map((projection) => ({
+      ...(projection.ownerMutationIndex === undefined
+        ? {}
+        : { ownerProposalRef: mutationProposalRef(projection.ownerMutationIndex) }),
+      ...(projection.ownerRef === undefined ? {} : { ownerRef: projection.ownerRef }),
+      exactKeys: projection.exactKeys,
+      semanticText: projection.semanticText,
+    })),
+    sourceSettlements: governance.settlementRecords.map((record) => ({
+      sourceUnitIndex: record.sourceUnitIndex,
+      graphRefs: record.graphRefs.map((reference) => ({
+        targetKind: reference.targetKind,
+        targetRef: reference.targetRef,
+        ...(reference.mutationIndex === undefined
+          ? {}
+          : { proposalRef: mutationProposalRef(reference.mutationIndex) }),
+      })),
+      reason: record.reason,
+      status: record.status,
+    })),
+  })
+}
+
 export function assembleGraphGovernanceArtifact(input: Readonly<{
   structure: GraphStructurePlanArtifact
   spacetime: GraphSpacetimeSettlementArtifact
@@ -205,6 +272,14 @@ function inferExistingOwnerKind(ownerRef: string): "node" | "link" {
   if (ownerRef.startsWith("node_") || ownerRef.startsWith("node-")) return "node"
   if (ownerRef.startsWith("link_") || ownerRef.startsWith("link-")) return "link"
   throw new Error(`Existing retrieval projection owner must be a node or link reference: ${ownerRef}`)
+}
+
+function mutationProposalRef(index: number): string {
+  return `proposal:mutation:${String(index + 1)}`
+}
+
+function uniqueProposalRefs(proposalRefs: readonly string[]): string[] {
+  return [...new Set(proposalRefs)]
 }
 
 function uniqueGraphRefs<T extends { targetKind: "node" | "link"; targetRef: string }>(references: readonly T[]): T[] {

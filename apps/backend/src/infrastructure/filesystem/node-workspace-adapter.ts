@@ -394,6 +394,33 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     expectedDigest: string,
     content: string,
   ): Promise<void> {
+    const { currentPath, nextPath, currentContent, nextContent } = await this.inspectChapterReplacement(
+      workspaceRootRef, currentRelativePath, nextRelativePath, expectedDigest, content,
+    )
+    if (nextContent !== content) {
+      await mkdir(resolve(nextPath, ".."), { recursive: true })
+      await writeFile(nextPath, content, { encoding: "utf8" })
+    }
+    if (currentPath !== nextPath && currentContent !== undefined) await unlink(currentPath)
+  }
+
+  public async validatePublishedChapterReplacement(
+    workspaceRootRef: string,
+    currentRelativePath: string,
+    nextRelativePath: string,
+    expectedDigest: string,
+    content: string,
+  ): Promise<void> {
+    await this.inspectChapterReplacement(workspaceRootRef, currentRelativePath, nextRelativePath, expectedDigest, content)
+  }
+
+  private async inspectChapterReplacement(
+    workspaceRootRef: string,
+    currentRelativePath: string,
+    nextRelativePath: string,
+    expectedDigest: string,
+    content: string,
+  ) {
     const root = await realpath(resolve(workspaceRootRef))
     const currentNormalized = assertWorkspaceMutationAllowed(currentRelativePath, "file", "chapter_publisher")
     const nextNormalized = assertWorkspaceMutationAllowed(nextRelativePath, "file", "chapter_publisher")
@@ -418,17 +445,15 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     if (currentContent !== undefined && digest(currentContent) !== expectedDigest && currentContent !== content) {
       throw new Error(`Published chapter changed outside the revision workflow: ${currentNormalized}`)
     }
-    if (currentPath !== nextPath && nextContent !== undefined && nextContent !== content) {
+    const baseMovedToTarget = currentContent === undefined && nextContent !== undefined
+      && digest(nextContent) === expectedDigest
+    if (currentPath !== nextPath && nextContent !== undefined && nextContent !== content && !baseMovedToTarget) {
       throw new Error(`Chapter title conflicts with an existing file: ${nextNormalized}`)
     }
     if (currentContent === undefined && nextContent === undefined) {
       throw new Error(`Published chapter is missing: ${currentNormalized}`)
     }
-    if (nextContent !== content) {
-      await mkdir(resolve(nextPath, ".."), { recursive: true })
-      await writeFile(nextPath, content, { encoding: "utf8" })
-    }
-    if (currentPath !== nextPath && currentContent !== undefined) await unlink(currentPath)
+    return { currentPath, nextPath, currentContent, nextContent }
   }
 
   public async importMarkdownFiles(

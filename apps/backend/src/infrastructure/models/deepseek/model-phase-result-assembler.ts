@@ -58,8 +58,27 @@ function stripSchemaMetadata(value: unknown): unknown {
   )
 }
 
-export function parseModelPhaseResult(value: unknown): ModelPhaseResult {
+export function parseModelPhaseResult(value: unknown, phase?: AIPhase): ModelPhaseResult {
+  const field = phase === "synopsis_discuss" ? "finalSelfReview" : phase === "graph_governance" ? "executionMode" : undefined
+  if (field !== undefined) {
+    const result = asRecord(value)
+    const artifact = asRecord(result.artifact)
+    if (typeof result[field] === "string"
+      && result.artifact !== null && typeof result.artifact === "object" && !Array.isArray(result.artifact)
+      && (artifact[field] === undefined || artifact[field] === result[field])) {
+      const rest = { ...result }
+      delete rest[field]
+      value = { ...rest, artifact: { ...artifact, [field]: result[field] } }
+    }
+  }
   return modelPhaseResultSchema.parse(value)
+}
+
+export class UnreadableCitationError extends Error {
+  public constructor(invalidIds: readonly string[]) {
+    super(`citedReadIds contains IDs that are not readable evidence: ${invalidIds.join(", ")}`)
+    this.name = "UnreadableCitationError"
+  }
 }
 
 export function assembleModelPhaseResult(
@@ -530,7 +549,7 @@ function assertCitationsAreReadable(citedReadIds: readonly string[], request: Ph
   const readableIds = new Set([...request.committedReadIds, ...request.visiblePendingIds])
   const invalidIds = citedReadIds.filter((readId) => !readableIds.has(readId))
   if (invalidIds.length > 0) {
-    throw new Error(`citedReadIds contains IDs that are not readable evidence: ${invalidIds.join(", ")}`)
+    throw new UnreadableCitationError(invalidIds)
   }
 }
 

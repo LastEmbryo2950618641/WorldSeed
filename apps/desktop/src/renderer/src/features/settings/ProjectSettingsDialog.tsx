@@ -281,7 +281,7 @@ function ExecutionSettings({ value, creationDesk, onChange, onDivergenceModeChan
       </div>
     </div>
     <NumberSetting label="最大模型调用次数" description="包含阶段调用和业务 Schema 修复调用" value={value.maxModelCalls} min={1} max={400} onChange={(next) => { onChange("maxModelCalls", next); }} />
-    <NumberSetting label="主动压缩阈值" description="按当前模型 Profile 的最大上下文容量计算，达到该比例时开始机械压缩" value={Math.round(value.contextCompactionThresholdRatio * 100)} min={50} max={99} suffix="%" onChange={(next) => { onChange("contextCompactionThresholdRatio", next / 100); }} />
+    <NumberSetting label="主动压缩阈值" description="以模型返回的最近一次真实输入 Token 用量判断，默认 90%；上下文超限时自动压缩并重试" value={Math.round(value.contextCompactionThresholdRatio * 100)} min={50} max={99} suffix="%" onChange={(next) => { onChange("contextCompactionThresholdRatio", next / 100); }} />
     <NumberSetting label="压缩目标" description="触发压缩后，将当前可见上下文降到模型容量的该比例以内" value={Math.round(value.contextCompressionTargetRatio * 100)} min={10} max={90} suffix="%" onChange={(next) => { onChange("contextCompressionTargetRatio", next / 100); }} />
     <div className="settings-field-row">
       <span><strong>输出 Token 策略</strong><small>不限制整轮累计输出；正文按字数计算，控制阶段使用结构化护栏</small></span>

@@ -297,6 +297,7 @@ export interface TurnPersistencePort {
     contentDigest: string
   }> | undefined>
   listModelContextMessages(chainId: string): Promise<readonly ModelContextMessage[]>
+  readLatestContextInputTokens?(chainId: string): Promise<number | undefined>
   listVisibleModelContextEvidence(chainId: string): Promise<readonly TurnReadEvidence[]>
   hideModelContextMessages(chainId: string, messageIds: readonly string[], hiddenAtMs: number): Promise<void>
   createContext(input: CreateTurnContextRecord): Promise<void>

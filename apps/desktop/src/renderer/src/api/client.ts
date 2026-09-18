@@ -729,6 +729,8 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
       return [structuredClone(demoChapter)]
     case "chapter.read":
       return { ...structuredClone(demoChapter), content: demoChapterContent, body: demoChapterContent.replace(/^#\s+[^\n]+\n*/u, "").trim() }
+    case "chapter.graphRevision.list":
+      return []
     case "chapter.findActiveRevision":
       return demoChapterRevision === undefined ? undefined : structuredClone(demoChapterRevision)
     case "chapter.readRevision":

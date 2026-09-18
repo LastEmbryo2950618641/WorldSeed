@@ -84,7 +84,9 @@ export function buildGraphGovernanceReviewProjection(
     archiveOutletRefs: structure.archiveOutletRefs,
     temporalClaims: dependency.temporalClaims,
     temporalClaimSettlements: spacetime.temporalClaimSettlements,
-    verificationProbeExecutions: input.verificationProbeExecutions,
+    // Probe executions are carried as their own incremental context field. Keeping
+    // them out of the stable projection avoids resending the complete projection.
+    verificationProbeExecutions: [],
     mechanicalChecks: {
       capacitySatisfied: true,
       sourceReturnComplete: uncoveredSourceUnitIndexes.length === 0,
