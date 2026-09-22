@@ -1,0 +1,175 @@
+name: Release Windows
+
+# Version stays in package.json until you intentionally bump it.
+# Day-to-day builds: Actions → Release Windows → Run workflow (no version input).
+# Each run stamps a new buildNumber (GITHUB_RUN_NUMBER) and refreshes the same
+# v{version} GitHub Release + latest.json. Clients detect updates via buildNumber.
+# Optional: push tag v*.*.* only when you intentionally cut a new version.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional version override (e.g. 0.1.1). Leave empty to use apps/desktop/package.json."
+        required: false
+        type: string
+      prerelease:
+        description: "Mark GitHub Release as prerelease (not used by /releases/latest)"
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-windows-${{ github.event.inputs.version || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    # Pin to 2022: windows-latest is currently win25/VS2026, and node-gyp
+    # (used by electron-rebuild for better-sqlite3) does not recognize VS 18 yet.
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Enable Corepack / pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.9.0 --activate
+          pnpm --version
+
+      - name: Resolve release version + build number
+        id: version
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version }}".Trim()
+          if ([string]::IsNullOrWhiteSpace($version) -and $env:GITHUB_REF_TYPE -eq "tag") {
+            $version = $env:GITHUB_REF_NAME
+            if ($version.StartsWith("v")) { $version = $version.Substring(1) }
+          }
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = (Get-Content "apps/desktop/package.json" -Raw | ConvertFrom-Json).version
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+') {
+            throw "Invalid version: $version"
+          }
+          $buildNumber = if ($env:GITHUB_RUN_NUMBER) { $env:GITHUB_RUN_NUMBER } else { "0" }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "buildNumber=$buildNumber" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Release version=$version tag=v$version buildNumber=$buildNumber"
+
+      - name: Apply package version
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          node -e "const fs=require('fs'); const p='apps/desktop/package.json'; const j=JSON.parse(fs.readFileSync(p,'utf8')); j.version=process.env.RELEASE_VERSION; fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n'); console.log('Set @worldseed/desktop version to', j.version)"
+
+      - name: Stamp build-info.json
+        shell: pwsh
+        env:
+          BUILD_NUMBER: ${{ steps.version.outputs.buildNumber }}
+        run: |
+          @{ buildNumber = $env:BUILD_NUMBER } | ConvertTo-Json | Set-Content -Path "apps/desktop/build-info.json" -Encoding utf8
+          Write-Host "buildNumber=$env:BUILD_NUMBER"
+
+      - name: Prefer hoisted node_modules for electron-builder
+        shell: pwsh
+        run: |
+          @"
+          node-linker=hoisted
+          shamefully-hoist=true
+          blockExoticSubdeps=false
+          "@ | Set-Content -Path .npmrc -Encoding utf8
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Setup MSVC build environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          vsversion: "2022"
+
+      - name: Build workspace + Windows installers
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          npm_config_msvs_version: "2022"
+          GYP_MSVS_VERSION: "2022"
+        shell: pwsh
+        run: |
+          corepack pnpm --filter @worldseed/contracts build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          corepack pnpm --filter @worldseed/config build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          corepack pnpm --filter @worldseed/prompt-contracts build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          corepack pnpm --filter @worldseed/backend build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          corepack pnpm --filter @worldseed/desktop package:win
+
+      - name: Write latest.json manifest
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          BUILD_NUMBER: ${{ steps.version.outputs.buildNumber }}
+        run: |
+          $downloadUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/WorldSeed-$env:RELEASE_VERSION-Setup.exe"
+          $manifest = [ordered]@{
+            version = $env:RELEASE_VERSION
+            buildNumber = "$env:BUILD_NUMBER"
+            downloadUrl = $downloadUrl
+            productName = "WorldSeed"
+          }
+          ($manifest | ConvertTo-Json) | Set-Content -Path "apps/desktop/release/latest.json" -Encoding utf8
+          Get-Content "apps/desktop/release/latest.json"
+
+      - name: List release artifacts
+        shell: pwsh
+        run: |
+          Get-ChildItem "apps/desktop/release" -File | Format-Table Name, Length -AutoSize
+          $exes = Get-ChildItem "apps/desktop/release" -Filter "*.exe" -File
+          if ($exes.Count -lt 1) { throw "No .exe artifacts found under apps/desktop/release" }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: worldseed-windows-${{ steps.version.outputs.version }}-b${{ steps.version.outputs.buildNumber }}
+          path: |
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.blockmap
+            apps/desktop/release/latest.json
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: WorldSeed ${{ steps.version.outputs.version }} (build ${{ steps.version.outputs.buildNumber }})
+          draft: false
+          make_latest: true
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prerelease == 'true' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.blockmap
+            apps/desktop/release/latest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
