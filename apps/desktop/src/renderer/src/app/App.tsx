@@ -115,6 +115,7 @@ export function App(): React.JSX.Element {
   const synopsisStopDraftRef = useRef<string | null>(null)
   const synopsisSendInFlightRef = useRef(false)
   const discussHandoffWatchRef = useRef(0)
+  const chapterDraftVersionRequestRef = useRef(0)
   const selectedPathRef = useRef<string | undefined>(undefined)
   selectedPathRef.current = selectedPath
   const [chapterSynopsis, setChapterSynopsis] = useState<ChapterSynopsis>()
@@ -241,6 +242,8 @@ export function App(): React.JSX.Element {
   }, [project, report.inventory])
 
   const refreshChapterDraftVersions = useCallback(async (revisionTaskId: string | undefined): Promise<void> => {
+    const requestId = chapterDraftVersionRequestRef.current + 1
+    chapterDraftVersionRequestRef.current = requestId
     if (project === undefined || revisionTaskId === undefined) {
       setChapterDraftVersions([])
       return
@@ -252,8 +255,10 @@ export function App(): React.JSX.Element {
         revisionTaskId,
         includeChapterHistory: true,
       })
+      if (chapterDraftVersionRequestRef.current !== requestId) return
       setChapterDraftVersions(listed.versions)
     } catch {
+      if (chapterDraftVersionRequestRef.current !== requestId) return
       setChapterDraftVersions([])
     }
   }, [project])
@@ -741,11 +746,11 @@ export function App(): React.JSX.Element {
     return revision
   }
 
-  const appendPersistedDraftVersion = async (input: Readonly<{ heading: string; body: string }>): Promise<void> => {
+  const appendPersistedDraftVersion = async (input: Readonly<{ heading: string; body: string }>): Promise<RevisionDraftVersion | undefined> => {
     if (project === undefined) throw new Error("当前没有打开项目")
     const revisionTaskId = chapterRevision?.revisionTaskId
     if (revisionTaskId === undefined) throw new Error("当前没有可写入的章节草稿")
-    await invokeBackend("chapter.revision.draftVersion.append", {
+    const appended = await invokeBackend<RevisionDraftVersion>("chapter.revision.draftVersion.append", {
       projectId: project.projectId,
       workspaceRootRef: project.workspaceRootRef,
       revisionTaskId,
@@ -754,6 +759,7 @@ export function App(): React.JSX.Element {
       body: input.body,
     })
     await refreshChapterDraftVersions(revisionTaskId)
+    return appended
   }
 
   const restorePersistedDraftVersion = async (versionId: string): Promise<void> => {

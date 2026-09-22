@@ -1,5 +1,5 @@
 import { Editor, type Monaco } from "@monaco-editor/react"
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import type { editor } from "monaco-editor"
 import type { ChapterNarrativeIntent, ChapterRevision, DiscussFocusKind, RevisionDraftVersion, SynopsisConversationMessage, SynopsisConversationSession, SynopsisConversationStreamSnapshot, SynopsisStagingPromoteProposal } from "@worldseed/contracts"
 import { WORLDSEED_EDITOR_THEME, ensureWorldseedEditorTheme } from "../../monaco.js"
@@ -108,7 +108,7 @@ type Props = Readonly<{
   onReviewRevision(revisionTaskId: string): Promise<ChapterRevision>
   onSubmitRevision(input: Readonly<{ revisionTaskId: string; mode: "direct" | "reviewed"; forced: boolean; reviewId?: string }>): Promise<ChapterRevision>
   onRetireRevision(revisionTaskId: string): Promise<ChapterRevision>
-  onAppendPersistedDraft?(input: Readonly<{ heading: string; body: string }>): Promise<void>
+  onAppendPersistedDraft?(input: Readonly<{ heading: string; body: string }>): Promise<RevisionDraftVersion | undefined>
   onRestorePersistedDraft?(versionId: string): Promise<void>
   projectId: string | undefined
   workspaceRootRef: string | undefined
@@ -137,6 +137,18 @@ type Props = Readonly<{
 }>
 
 export function EditorArea(props: Props): React.JSX.Element {
+  const chapterSaveRef = useRef<(() => Promise<void>) | undefined>(undefined)
+  const chapterSaveAvailableRef = useRef(false)
+  const [chapterSaveAvailable, setChapterSaveAvailable] = useState(false)
+  const registerChapterSave = useCallback((
+    handler: (() => Promise<void>) | undefined,
+    available: boolean,
+  ): void => {
+    chapterSaveRef.current = handler
+    if (chapterSaveAvailableRef.current === available) return
+    chapterSaveAvailableRef.current = available
+    setChapterSaveAvailable(available)
+  }, [])
   const mode = props.selectedPath === undefined
     ? "home"
     : isChapterPlanningMarkdownPath(props.selectedPath)
@@ -219,6 +231,7 @@ export function EditorArea(props: Props): React.JSX.Element {
     onReviewRevision={props.onReviewRevision}
     onSubmitRevision={props.onSubmitRevision}
     onRetireRevision={props.onRetireRevision}
+    onSaveReady={registerChapterSave}
     {...(props.onAppendPersistedDraft === undefined ? {} : { onAppendPersistedDraft: props.onAppendPersistedDraft })}
     {...(props.onRestorePersistedDraft === undefined ? {} : { onRestorePersistedDraft: props.onRestorePersistedDraft })}
   /> : <MarkdownEditor
@@ -226,6 +239,17 @@ export function EditorArea(props: Props): React.JSX.Element {
     readOnly={props.readOnly}
     onContentChange={props.onContentChange}
   />
+
+  const saveDisabled = mode === "chapter"
+    ? !chapterSaveAvailable
+    : !props.dirty || props.readOnly || props.selectedPath === undefined
+  const handleSave = (): void => {
+    if (mode === "chapter") {
+      void chapterSaveRef.current?.()
+      return
+    }
+    props.onSave()
+  }
 
   return <section className="editor-area">
     <div className="editor-tabs">
@@ -240,7 +264,7 @@ export function EditorArea(props: Props): React.JSX.Element {
           {props.dirty ? <i /> : null}
         </button>
       )}
-      <div className="editor-tab-actions"><UiTooltip label="保存"><button aria-label="保存" disabled={!props.dirty || props.readOnly || props.selectedPath === undefined} onClick={props.onSave}><Save size={15} /></button></UiTooltip></div>
+      <div className="editor-tab-actions"><UiTooltip label="保存"><button aria-label="保存" disabled={saveDisabled} onClick={handleSave}><Save size={15} /></button></UiTooltip></div>
     </div>
     <div className="editor-document">{documentPane}</div>
   </section>
@@ -314,7 +338,8 @@ function ChapterRevisionEditor(props: {
   onReviewRevision(revisionTaskId: string): Promise<ChapterRevision>
   onSubmitRevision(input: Readonly<{ revisionTaskId: string; mode: "direct" | "reviewed"; forced: boolean; reviewId?: string }>): Promise<ChapterRevision>
   onRetireRevision(revisionTaskId: string): Promise<ChapterRevision>
-  onAppendPersistedDraft?(input: Readonly<{ heading: string; body: string }>): Promise<void>
+  onSaveReady?: (handler: (() => Promise<void>) | undefined, available: boolean) => void
+  onAppendPersistedDraft?(input: Readonly<{ heading: string; body: string }>): Promise<RevisionDraftVersion | undefined>
   onRestorePersistedDraft?(versionId: string): Promise<void>
 }): React.JSX.Element {
   const committedHeading = props.chapter?.heading ?? props.revision?.heading ?? "未命名章节"
@@ -326,6 +351,8 @@ function ChapterRevisionEditor(props: {
   const [heading, setHeading] = useState(committedHeading)
   const [draft, setDraft] = useState(initialDraft)
   const [revision, setRevision] = useState<ChapterRevision | undefined>(props.revision)
+  const revisionRef = useRef<ChapterRevision | undefined>(props.revision)
+  revisionRef.current = revision
   const [pane, setPane] = useState<ChapterDocumentPane>(() => (
     isChapterGraphSyncBlocking(props.revision) ? "committed" : "draft"
   ))
@@ -365,6 +392,8 @@ function ChapterRevisionEditor(props: {
   const monacoRef = useRef<Monaco | null>(null)
   const chapterEditorLayoutCleanupRef = useRef<(() => void) | null>(null)
   const chapterEditorWrapColumnsRef = useRef(-1)
+  const saveDraftHandlerRef = useRef<(() => Promise<void>) | undefined>(undefined)
+  const autosaveRequestRef = useRef(0)
   const autosaveSnapshotRef = useRef<{ heading: string; body: string }>({ heading: committedHeading, body: initialDraft })
   const draftVersions = draftVersionChain
   const { official: officialVersions, drafts: draftOnlyVersions } = splitChapterPickerVersions(draftVersions)
@@ -423,8 +452,34 @@ function ChapterRevisionEditor(props: {
 
   useEffect(() => {
     if (props.persistedDraftVersions === undefined || props.persistedDraftVersions.length === 0) return
-    setDraftVersionChain(fromPersistedDraftVersions(props.persistedDraftVersions))
-  }, [props.persistedDraftVersions])
+    const nextVersions = fromPersistedDraftVersions(props.persistedDraftVersions)
+    setDraftVersionChain(nextVersions)
+    if (nextVersions.some((version) => version.versionId === selectedVersionId)) return
+    const nextDrafts = nextVersions.filter((version) => version.source !== "baseline")
+    const nextSelectedVersionId = preferredWorkingDraftId(nextDrafts)
+      ?? nextVersions.at(-1)?.versionId
+      ?? COMMITTED_DRAFT_VERSION_ID
+    setSelectedVersionId(nextSelectedVersionId)
+    const nextMode = draftDisplayModeForSelection(nextDrafts, nextSelectedVersionId)
+    setDisplayMode(nextMode)
+    const localDraftChanged = draft !== props.body || heading !== committedHeading
+    if (localDraftChanged) return
+    const nextSelected = nextVersions.find((version) => version.versionId === nextSelectedVersionId)
+    if (nextSelected === undefined) return
+    if (nextMode === "edit") {
+      setHeading(nextSelected.heading)
+      setDraft(nextSelected.body)
+      autosaveSnapshotRef.current = { heading: nextSelected.heading, body: nextSelected.body }
+    }
+  }, [committedHeading, draft, heading, props.body, props.persistedDraftVersions, selectedVersionId])
+
+  useEffect(() => {
+    setRevision(props.revision)
+    setReviewStage(reviewStageFromRevision(props.revision))
+    if (props.revision?.updatedAtMs !== undefined) {
+      setLastSavedAtMs(props.revision.updatedAtMs)
+    }
+  }, [props.revision])
 
   useEffect(() => {
     setHeading(props.revision?.heading ?? props.chapter?.heading ?? "未命名章节")
@@ -434,16 +489,11 @@ function ChapterRevisionEditor(props: {
       props.persistedDraftVersions,
     )
     setDraft(nextDraft)
-    setRevision(props.revision)
-    setReviewStage(reviewStageFromRevision(props.revision))
-    if (props.revision?.updatedAtMs !== undefined) {
-      setLastSavedAtMs(props.revision.updatedAtMs)
-    }
     autosaveSnapshotRef.current = {
       heading: props.revision?.heading ?? props.chapter?.heading ?? "未命名章节",
       body: nextDraft,
     }
-  }, [props.body, props.chapter?.heading, props.revision, props.revisionContent, props.persistedDraftVersions])
+  }, [props.body, props.chapter?.chapterId, props.chapter?.heading, props.path])
 
   useEffect(() => {
     if (props.path === undefined) return
@@ -498,18 +548,28 @@ function ChapterRevisionEditor(props: {
       ? "历史草稿仅可查看，请返回最新版本后再审核或提交"
       : "版本对比中，请返回编辑最新草稿后再审核或提交"
     : undefined
+  const canSaveSelectedDraft = pane === "draft"
+    && displayMode === "edit"
+    && revisionWritable
+    && !busy
+    && draftSaveState !== "saving"
+    && changed
+    && (latestWorkingDraft === undefined || selectedVersionId === latestWorkingDraft.versionId)
 
   useEffect(() => {
     if (!revisionWritable || displayMode !== "edit" || selectedVersionId !== latestVersionId) return
     if (draft === autosaveSnapshotRef.current.body && heading === autosaveSnapshotRef.current.heading) return
 
+    const requestId = autosaveRequestRef.current + 1
+    autosaveRequestRef.current = requestId
     setDraftSaveState("saving")
     const timer = window.setTimeout(() => {
       void (async () => {
         try {
-          const current = revision ?? await props.onEnsureRevision(committedHeading, props.body)
+          const current = revisionRef.current ?? await props.onEnsureRevision(committedHeading, props.body)
           if (current === undefined) return
           const next = await props.onUpdateRevision(current.revisionTaskId, heading, draft)
+          if (autosaveRequestRef.current !== requestId) return
           setRevision(next)
           const savedAtMs = next.updatedAtMs ?? Date.now()
           setLastSavedAtMs(savedAtMs)
@@ -525,7 +585,10 @@ function ChapterRevisionEditor(props: {
         }
       })()
     }, 800)
-    return () => { window.clearTimeout(timer) }
+    return () => {
+      window.clearTimeout(timer)
+      if (autosaveRequestRef.current === requestId) autosaveRequestRef.current += 1
+    }
   }, [
     committedHeading,
     displayMode,
@@ -533,9 +596,6 @@ function ChapterRevisionEditor(props: {
     heading,
     latestVersionId,
     props.body,
-    props.onEnsureRevision,
-    props.onUpdateRevision,
-    revision,
     revisionWritable,
     selectedVersionId,
   ])
@@ -551,11 +611,11 @@ function ChapterRevisionEditor(props: {
 
   const createNewDraftVersion = async (): Promise<void> => {
     if (busy || !revisionWritable || displayMode === "diff") return
+    autosaveRequestRef.current += 1
     const sourceVersion = draftVersions.find((version) => version.versionId === pickerSelectedId)
       ?? draftOnlyVersions.at(-1)
     const editingLatestWorking = displayMode === "edit"
-      && latestWorkingDraft !== undefined
-      && selectedVersionId === latestWorkingDraft.versionId
+      && (latestWorkingDraft === undefined || selectedVersionId === latestWorkingDraft.versionId)
     const nextHeading = editingLatestWorking ? heading : (sourceVersion?.heading ?? heading)
     const nextBody = editingLatestWorking ? draft : (sourceVersion?.body ?? draft)
     setBusy(true)
@@ -563,8 +623,18 @@ function ChapterRevisionEditor(props: {
     try {
       const current = await persistDraft()
       const savedAtMs = current.updatedAtMs ?? Date.now()
+      let persistedVersion: RevisionDraftVersion | undefined
       if (props.onAppendPersistedDraft !== undefined) {
-        await props.onAppendPersistedDraft({ heading: nextHeading, body: nextBody })
+        persistedVersion = await props.onAppendPersistedDraft({ heading: nextHeading, body: nextBody })
+        if (persistedVersion !== undefined) {
+          const persistedPrototype = fromPersistedDraftVersions([persistedVersion])[0]
+          if (persistedPrototype !== undefined) {
+            setDraftVersionChain((previous) => previous.some((version) => version.versionId === persistedPrototype.versionId)
+              ? previous
+              : [...previous, persistedPrototype])
+          }
+          setSelectedVersionId(persistedVersion.versionId)
+        }
       } else {
         const nextChain = appendManualDraftVersion(draftVersionChain, {
           heading: nextHeading,
@@ -577,8 +647,8 @@ function ChapterRevisionEditor(props: {
       }
       setDisplayMode("edit")
       setPane("draft")
-      autosaveSnapshotRef.current = { heading, body: draft }
-      setLastSavedAtMs(savedAtMs)
+      autosaveSnapshotRef.current = { heading: nextHeading, body: nextBody }
+      setLastSavedAtMs(persistedVersion?.createdAtMs ?? savedAtMs)
       setDraftSaveState("saved")
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error))
@@ -587,6 +657,17 @@ function ChapterRevisionEditor(props: {
       setBusy(false)
     }
   }
+
+  saveDraftHandlerRef.current = createNewDraftVersion
+  const invokeSaveDraft = useCallback((): Promise<void> => (
+    saveDraftHandlerRef.current?.() ?? Promise.resolve()
+  ), [])
+
+  useEffect(() => {
+    if (props.onSaveReady === undefined) return
+    props.onSaveReady(invokeSaveDraft, canSaveSelectedDraft)
+    return () => { props.onSaveReady?.(undefined, false) }
+  }, [canSaveSelectedDraft, invokeSaveDraft, props.onSaveReady])
 
   const review = async (): Promise<void> => {
     if (busy || graphSyncPending || !canReviseLatestDraft) return
