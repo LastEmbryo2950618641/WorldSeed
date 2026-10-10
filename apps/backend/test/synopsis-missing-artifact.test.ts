@@ -31,6 +31,18 @@ function emptyCatalog(projectId: string) {
         digest: "d1",
         size: 12,
       },
+      ...[
+        "表现输出/描写规则/自动.md",
+        "表现输出/描写规则/感官描写.md",
+        "表现输出/描写规则/去AI味.md",
+      ].map((relativePath) => ({
+        relativePath,
+        entryKind: "file" as const,
+        role: "presentation" as const,
+        version: "v1",
+        digest: "d1",
+        size: 12,
+      })),
     ],
     digest: "catalog",
   }
@@ -151,6 +163,9 @@ describe("synopsis discuss missing artifact recovery", () => {
       async loadDiscussUsage() {
         return undefined
       },
+      loadDiscussContextInputTokens() {
+        return Promise.resolve(undefined)
+      },
       async saveDiscussUsage() {
         return undefined
       },
@@ -227,6 +242,11 @@ describe("synopsis discuss missing artifact recovery", () => {
       },
     } as unknown as PromptResourcePort
     const dependencies = {
+      chapterIndex: {
+        findBySequence() {
+          return Promise.resolve(undefined)
+        },
+      },
       chapters: {
         async nextChapterSequence() {
           return 1

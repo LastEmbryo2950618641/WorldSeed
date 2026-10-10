@@ -94,6 +94,7 @@ export function ChapterDraftVersionsPrototype(props: Props): React.JSX.Element {
           type="button"
           className="chapter-draft-version-trigger"
           data-testid="chapter-draft-version-select"
+          disabled={presented.length === 0}
           aria-label={official ? "正文版本" : "草稿版本"}
           aria-haspopup="listbox"
           aria-expanded={open}

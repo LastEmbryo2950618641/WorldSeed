@@ -59,7 +59,7 @@ export function ChapterWorkspaceRail(props: Props): React.JSX.Element {
           kind={tab}
           markdown={tab === "outline" ? props.outlineMarkdown : props.synopsisMarkdown}
           filePath={tab === "outline" ? props.outlinePath : props.synopsisPath}
-          onOpenFile={props.onOpenFile}
+          {...(props.onOpenFile === undefined ? {} : { onOpenFile: props.onOpenFile })}
         />}
   </aside>
 }

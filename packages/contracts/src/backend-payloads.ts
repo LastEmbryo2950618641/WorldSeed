@@ -85,7 +85,9 @@ export type ProjectSettingsReadPayload = z.infer<typeof projectSettingsReadPaylo
 export type ProjectSettingsSavePayload = z.infer<typeof projectSettingsSavePayloadSchema>
 export const turnRecoverableTasksPayloadSchema = projectSettingsReadPayloadSchema
 export type TurnRecoverableTasksPayload = z.infer<typeof turnRecoverableTasksPayloadSchema>
-export const turnLatestGetPayloadSchema = projectSettingsReadPayloadSchema
+export const turnLatestGetPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  chapterSequence: z.number().int().positive().optional(),
+})
 export type TurnLatestGetPayload = z.infer<typeof turnLatestGetPayloadSchema>
 
 /** Creation-desk narrative intent (orthogonal to project worldDivergenceMode). */
@@ -235,8 +237,16 @@ export const chapterStartRevisionPayloadSchema = projectSettingsReadPayloadSchem
 })
 export const chapterUpdateRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
   revisionTaskId: idSchema,
+  draftVersionId: idSchema.optional(),
   heading: z.string().min(1),
   body: z.string().min(1),
+})
+export const chapterStartDraftPayloadSchema = projectSettingsReadPayloadSchema.extend({
+  chapterSequence: z.number().int().positive(),
+  heading: z.string().min(1),
+  body: z.string().min(1),
+  volumeFolderName: z.string().min(1).optional(),
+  source: z.enum(["agent", "manual", "workflow"]).default("manual"),
 })
 export const chapterReviewRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
   revisionTaskId: idSchema,
@@ -246,6 +256,7 @@ export const chapterReviewRevisionPayloadSchema = projectSettingsReadPayloadSche
 })
 export const chapterSubmitRevisionPayloadSchema = projectSettingsReadPayloadSchema.extend({
   revisionTaskId: idSchema,
+  draftVersionId: idSchema.optional(),
   model: modelSelectionSchema.optional(),
   mode: z.enum(["direct", "reviewed"]),
   forced: z.boolean(),
@@ -636,6 +647,8 @@ export const backendPayloadSchemas = {
   "chapter.readRevision": chapterReadRevisionPayloadSchema,
   "chapter.findActiveRevision": chapterFindActiveRevisionPayloadSchema,
   "chapter.startRevision": chapterStartRevisionPayloadSchema,
+  "chapter.draft.start": chapterStartDraftPayloadSchema,
+  "chapter.draft.list": chapterListPayloadSchema,
   "chapter.updateRevision": chapterUpdateRevisionPayloadSchema,
   "chapter.reviewRevision": chapterReviewRevisionPayloadSchema,
   "chapter.submitRevision": chapterSubmitRevisionPayloadSchema,

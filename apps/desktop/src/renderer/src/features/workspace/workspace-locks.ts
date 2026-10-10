@@ -69,7 +69,7 @@ export function isChapterVolumeContainerPath(path: string): boolean {
   const normalized = normalizeWorkspacePath(path)
   if (!normalized.startsWith("章节正文/")) return false
   const rest = normalized.slice("章节正文/".length)
-  return rest.length > 0 && !rest.includes("/")
+  return rest.length > 0 && !rest.includes("/") && !rest.endsWith(".md")
 }
 
 export function parseVolumeSequenceFromLabel(label: string): number | undefined {

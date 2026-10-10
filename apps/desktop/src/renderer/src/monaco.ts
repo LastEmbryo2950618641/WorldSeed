@@ -20,7 +20,7 @@ export const WORLDSEED_EDITOR_THEME = "worldseed-dark"
 
 let themeRegistered = false
 
-export function ensureWorldseedEditorTheme(monacoApi: typeof monaco = monaco): void {
+export function ensureWorldseedEditorTheme(monacoApi: Pick<typeof monaco, "editor"> = monaco): void {
   if (themeRegistered) return
   monacoApi.editor.defineTheme(WORLDSEED_EDITOR_THEME, {
     base: "vs-dark",

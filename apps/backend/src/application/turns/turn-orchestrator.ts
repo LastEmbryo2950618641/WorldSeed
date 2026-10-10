@@ -59,6 +59,7 @@ import {
   inheritContextReads,
   recordContextRead,
   normalizeChapterHeading,
+  formatChapterSequenceLabel,
   DEFAULT_PROSE_STYLE_RULE_PATH,
   formatDescriptionRuleEvidence,
   formatWorkDescriptionRuleEvidence,
@@ -172,6 +173,15 @@ const turnExecutionPhases: readonly AIPhase[] = [
   ...turnModelPhases.slice(2),
 ]
 
+const draftExecutionPhases: readonly AIPhase[] = [
+  "interpret",
+  "rule_assembly",
+  "source_retrieval",
+  "emergence_planning",
+  "draft",
+  "chapter_naming",
+]
+
 const queryExecutionPhases: readonly AIPhase[] = [
   "interpret",
   "rule_assembly",
@@ -265,7 +275,11 @@ const workspaceCatalogPhases = new Set<AIPhase>(["interpret", "rule_assembly", "
 
 export type WorldWorkflow = "turn" | "query" | "evolution" | "revision"
 
-function executionPhasesFor(workflow: WorldWorkflow, includeAdaptiveRevisionRoute = false): readonly AIPhase[] {
+function executionPhasesFor(workflow: WorldWorkflow, includeAdaptiveRevisionRoute = false, outputMode?: "draft"): readonly AIPhase[] {
+  if (outputMode === "draft") {
+    if (workflow !== "turn") throw new Error("Draft output is only supported for the turn workflow")
+    return draftExecutionPhases
+  }
   switch (workflow) {
     case "turn": return turnExecutionPhases
     case "query": return queryExecutionPhases
@@ -282,6 +296,7 @@ function isAdaptiveRevisionMode(value: boolean | "compact" | undefined): value i
 
 export type TurnOrchestratorInput = Readonly<{
   workflow?: WorldWorkflow
+  outputMode?: "draft"
       adaptiveGraphGovernance?: boolean | "compact"
   projectId: ProjectId
   workspaceRootRef: string
@@ -374,7 +389,32 @@ export type WorldEvolutionExecutionResult = Readonly<{
   kvCacheHitRate?: number
 }>
 
-export type WorkflowExecutionResult = TurnExecutionResult | WorldQueryExecutionResult | WorldEvolutionExecutionResult
+export type DraftPersistenceReceipt = Readonly<{
+  revisionTaskId: string
+  draftVersionId: string
+}>
+
+export type DraftExecutionResult = Readonly<{
+  kind: "draft"
+  taskId: string
+  turnId: string
+  scopeId: string
+  contextId: string
+  heading: string
+  body: string
+  chapterSequence: number
+  volumeFolderName: string
+  revisionTaskId?: string
+  draftVersionId?: string
+  modelCalls: number
+  inputTokens: number
+  outputTokens: number
+  modelProvider: string
+  modelName: string
+  kvCacheHitRate?: number
+}>
+
+export type WorkflowExecutionResult = TurnExecutionResult | DraftExecutionResult | WorldQueryExecutionResult | WorldEvolutionExecutionResult
 
 export type TurnExecutionHooks = Readonly<{
   onPrepared?(): void
@@ -395,6 +435,13 @@ export type TurnOrchestratorDependencies = Readonly<{
   commit: ScopeCommitRepository
   internalStore: InternalStorePort
   workspace: WorkspacePort
+  /** Atomically deduplicate by idempotencyKey and return the original receipt on retry. */
+  appendDraft?(input: Readonly<{
+    projectId: ProjectId
+    workspaceRootRef: string
+    idempotencyKey: string
+    result: DraftExecutionResult
+  }>): Promise<DraftPersistenceReceipt>
   /** Optional public-internet research for `sourceKinds: ["web"]`. */
   webResearch?: WebResearchPort
   chapterSynopsis?: ChapterSynopsisService
@@ -459,6 +506,7 @@ export class TurnOrchestrator {
   public async execute(input: TurnOrchestratorInput, hooks?: TurnExecutionHooks): Promise<WorkflowExecutionResult> {
     throwIfExecutionCancelled(hooks?.signal)
     const workflow = input.workflow ?? "turn"
+    executionPhasesFor(workflow, false, input.outputMode)
     const taskId = input.taskId ?? this.dependencies.createId()
     const turnId = input.turnId ?? this.dependencies.createId()
     const scopeId = input.scopeId ?? this.dependencies.createId()
@@ -506,6 +554,7 @@ export class TurnOrchestrator {
       reason: `AI ${workflow} starts from user input and creates a pending isolated scope`,
       configSnapshot: {
         budget,
+        ...(input.outputMode === "draft" ? { outputMode: "draft", chapterSequence: input.chapterSequence } : {}),
         runtime: {
           modelContextWindowTokens: requireModelContextWindowTokens(this.dependencies.model),
         },
@@ -867,16 +916,31 @@ export class TurnOrchestrator {
     })
   }
 
-  public async resume(input: TurnOrchestratorInput, mode: "continue" | "retry_phase" = "continue", hooks?: TurnExecutionHooks): Promise<WorkflowExecutionResult> {
+  public async resume(requestedInput: TurnOrchestratorInput, mode: "continue" | "retry_phase" = "continue", hooks?: TurnExecutionHooks): Promise<WorkflowExecutionResult> {
     throwIfExecutionCancelled(hooks?.signal)
+    if (requestedInput.taskId === undefined) throw new Error("A taskId is required to resume a turn")
+    const task = await this.dependencies.taskScopes.findTask(requestedInput.taskId)
+    if (task === undefined) throw new Error(`Cannot resume missing task: ${requestedInput.taskId}`)
+    const storedDraft = isRecord(task.configSnapshot) && task.configSnapshot.outputMode === "draft"
+    let input = { ...requestedInput, taskId: task.taskId }
+    if (storedDraft && isRecord(task.configSnapshot)) {
+      input = {
+        ...input,
+        workflow: "turn",
+        outputMode: "draft",
+        chapterSequence: typeof task.configSnapshot.chapterSequence === "number"
+          ? task.configSnapshot.chapterSequence
+          : input.chapterSequence,
+      }
+    } else if (input.outputMode === "draft") {
+      throw new Error("Cannot change the output mode of an existing task")
+    }
     const workflow = input.workflow ?? "turn"
     const executionPhases = executionPhasesFor(
       workflow,
       workflow === "revision" && isAdaptiveRevisionMode(input.adaptiveGraphGovernance),
+      input.outputMode,
     )
-    if (input.taskId === undefined) throw new Error("A taskId is required to resume a turn")
-    const task = await this.dependencies.taskScopes.findTask(input.taskId)
-    if (task === undefined) throw new Error(`Cannot resume missing task: ${input.taskId}`)
     if (task.status !== "awaiting_user_decision" && task.status !== "paused" && task.status !== "waiting_for_review") {
       throw new Error(`Task cannot resume from status: ${task.status}`)
     }
@@ -912,7 +976,7 @@ export class TurnOrchestrator {
       createdAtMs: input.nowMs ?? this.dependencies.now(),
     })
     const pendingFinalization = await this.dependencies.persistence.findFinalizationByTask(input.taskId)
-    if (pendingFinalization !== undefined && pendingFinalization.status !== "completed") {
+    if (input.outputMode !== "draft" && pendingFinalization !== undefined && pendingFinalization.status !== "completed") {
       return this.resumeTurnFinalization(input, pendingFinalization)
     }
     const scope = await this.dependencies.taskScopes.findScope(task.scopeId)
@@ -979,7 +1043,7 @@ export class TurnOrchestrator {
         currentPhaseRuns.map((run) => run.phaseRunId),
         input.nowMs ?? this.dependencies.now(),
       )
-      if (latestRun.phase === "chapter_naming") {
+      if (latestRun.phase === "chapter_naming" && input.outputMode !== "draft") {
         await this.dependencies.commit.resetPending(task.scopeId, { sourceIds: [sourceId] })
       }
       startPhaseIndex = resolveResumeStartIndex(latestRun.phase, false, executionPhases)
@@ -1368,7 +1432,7 @@ export class TurnOrchestrator {
       await this.dependencies.commit.resetPending(task.scopeId)
     }
     let restoredSourceUnitIds = [...latestInput.sourceUnitIds]
-    if (restoredSourceUnitIds.length === 0 && artifacts.chapter_naming !== undefined) {
+    if (input.outputMode !== "draft" && restoredSourceUnitIds.length === 0 && artifacts.chapter_naming !== undefined) {
       const persistedSourceUnits = await this.dependencies.documents.listSourceUnits(input.projectId, sourceId)
       restoredSourceUnitIds = persistedSourceUnits.length > 0
         ? persistedSourceUnits.map((unit) => unit.id)
@@ -1457,7 +1521,7 @@ export class TurnOrchestrator {
 
   private async continueExecution(input: TurnOrchestratorInput, state: TurnExecutionState): Promise<WorkflowExecutionResult> {
     const workflow = input.workflow ?? "turn"
-    const executionPhases = executionPhasesFor(workflow, isAdaptiveRevisionMode(state.adaptiveGraphGovernance))
+    const executionPhases = executionPhasesFor(workflow, isAdaptiveRevisionMode(state.adaptiveGraphGovernance), input.outputMode)
     let {
       context,
       sourceUnitIds,
@@ -1754,7 +1818,7 @@ export class TurnOrchestrator {
           }
         }
         // Persist naming side effects before treating the phase as successfully advanced.
-        if (phase === "chapter_naming") {
+        if (phase === "chapter_naming" && input.outputMode !== "draft") {
           try {
             sourceUnitIds = await this.persistDraftUnits(input, state.scopeId, state.sourceId, artifacts)
           } catch (error) {
@@ -1885,6 +1949,9 @@ export class TurnOrchestrator {
       }
 
       throwIfExecutionCancelled(state.signal)
+      if (input.outputMode === "draft") {
+        return await this.completeDraft(input, state, artifacts, totalUsage)
+      }
       if (workflow === "query") {
         return await this.completeQuery(state, artifacts, readEvidence, totalUsage)
       }
@@ -1939,6 +2006,53 @@ export class TurnOrchestrator {
       )
       throw normalizedError
     }
+  }
+
+  private async completeDraft(
+    input: TurnOrchestratorInput,
+    state: TurnExecutionState,
+    artifacts: Partial<Record<AIPhase, unknown>>,
+    totalUsage: PhaseUsage,
+  ): Promise<DraftExecutionResult> {
+    const draft = internalDraftArtifactSchema.parse(artifacts.draft)
+    const naming = chapterNamingArtifactSchema.parse(artifacts.chapter_naming)
+    const planning = await this.dependencies.chapterSynopsis?.findPlanningHeading({
+      workspaceRootRef: input.workspaceRootRef, chapterSequence: input.chapterSequence,
+    })
+    const title = normalizeChapterHeading(planning?.titleLabel ?? naming.heading)
+      .replace(/^第(?:\d+|[零一二三四五六七八九十百千万]+)章\s*/u, "")
+    const result: DraftExecutionResult = {
+      kind: "draft",
+      taskId: state.taskId,
+      turnId: state.turnId,
+      scopeId: state.scopeId,
+      contextId: state.contextId,
+      heading: `${formatChapterSequenceLabel(input.chapterSequence)} ${title}`.trim(),
+      body: draft.contentMarkdown,
+      chapterSequence: input.chapterSequence,
+      volumeFolderName: planning?.volumeFolderName ?? naming.volumeFolderName,
+      modelCalls: totalUsage.modelCalls,
+      inputTokens: totalUsage.inputTokens,
+      outputTokens: totalUsage.outputTokens,
+      modelProvider: this.dependencies.model.info?.provider ?? "unknown",
+      modelName: this.dependencies.model.info?.model ?? "unknown",
+      ...cacheRateResult(totalUsage),
+    }
+    // Phase artifacts are durable before delivery; consumers deduplicate replay after a crash.
+    throwIfExecutionCancelled(state.signal)
+    const receipt = await this.dependencies.appendDraft?.({
+      projectId: input.projectId,
+      workspaceRootRef: input.workspaceRootRef,
+      idempotencyKey: `turn-draft:${state.taskId}`,
+      result,
+    })
+    throwIfExecutionCancelled(state.signal)
+    const scope = await this.dependencies.taskScopes.findScope(state.scopeId)
+    if (scope?.visibility !== "retired") {
+      await this.dependencies.commit.retire(state.scopeId, this.dependencies.now())
+    }
+    await this.dependencies.persistence.updateTask(state.taskId, "completed", "chapter_naming", this.dependencies.now())
+    return { ...result, ...receipt }
   }
 
   private async completeTurn(

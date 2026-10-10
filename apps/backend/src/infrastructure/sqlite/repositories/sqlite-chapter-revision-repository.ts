@@ -27,6 +27,9 @@ export class SqliteChapterRevisionRepository implements ChapterRevisionRepositor
       id: input.revisionTaskId,
       project_id: input.projectId,
       chapter_id: input.chapterId,
+      chapter_sequence: input.chapterSequence ?? null,
+      publish_path: input.publishPath ?? null,
+      is_initial_publication: input.isInitialPublication === true ? 1 : 0,
       base_source_id: input.baseSourceId,
       proposed_source_id: input.proposedSourceId,
       predecessor_source_id: input.predecessorSourceId ?? null,
@@ -110,10 +113,19 @@ export class SqliteChapterRevisionRepository implements ChapterRevisionRepositor
     const row = await this.database.selectFrom("chapter_revision_tasks").select("id")
       .where("project_id", "=", projectId)
       .where("decision", "=", "submit")
-      .where("graph_sync_status", "in", ["pending", "running", "failed"])
       .where("status", "not in", ["retired", "completed"])
       .executeTakeFirst()
     return row !== undefined
+  }
+
+  public async listUnpublished(projectId: ProjectId): Promise<readonly StoredChapterRevision[]> {
+    const rows = await this.database.selectFrom("chapter_revision_tasks").selectAll()
+      .where("project_id", "=", projectId)
+      .where("is_initial_publication", "=", 1)
+      .where("status", "not in", ["retired", "completed"])
+      .orderBy("chapter_sequence", "asc")
+      .execute()
+    return Promise.all(rows.map((row) => this.map(row)))
   }
 
   public async createFinalization(input: Readonly<{
@@ -161,9 +173,12 @@ export class SqliteChapterRevisionRepository implements ChapterRevisionRepositor
     contentRef: string
     contentDigest: string
     predecessorSourceId: string
+    publishPath?: string
     updatedAtMs: number
   }>): Promise<StoredChapterRevision> {
-    await this.database.updateTable("chapter_revision_tasks").set({
+    await this.database.transaction().execute(async (transaction) => {
+    await transaction.deleteFrom("chapter_revision_finalizations").where("revision_task_id", "=", input.revisionTaskId).execute()
+    await transaction.updateTable("chapter_revision_tasks").set({
       proposed_source_id: input.proposedSourceId,
       predecessor_source_id: input.predecessorSourceId,
       heading: input.heading,
@@ -174,9 +189,12 @@ export class SqliteChapterRevisionRepository implements ChapterRevisionRepositor
       decision_id: null,
       submission_mode: null,
       graph_sync_status: "not_started",
+      graph_sync_task_id: null,
+      ...(input.publishPath === undefined ? {} : { publish_path: input.publishPath }),
       status: "editing",
       updated_at: input.updatedAtMs,
     }).where("id", "=", input.revisionTaskId).executeTakeFirstOrThrow()
+    })
     const revision = await this.find(input.revisionTaskId)
     if (revision === undefined) throw new Error(`Chapter revision disappeared: ${input.revisionTaskId}`)
     return revision
@@ -267,6 +285,9 @@ export class SqliteChapterRevisionRepository implements ChapterRevisionRepositor
       revisionTaskId: row.id,
       projectId: row.project_id,
       chapterId: row.chapter_id,
+      ...(row.chapter_sequence === null ? {} : { chapterSequence: row.chapter_sequence }),
+      ...(row.publish_path === null ? {} : { publishPath: row.publish_path }),
+      isInitialPublication: row.is_initial_publication === 1,
       baseSourceId: row.base_source_id,
       proposedSourceId: row.proposed_source_id,
       ...(row.predecessor_source_id === null ? {} : { predecessorSourceId: row.predecessor_source_id }),

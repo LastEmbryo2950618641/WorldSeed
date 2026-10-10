@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -50,7 +50,7 @@ describe("chapter coordination trace", () => {
       payload: { projectId, displayName: "Trace Test", workspaceRootRef },
     })
 
-    await runTurn(facade, projectId, workspaceRootRef, "雨夜里，旧站台尽头亮起一盏无人认领的灯。", 1)
+    const firstPublicationTaskId = await runTurn(facade, projectId, workspaceRootRef, "雨夜里，旧站台尽头亮起一盏无人认领的灯。", 1)
     await runTurn(facade, projectId, workspaceRootRef, "旅人循着灯光走进雾气弥漫的月台。", 2)
 
     const listed = await facade.handle({
@@ -188,8 +188,10 @@ describe("chapter coordination trace", () => {
         persistence,
       })
       const hydrated = await resolver.hydrateNarrativeMessages(projectId, messages)
-      const canonical = hydrated.find((message) => message.kind === "canonical_chapter")
-      const rawCanonical = messages.find((message) => message.kind === "canonical_chapter")
+      const rawCanonical = messages.find((message) => message.kind === "chapter_revision"
+        && message.taskId === firstPublicationTaskId)
+      expect(rawCanonical).toBeDefined()
+      const canonical = hydrated.find((message) => message.messageId === rawCanonical?.messageId)
       const rawContent = rawCanonical?.contentRef === undefined
         ? rawCanonical?.content
         : await internalStorePort.readDocument(rawCanonical.contentRef)
@@ -222,7 +224,27 @@ async function runTurn(
   if (!started.ok) throw new Error(started.error.message)
   const taskId = (started.data as { taskId: string }).taskId
   await waitForTask(facade, taskId)
-  return taskId
+  const status = await facade.handle({
+    protocolVersion: PROTOCOL_VERSION, requestId: randomUUID(), method: "turn.status", payload: { taskId },
+  })
+  if (!status.ok) throw new Error(status.error.message)
+  const { result } = status.data as { result: { kind: string; revisionTaskId: string } }
+  expect(result.kind).toBe("draft")
+  const draft = await facade.handle({
+    protocolVersion: PROTOCOL_VERSION, requestId: randomUUID(), method: "chapter.readRevision",
+    payload: { projectId, workspaceRootRef, revisionTaskId: result.revisionTaskId },
+  })
+  if (!draft.ok) throw new Error(draft.error.message)
+  const publishPath = (draft.data as { publishPath: string }).publishPath
+  expect(existsSync(join(workspaceRootRef, publishPath))).toBe(false)
+  const submitted = await facade.handle({
+    protocolVersion: PROTOCOL_VERSION, requestId: randomUUID(), method: "chapter.submitRevision",
+    payload: { projectId, workspaceRootRef, revisionTaskId: result.revisionTaskId, mode: "direct", forced: true },
+  })
+  if (!submitted.ok) throw new Error(submitted.error.message)
+  await waitForRevisionGraphSync(facade, projectId, workspaceRootRef, result.revisionTaskId)
+  expect(existsSync(join(workspaceRootRef, publishPath))).toBe(true)
+  return result.revisionTaskId
 }
 
 async function waitForTask(facade: BackendFacade, taskId: string): Promise<void> {

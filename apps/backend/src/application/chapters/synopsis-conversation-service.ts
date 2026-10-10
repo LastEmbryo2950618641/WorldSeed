@@ -96,6 +96,12 @@ import {
 import { normalizeThinkingDisplayText } from "./synopsis-thinking-text.js"
 import { applySearchReplace } from "./markdown-search-replace.js"
 import {
+  executeSynopsisTool,
+  synopsisToolCatalog,
+  type SynopsisWorkflowToolCallbacks,
+  type SynopsisWorkflowToolResult,
+} from "./synopsis-workflow-tools.js"
+import {
   executeSynopsisWebReads,
 } from "./synopsis-web-reads.js"
 import {
@@ -136,7 +142,7 @@ type ChapterDraftProposal = Readonly<{
   body: string
 }>
 
-export type SynopsisConversationServiceDependencies = Readonly<{
+export type SynopsisConversationServiceDependencies = SynopsisWorkflowToolCallbacks & Readonly<{
   chapters: ChapterResolveService
   revisions?: ChapterRevisionService
   chapterSynopsis: ChapterSynopsisService
@@ -213,8 +219,7 @@ export class SynopsisConversationService {
       }
     }
     const fromIndex = await this.dependencies.chapters.nextChapterSequence(input.projectId)
-    const maxSessionSequence = await this.dependencies.conversation.maxChapterSequence(input.projectId)
-    const chapterSequence = Math.max(fromIndex, (maxSessionSequence ?? 0) + 1)
+    const chapterSequence = fromIndex
     const claimed = await this.findExistingSynopsisForSequence(input.workspaceRootRef, chapterSequence)
     const title = input.title?.trim()
       || claimed?.title
@@ -260,6 +265,9 @@ export class SynopsisConversationService {
     focusKind?: DiscussFocusKind
   }>): Promise<SynopsisConversationStartResult> {
     const chapterSequence = this.resolveFocusChapterSequence(input)
+    if (chapterSequence > await this.dependencies.chapters.nextChapterSequence(input.projectId)) {
+      throw new SynopsisInvalidStateError("当前章尚未经过图修订发布为正文，不能进入下一章")
+    }
     const session = await this.ensureActiveSession(input.projectId, input.workspaceRootRef)
     const focusKind = input.focusKind
       ?? this.resolveFocusKindFromPath(input.relativePath)
@@ -382,6 +390,7 @@ export class SynopsisConversationService {
     }>
     maxModelCalls?: number
     deadlineMs?: number
+    signal?: AbortSignal
     focusLocked?: boolean
     lockedChapterSequence?: number
     lockedFocusKind?: DiscussFocusKind
@@ -483,6 +492,8 @@ export class SynopsisConversationService {
         activeGoals,
         chapterProgress,
         model: input.model,
+        allowWorkflowTools: true,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
         ...(input.chapterIntent === undefined ? {} : { chapterIntent: input.chapterIntent }),
         ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
         ...(input.maxModelCalls === undefined ? {} : { maxModelCalls: input.maxModelCalls }),
@@ -805,16 +816,21 @@ export class SynopsisConversationService {
       }
 
       const assistantMessageId = this.dependencies.createId()
-      const draftApply = await this.applyDiscussChapterDraft({
+      const draftApply: Awaited<ReturnType<SynopsisConversationService["applyDiscussChapterDraft"]>> = assist.chapterDraftProposal === undefined && assist.appendedDraft !== undefined
+        ? { appended: assist.appendedDraft }
+        : await this.applyDiscussChapterDraft({
         projectId: input.projectId,
         workspaceRootRef: input.workspaceRootRef,
         chapterSequence: session.chapterSequence,
+        volumeFolderName: extractVolumeFolderNameFromPath(synopsisPath) ?? DEFAULT_VOLUME_FOLDER_NAME,
         ...(assist.chapterDraftProposal === undefined ? {} : { proposal: assist.chapterDraftProposal }),
         messageId: assistantMessageId,
       })
       if (draftApply.notice !== undefined) writeNotices.push(draftApply.notice)
       const persistedChoices = filterDiscussChoices(
-        withPromoteDraftChoice(assist.choices, draftApply.appended?.draftLabel),
+        this.dependencies.publishDraft === undefined
+          ? withPromoteDraftChoice(assist.choices, draftApply.appended?.draftLabel)
+          : assist.choices,
         { focusLocked },
       )
 
@@ -1359,6 +1375,8 @@ export class SynopsisConversationService {
       maximumWordCount: number
     }>
     discussTrigger?: "user" | "turn_handoff"
+    allowWorkflowTools?: boolean
+    signal?: AbortSignal
     maxModelCalls?: number
     deadlineMs?: number
   }>): Promise<Readonly<{
@@ -1376,6 +1394,7 @@ export class SynopsisConversationService {
       ops: readonly Readonly<{ oldText: string; newText: string }>[]
     }>
     chapterDraftProposal?: ChapterDraftProposal
+    appendedDraft?: NonNullable<SynopsisConversationSendResult["appendedDraft"]>
     choices?: SynopsisConversationSendResult["messages"][number]["choices"]
     goalProposals?: readonly Readonly<{ payload: GoalProposalPayload; reason?: string }>[]
     stagingDelta?: Readonly<{
@@ -1493,8 +1512,13 @@ export class SynopsisConversationService {
       )
     }
     let latestBudgetAdvisory: SynopsisConversationBudgetAdvisory | undefined
+    let latestToolDraft: SynopsisWorkflowToolResult | undefined
+    let focusedDraftMarkdown = input.latestDraftMarkdown
+    const toolCallbacks: SynopsisWorkflowToolCallbacks = input.allowWorkflowTools === true ? this.dependencies : {}
 
     for (;;) {
+      input.signal?.throwIfAborted()
+      if (isSynopsisSendCancelled(input.projectId)) throw new SynopsisSendCancelledError()
       if (this.dependencies.now() >= deadlineAtMs) {
         throw new SynopsisInvalidStateError("梗概讨论超时：检索与模型调用未在截止前完成")
       }
@@ -1559,7 +1583,7 @@ export class SynopsisConversationService {
             synopsisMarkdown: input.synopsisMarkdown,
             outlineMarkdown: input.outlineMarkdown,
             ...(input.chapterBodyMarkdown === undefined ? {} : { chapterBodyMarkdown: input.chapterBodyMarkdown }),
-            ...(input.latestDraftMarkdown === undefined ? {} : { latestDraftMarkdown: input.latestDraftMarkdown }),
+            ...(focusedDraftMarkdown === undefined ? {} : { latestDraftMarkdown: focusedDraftMarkdown }),
             ...(input.focusKind === undefined ? {} : { focusKind: input.focusKind }),
             ...(input.focusLocked === true ? { focusLocked: true } : {}),
             ...(input.outlineDigest === undefined ? {} : { outlineDigest: input.outlineDigest }),
@@ -1597,6 +1621,13 @@ export class SynopsisConversationService {
       storedContext = [...await this.dependencies.conversation.listDiscussContextMessages(input.sessionId)]
       const contextMessages = [
         ...toVisibleDiscussContextMessages(storedContext),
+        {
+          messageId: this.dependencies.createId(),
+          sequence: storedContext.length,
+          role: "system" as const,
+          kind: "phase_instruction" as const,
+          content: synopsisToolCatalog(toolCallbacks),
+        },
         ...(attempt > 0 || readEvidence.length > 0
           ? [{
               messageId: this.dependencies.createId(),
@@ -1606,7 +1637,7 @@ export class SynopsisConversationService {
               content: [
                 "创作台 ReAct 提醒：",
                 `- 当前已可见 readEvidence ${String(readEvidence.length)} 条；优先基于这些证据给出正式结论。`,
-                "- 若仍缺文件，使用 outcome=request_read；否则必须 outcome=continue，且 artifact 为对象，至少含 assistantMessage 与 finalSelfReview。",
+                "- 若仍缺文件，使用 outcome=request_read；工具调用用 outcome=continue + artifact.toolRequest；否则返回最终 artifact。artifact 至少含 assistantMessage 与 finalSelfReview。",
                 "- 禁止把「我先去读设定/索引」写进 assistantMessage 当作最终回复。",
                 ...repairHints.slice(-2),
               ].join("\n"),
@@ -1644,6 +1675,7 @@ export class SynopsisConversationService {
           options: {
             phasePrompt,
             forceThinking: true,
+            ...(input.signal === undefined ? {} : { signal: input.signal }),
             contextChainId: input.sessionId,
             onSchemaRepair: () => {
               if (isSynopsisSendCancelled(input.projectId)) throw new SynopsisSendCancelledError()
@@ -1750,6 +1782,77 @@ export class SynopsisConversationService {
         synopsisConversationStreamHub.setThinking(input.projectId, accumulatedReasoning, this.dependencies.now())
       }
       const requestedReads = parsedResult.requestedReads
+      const toolArtifact = synopsisDiscussArtifactSchema.safeParse(parsedResult.artifact)
+      if (toolArtifact.success && toolArtifact.data.toolRequest !== undefined) {
+        if (parsedResult.outcome !== "continue" || requestedReads.length > 0) {
+          repairHints.push("toolRequest 必须单独使用 outcome=continue，不能与 request_read 同回。")
+          attempt += 1
+          continue
+        }
+        if (isSynopsisSendCancelled(input.projectId)) throw new SynopsisSendCancelledError()
+        const cancellation = new AbortController()
+        const remainingMs = Math.max(1, deadlineAtMs - this.dependencies.now())
+        const toolSignal = AbortSignal.any([
+          cancellation.signal,
+          AbortSignal.timeout(remainingMs),
+          ...(input.signal === undefined ? [] : [input.signal]),
+        ])
+        const cancellationPoll = setInterval(() => {
+          if (isSynopsisSendCancelled(input.projectId)) cancellation.abort(new SynopsisSendCancelledError())
+        }, 100)
+        cancellationPoll.unref()
+        try {
+          // Re-read after compaction: hidden descriptions no longer grant permission.
+          const visibleMessages = toVisibleDiscussContextMessages(
+            await this.dependencies.conversation.listDiscussContextMessages(input.sessionId),
+          )
+          const toolResult = await executeSynopsisTool({
+            request: toolArtifact.data.toolRequest,
+            context: {
+              projectId: input.projectId,
+              workspaceRootRef: input.workspaceRootRef,
+              sessionId: input.sessionId,
+              chapterSequence: input.chapterSequence,
+              model: input.model,
+              maxModelCalls: Math.max(1, remainingCalls),
+              deadlineMs: remainingMs,
+              signal: toolSignal,
+              ...(input.chapterIntent === undefined ? {} : { chapterIntent: input.chapterIntent }),
+              ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
+            },
+            callbacks: toolCallbacks,
+            visibleMessages,
+            listDrafts: async () => {
+              const revisions = this.dependencies.revisions
+              if (revisions === undefined) return []
+              const draft = await revisions.getDraftWorkspace({ projectId: input.projectId, chapterSequence: input.chapterSequence })
+              if (draft === undefined) return []
+              const listed = await revisions.listDraftVersions(draft.revisionTaskId)
+              return listed.versions.map((version) => ({
+                revisionTaskId: version.revisionTaskId,
+                draftVersionId: version.versionId,
+                draftLabel: version.label,
+                heading: version.heading,
+              }))
+            },
+          })
+          if (toolResult.status === "draft_created") {
+            latestToolDraft = toolResult.result as SynopsisWorkflowToolResult
+            focusedDraftMarkdown = assembleChapterDocument(latestToolDraft.heading, latestToolDraft.body)
+          }
+          await this.dependencies.conversation.appendDiscussContextMessages({
+            sessionId: input.sessionId,
+            projectId: input.projectId,
+            createdAtMs: this.dependencies.now(),
+            messages: [{ role: "system", kind: "phase_instruction", content: JSON.stringify(toolResult) }],
+          })
+          synopsisConversationStreamHub.setContent(input.projectId, "", this.dependencies.now())
+        } finally {
+          clearInterval(cancellationPoll)
+        }
+        attempt += 1
+        continue
+      }
       if (parsedResult.outcome !== "request_read" || requestedReads.length === 0) {
         const artifact = synopsisDiscussArtifactSchema.safeParse(parsedResult.artifact)
         if (!artifact.success) {
@@ -1797,6 +1900,12 @@ export class SynopsisConversationService {
                 },
               }),
           ...mapArtifactChapterDraftProposal(artifact.data.chapterDraftProposal),
+          ...(latestToolDraft === undefined ? {} : { appendedDraft: {
+            revisionTaskId: latestToolDraft.revisionTaskId,
+            chapterId: latestToolDraft.chapterId,
+            draftVersionId: latestToolDraft.draftVersionId,
+            draftLabel: latestToolDraft.draftLabel,
+          } }),
           ...(artifact.data.choices === undefined ? {} : { choices: artifact.data.choices }),
           ...(artifact.data.stagingDelta === undefined
             ? {}
@@ -2549,8 +2658,9 @@ export class SynopsisConversationService {
     const revisions = this.dependencies.revisions
     if (revisions === undefined) return undefined
     const indexed = await this.dependencies.chapterIndex.findBySequence(projectId, sequence)
-    if (indexed === undefined) return undefined
-    const active = await revisions.findActiveRevision(projectId, indexed.chapterId)
+    const active = indexed === undefined
+      ? await revisions.getDraftWorkspace({ projectId, chapterSequence: sequence })
+      : await revisions.findActiveRevision(projectId, indexed.chapterId)
     if (active === undefined) return undefined
     const listed = await revisions.listDraftVersions(active.revisionTaskId)
     const latest = listed.versions.find((version) => version.isLatest) ?? listed.versions.at(-1)
@@ -2563,6 +2673,7 @@ export class SynopsisConversationService {
     workspaceRootRef: string
     chapterSequence: number
     proposal?: ChapterDraftProposal
+    volumeFolderName?: string
     messageId: string
   }>): Promise<Readonly<{
     appended?: NonNullable<SynopsisConversationSendResult["appendedDraft"]>
@@ -2575,7 +2686,34 @@ export class SynopsisConversationService {
     }
     const indexed = await this.dependencies.chapterIndex.findBySequence(input.projectId, input.chapterSequence)
     if (indexed === undefined) {
-      return { notice: "本章尚无正式正文，无法写入修订草稿。" }
+      const shortHeading = normalizeDiscussDraftHeading(input.proposal.heading, "待命名")
+        .replace(/^第(?:\d+|[零一二三四五六七八九十百千万]+)章\s*/u, "")
+      const heading = `${formatChapterSequenceLabel(input.chapterSequence)} ${shortHeading}`
+      const body = stripHeadingFromDraftBody(input.proposal.heading, input.proposal.body)
+      if (body.trim().length === 0) return { notice: "正文为空，未写入草稿。" }
+      const stored = await revisions.startForChapterSequence({
+        projectId: input.projectId,
+        workspaceRootRef: input.workspaceRootRef,
+        chapterSequence: input.chapterSequence,
+        heading,
+        body,
+        volumeFolderName: input.volumeFolderName ?? DEFAULT_VOLUME_FOLDER_NAME,
+        source: "agent",
+        messageId: input.messageId,
+      })
+      const draft = await revisions.readRevision(stored.revisionTaskId)
+      this.emitDiscussEdit(input.projectId, {
+        path: draft.publishPath ?? deriveChapterPublishPath(heading, input.volumeFolderName ?? DEFAULT_VOLUME_FOLDER_NAME),
+        kind: "draft",
+        status: "completed",
+        summary: `已写入草稿 ${stored.label}`,
+      })
+      return { appended: {
+        revisionTaskId: stored.revisionTaskId,
+        chapterId: draft.chapterId,
+        draftVersionId: stored.versionId,
+        draftLabel: stored.label,
+      } }
     }
     const current = await revisions.read(input.projectId, indexed.chapterId)
     const heading = normalizeDiscussDraftHeading(input.proposal.heading, current.heading)

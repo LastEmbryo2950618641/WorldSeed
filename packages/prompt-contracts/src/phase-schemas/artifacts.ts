@@ -609,6 +609,12 @@ export const synopsisPresentationWriteSchema = z.object({
 
 export const synopsisDiscussArtifactSchema = z.object({
   assistantMessage: z.string().min(1),
+  /** Parameters and writing guidance are disclosed only by a successful describe. */
+  toolRequest: z.object({
+    name: z.enum(["chapter_workflow", "publish_draft"]),
+    action: z.enum(["describe", "invoke"]),
+    arguments: z.string().max(200_000).optional(),
+  }).strict().optional(),
   chapterTitle: z.string().min(1).optional(),
   /**
    * When 正文 vs 梗概/细纲 标题主干不一致时：系统按目标统一重命名。
@@ -648,7 +654,7 @@ export const synopsisDiscussArtifactSchema = z.object({
     })).min(1).max(20),
   }).optional(),
   /**
-   * Full revised chapter body for the focused (or locked) published chapter.
+   * Full chapter draft for the focused (or locked) chapter, including its first draft.
    * Applied immediately as a new draft version; official 章节正文/*.md is unchanged.
    */
   chapterDraftProposal: z.object({
@@ -687,6 +693,14 @@ export const synopsisDiscussArtifactSchema = z.object({
   }).optional(),
   finalSelfReview: z.string().min(1),
 }).superRefine((value, ctx) => {
+  if (value.toolRequest !== undefined && Object.entries(value).some(([key, field]) =>
+    field !== undefined && !["assistantMessage", "finalSelfReview", "toolRequest"].includes(key))) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "toolRequest 不可与章节写入、草稿提案或其他动作同回；先等待工具结果再继续",
+      path: ["toolRequest"],
+    })
+  }
   if (value.outlineBody !== undefined && value.bodyEdits !== undefined) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,

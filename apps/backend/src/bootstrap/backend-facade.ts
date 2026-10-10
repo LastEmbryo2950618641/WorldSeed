@@ -42,6 +42,7 @@ import {
   chapterReadRevisionPayloadSchema,
   chapterFindActiveRevisionPayloadSchema,
   chapterStartRevisionPayloadSchema,
+  chapterStartDraftPayloadSchema,
   chapterUpdateRevisionPayloadSchema,
   chapterReviewRevisionPayloadSchema,
   chapterSubmitRevisionPayloadSchema,
@@ -102,7 +103,7 @@ import {
   worldEvolvePayloadSchema,
   worldQueryPayloadSchema,
 } from "@worldseed/contracts"
-import { digest, isChapterVolumeContainerPath } from "../core/index.js"
+import { DEFAULT_VOLUME_FOLDER_NAME, digest, isChapterVolumeContainerPath, pickPreferredVolumeFolderName } from "../core/index.js"
 import {
   ChapterNotFoundError,
   ProjectLifecycleError,
@@ -449,9 +450,26 @@ export class BackendFacade {
           ...(payload.inputMode === undefined ? {} : { inputMode: payload.inputMode }),
         })
       }
+      case "chapter.draft.list": {
+        const payload = chapterListPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().listUnpublished(payload.projectId)
+      }
+      case "chapter.draft.start": {
+        const payload = chapterStartDraftPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        const volumes = await this.container.workspace.listVolumeFolderNames(payload.workspaceRootRef)
+        return runtime.createChapterRevisionService().startForChapterSequence({
+          ...payload,
+          volumeFolderName: payload.volumeFolderName ?? pickPreferredVolumeFolderName(volumes) ?? DEFAULT_VOLUME_FOLDER_NAME,
+        })
+      }
       case "chapter.updateRevision": {
         const payload = chapterUpdateRevisionPayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        if (payload.draftVersionId !== undefined) {
+          return runtime.createChapterRevisionService().updateDraftVersion(payload.revisionTaskId, payload.draftVersionId, payload.heading, payload.body)
+        }
         return runtime.createChapterRevisionService().update(payload.revisionTaskId, payload.heading, payload.body)
       }
       case "chapter.reviewRevision": {
@@ -484,6 +502,7 @@ export class BackendFacade {
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
         return runtime.submitChapterRevision({
           revisionTaskId: payload.revisionTaskId,
+          ...(payload.draftVersionId === undefined ? {} : { draftVersionId: payload.draftVersionId }),
           workspaceRootRef: payload.workspaceRootRef,
           mode: payload.mode,
           forced: payload.forced,
@@ -973,7 +992,7 @@ export class BackendFacade {
       case "turn.latest.get": {
         const payload = turnLatestGetPayloadSchema.parse(request.payload)
         const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
-        const latest = await runtime.findLatestTask()
+        const latest = await runtime.findLatestTask(payload.chapterSequence)
         if (latest === undefined) return null
         return this.readTask(latest.taskId)
       }
@@ -1051,7 +1070,7 @@ export class BackendFacade {
       userInput: prepared.userInput,
       chapterSequence: prepared.chapterSequence,
       allowWorkspaceChapterReads: payload.allowWorkspaceChapterReads,
-      lockDeductionGoals: true,
+      lockDeductionGoals: false,
       ...(payload.presentation === undefined ? {} : { presentation: payload.presentation }),
       ...(payload.chapterIntent === undefined ? {} : { chapterIntent: payload.chapterIntent }),
       ...(payload.model === undefined ? {} : { model: payload.model }),
@@ -1093,7 +1112,10 @@ export class BackendFacade {
         runtimeLog("warn", "backend-facade", "turn.blocked.graph_sync", { projectId: input.projectId })
         throw new RevisionInvalidStateError("存在尚未完成图同步的章节修订，请先完成图同步后再开始新一轮推演")
       }
-      chapterSequence = await chapterResolve.nextChapterSequence(input.projectId)
+      const nextChapterSequence = await chapterResolve.nextChapterSequence(input.projectId)
+      if (chapterSequence > nextChapterSequence) {
+        throw new RevisionInvalidStateError("前一章尚未经过图修订发布为正文，不能处理下一章")
+      }
       runtimeLog("debug", "backend-facade", "turn.sequence.assigned", {
         projectId: input.projectId,
         chapterSequence,
@@ -1101,6 +1123,9 @@ export class BackendFacade {
       })
     }
     let deductionGoalBundle = input.deductionGoalBundle
+    if (input.workflow === "turn" && deductionGoalBundle === undefined) {
+      deductionGoalBundle = await runtime.createDeductionGoalsService().buildTurnBundle({ projectId: input.projectId, chapterSequence })
+    }
     if (input.workflow === "turn" && (input.lockDeductionGoals === true || deductionGoalBundle !== undefined)) {
       const goals = runtime.createDeductionGoalsService()
       if (input.lockDeductionGoals === true) {
@@ -1141,6 +1166,7 @@ export class BackendFacade {
     const orchestrator = runtime.createTurnOrchestrator(model, this.container.createId, this.container.now)
     const turnInput = {
       workflow: input.workflow,
+      ...(input.workflow === "turn" ? { outputMode: "draft" as const } : {}),
       projectId: input.projectId,
       workspaceRootRef: input.workspaceRootRef,
       internalStore: runtime.internalStore,
@@ -1234,6 +1260,9 @@ export class BackendFacade {
     const phaseRuns = await this.readPhaseRuns(runtime, taskId)
     const finalization = await runtime?.findFinalizationByTask(taskId)
     const runtimeMetrics = await runtime?.readRuntimeMetrics(taskId, this.container.now())
+    const draftResult = stored?.status === "completed" && inMemory?.result === undefined
+      ? await runtime?.readDraftTaskResult(taskId)
+      : undefined
     if (stored !== undefined) {
       const storedHandle = {
         taskId: stored.taskId,
@@ -1243,6 +1272,7 @@ export class BackendFacade {
       }
       return {
         ...(inMemory === undefined ? {} : toPublicTaskSnapshot(inMemory)),
+        ...(draftResult === undefined ? {} : { result: draftResult }),
         handle: { ...(inMemory?.handle ?? storedHandle), status: stored.status },
         status: stored.status,
         ...(stored?.lastPhase === undefined ? {} : { lastPhase: stored.lastPhase }),

@@ -10,6 +10,7 @@ import { PROTOCOL_VERSION } from "@worldseed/contracts"
 import {
   openChapterHarness,
   seedCommittedChapter,
+  waitForRevisionGraphSync,
   type ChapterHarness,
 } from "./helpers/chapter-coordination-harness.js"
 
@@ -221,6 +222,7 @@ describe("discuss auto-append chapter drafts", () => {
         forced: true,
       })
       expect(submitted.status).toBe("graph_sync_pending")
+      await waitForRevisionGraphSync(harness.facade, harness.projectId, harness.workspaceRootRef, sent.appendedDraft!.revisionTaskId)
       const after = await invoke<{ body: string; publishPath: string }>(harness, "chapter.read", {
         projectId: harness.projectId,
         workspaceRootRef: harness.workspaceRootRef,
@@ -250,7 +252,7 @@ describe("discuss auto-append chapter drafts", () => {
         mode: "direct",
         forced: true,
       })
-      const published = await invoke<{ sourceId: string; publishPath: string; heading: string; body: string }>(
+      let published = await invoke<{ sourceId: string; publishPath: string; heading: string; body: string }>(
         harness,
         "chapter.read",
         {
@@ -279,6 +281,11 @@ describe("discuss auto-append chapter drafts", () => {
       })
       expect(resolved.activeRevision?.revisionTaskId).toBe(revisionTaskId)
 
+      await waitForRevisionGraphSync(harness.facade, harness.projectId, harness.workspaceRootRef, revisionTaskId)
+      published = await invoke(harness, "chapter.read", {
+        projectId: harness.projectId, workspaceRootRef: harness.workspaceRootRef, chapterId: chapter.chapterId,
+      })
+
       const listed = await invoke<{
         versions: Array<{ source: string; isLatest: boolean; isCurrentOfficial?: boolean }>
       }>(harness, "chapter.revision.draftVersion.list", {
@@ -290,7 +297,6 @@ describe("discuss auto-append chapter drafts", () => {
       expect(listed.versions.some((version) => version.source === "agent" && version.isCurrentOfficial === true)).toBe(true)
       expect(listed.versions.some((version) => version.source === "baseline" && version.isCurrentOfficial !== true)).toBe(true)
 
-      markRevisionCompleted(harness, revisionTaskId)
       const afterComplete = await invoke<{
         activeRevision?: { revisionTaskId: string; status: string }
       }>(harness, "chapter.resolveByPath", {
@@ -327,7 +333,7 @@ describe("discuss auto-append chapter drafts", () => {
         revisionTaskId: stray.revisionTaskId,
         includeChapterHistory: true,
       })
-      expect(history.versions.some((version) => version.source === "baseline" && version.isCurrentOfficial !== true)).toBe(true)
+      expect(history.versions.some((version) => (version.source === "baseline" || version.source === "workflow") && version.isCurrentOfficial !== true)).toBe(true)
       expect(history.versions.some((version) => version.source === "agent" && version.isCurrentOfficial === true)).toBe(true)
     })
   })
@@ -352,6 +358,7 @@ describe("discuss auto-append chapter drafts", () => {
         forced: true,
       })
       expect(submitted.status).toBe("graph_sync_pending")
+      await waitForRevisionGraphSync(harness.facade, harness.projectId, harness.workspaceRootRef, sent.appendedDraft!.revisionTaskId)
       const after = await invoke<{ body: string }>(harness, "chapter.read", {
         projectId: harness.projectId,
         workspaceRootRef: harness.workspaceRootRef,

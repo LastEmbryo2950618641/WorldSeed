@@ -161,6 +161,75 @@ describe("renderer workbench UI contract", () => {
     vi.clearAllMocks()
   })
 
+  it("edits actual unpublished drafts at an intended body path without an official version", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      selectedPath: "章节正文/第三章 尚未发布.md",
+      openedDocumentPath: "章节正文/第三章 尚未发布.md",
+      chapter: { chapterId: "chapter-3", sourceId: "source-3" },
+      chapterIsUnpublished: true,
+      persistedDraftVersions: [
+        { versionId: "draft-1", projectId: "project-1", revisionTaskId: "revision-3", source: "agent", label: "v1", heading: "讨论标题", body: "讨论草稿", bodyDigest: "d1", createdAtMs: 1, isLatest: false },
+        { versionId: "draft-2", projectId: "project-1", revisionTaskId: "revision-3", source: "manual", label: "v2", heading: "人工标题", body: "人工草稿", bodyDigest: "d2", createdAtMs: 2, isLatest: false },
+        { versionId: "draft-3", projectId: "project-1", revisionTaskId: "revision-3", source: "workflow", label: "v3", heading: "流程标题", body: "流程工具生成的草稿", bodyDigest: "d3", createdAtMs: 3, isLatest: true },
+      ],
+    })))
+    expect(html).toContain("流程标题")
+    expect(html).toContain('data-readonly="false"')
+    expect(html).toContain("流程工具生成的草稿")
+    expect(html).toContain("草稿 · v1 · 讨论agent")
+    expect(html).toContain("草稿 · v2 · 人工")
+    expect(html).toContain("草稿 · v3 · AI流程工具")
+    for (const source of ["agent", "manual", "workflow"]) expect(html).toContain(`chapter-version-mark-${source}`)
+    expect(html).not.toContain('data-testid="chapter-document-committed"')
+    expect(html).not.toContain("当前正文")
+    expect(html).not.toContain("proto-v0")
+  })
+
+  it.each([undefined, "章节正文/第一章 [剧情梗概].md", "章节正文/第一章 [剧情细纲].md"])("offers first manual draft creation on %s", (selectedPath) => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({ selectedPath, onCreateDraft: vi.fn(async () => {}) })))
+    expect(html).toContain('data-testid="editor-create-first-draft"')
+    expect(html).toContain("新建草稿")
+  })
+
+  it("hides first draft creation when actual drafts already exist", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      onCreateDraft: vi.fn(async () => {}),
+      persistedDraftVersions: [{ versionId: "draft-1", projectId: "project-1", revisionTaskId: "revision-1", source: "manual", label: "v1", heading: "第一章", body: "人工草稿", bodyDigest: "d1", createdAtMs: 1, isLatest: true }],
+    })))
+    expect(html).not.toContain('data-testid="editor-create-first-draft"')
+  })
+
+  it("does not invent a version for an unpublished chapter without drafts", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      selectedPath: "章节正文/第三章 尚未发布.md",
+      chapterIsUnpublished: true,
+      persistedDraftVersions: [],
+    })))
+    expect(html).toContain("暂无草稿")
+    expect(html).not.toContain("当前正文")
+    expect(html).not.toContain('role="option"')
+    expect(html).not.toContain('data-testid="chapter-document-committed"')
+  })
+
+  it("keeps an intentionally empty persisted draft instead of using fallback body content", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      selectedPath: "章节正文/第三章 尚未发布.md",
+      chapterIsUnpublished: true,
+      chapterBody: "不得回填的旧正文",
+      persistedDraftVersions: [{ versionId: "draft-empty", projectId: "project-1", revisionTaskId: "revision-3", source: "manual", label: "v1", heading: "空草稿", body: "", bodyDigest: "d", createdAtMs: 1, isLatest: true }],
+    })))
+    expect(html).not.toContain("不得回填的旧正文")
+    expect(html).toContain("空草稿")
+  })
+
+  it("renames a legacy start_turn choice without changing its action", () => {
+    const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
+      synopsisMessages: [{ messageId: "message-1", sessionId: "session-1", role: "assistant", content: "梗概已准备好", createdAtMs: 1, choices: [{ label: "开始推演", action: "start_turn" }] }],
+    })))
+    expect(html).toContain("调用流程推理工具")
+    expect(html).not.toContain("开始推演")
+  })
+
   it("renders the creation desk as a full-height conversation workspace", () => {
     const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults()))
 
@@ -818,7 +887,7 @@ describe("renderer workbench UI contract", () => {
 
     expect(html).toContain("data-testid=\"chapter-draft-version-select\"")
     expect(html).toContain("草稿版本")
-    expect(html).toContain("草稿 · v1 · 已覆盖正文")
+    expect(html).toContain("草稿 · v1 · 讨论agent · 已覆盖正文")
     expect(html).toContain("chapter-version-mark-covered")
     expect(html).toContain("此草稿已覆盖为当前正文")
     expect(html).toContain("data-version-kind=\"draft\"")
@@ -896,7 +965,7 @@ describe("renderer workbench UI contract", () => {
 
     expect(html).toContain("data-version-kind=\"draft\"")
     expect(html).toContain("草稿 · v1")
-    expect(html).toContain("草稿 · v2 · 已覆盖正文")
+    expect(html).toContain("草稿 · v2 · 讨论agent · 已覆盖正文")
     expect(html).toContain("中间草稿，尚未覆盖正文。")
     expect(html).toContain("正在查看 草稿 · v1")
     expect(html).toContain("chapter-version-mark-covered")
@@ -957,6 +1026,45 @@ describe("renderer workbench UI contract", () => {
 })
 
 describe("right rail process UI contract", () => {
+  it("ends the draft workflow at naming and omits graph and publication stages", () => {
+    const html = renderToStaticMarkup(React.createElement(RightRail, {
+      graphSlice: undefined,
+      task: { status: "running", lastPhase: "draft" },
+      focusedChapterSequence: 3,
+    }))
+    expect(html).toContain("流程推理工具")
+    expect(html).toContain("第 3 章")
+    expect(html).toContain("生成新草稿")
+    expect(html).toContain("生成章节标题")
+    expect(html).not.toContain("分步治理世界图")
+    expect(html).not.toContain("检查依赖闭合")
+    expect(html).not.toContain("最终提交审查")
+    expect(html).not.toContain("正式章节收尾")
+  })
+
+  it("shows a chapter-specific empty state when App filters out an unrelated task", () => {
+    const html = renderToStaticMarkup(React.createElement(RightRail, {
+      graphSlice: undefined,
+      task: undefined,
+      focusedChapterSequence: 4,
+    }))
+    expect(html).toContain("第 4 章暂无流程任务")
+    expect(html).not.toContain('class="phase-list"')
+    expect(html).not.toContain("checkpoint-dialog")
+  })
+
+  it("uses the explicit execution plan in order and omits unplanned recorded phases", () => {
+    const html = renderToStaticMarkup(React.createElement(RightRail, {
+      graphSlice: undefined,
+      task: { status: "completed", lastPhase: "dependency_audit" },
+      executionPhases: ["draft", "chapter_naming"],
+    }))
+    expect(html.indexOf("生成新草稿")).toBeLessThan(html.indexOf("生成章节标题"))
+    expect(html).not.toContain("理解用户输入")
+    expect(html).not.toContain("检查依赖闭合")
+    expect(html).not.toContain("分步治理世界图")
+  })
+
   it("renders backend runtime descriptors instead of front-end default limits", () => {
     const html = renderToStaticMarkup(React.createElement(RightRail, {
       graphSlice: undefined,
@@ -1059,7 +1167,7 @@ describe("right rail process UI contract", () => {
 
     expect(html).toContain("已向模型发起请求")
     expect(html).toContain("等待 AI 返回思考记录与正式输出")
-    expect(html).toContain("等待本轮数据")
+    expect(html).toContain("流程推理工具运行中")
   })
 
   it("omits the redundant text status column from phase rows", () => {
@@ -1160,7 +1268,7 @@ describe("right rail process UI contract", () => {
     expect(html).not.toContain("实时状态")
     expect(html).toContain("全部重置")
     expect(html).toContain("读取当前场景锚点")
-    expect(html).toContain("撰写正文")
+    expect(html).toContain("生成新草稿")
     expect(html).not.toContain("审查正文响应")
     expect(html).not.toContain("抽取设定提案")
     expect(html).not.toContain("审查出现依据")
@@ -1239,7 +1347,7 @@ describe("right rail process UI contract", () => {
     expect(html).not.toContain("整体治理审核")
     expect(html).not.toContain("结算资料返回路径")
     expect(html).not.toContain("最终提交审查")
-    expect(html).toContain("撰写正文")
+    expect(html).toContain("生成新草稿")
     expect(html).toContain("分步治理世界图")
   })
 
@@ -1345,7 +1453,7 @@ describe("right rail process UI contract", () => {
       onRollbackRound: vi.fn(() => Promise.resolve()),
     }))
 
-    expect(html).toContain("推演已暂停")
+    expect(html).toContain("流程推理工具已暂停")
     expect(html).toContain("draft")
     expect(html).toContain("暂停原因")
     expect(html).toContain("本轮执行时间已到上限")

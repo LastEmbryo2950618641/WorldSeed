@@ -1223,4 +1223,30 @@ export const projectMigrations = Object.freeze([
   defineSqlMigration<ProjectDatabase>(48, "048_synopsis_session_focus_kind", [
     "ALTER TABLE synopsis_conversation_sessions ADD COLUMN focus_kind TEXT NOT NULL DEFAULT 'plot_synopsis'",
   ]),
+  defineSqlMigration<ProjectDatabase>(49, "049_unpublished_chapter_revisions", [
+    "ALTER TABLE chapter_revision_tasks ADD COLUMN chapter_sequence INTEGER CHECK (chapter_sequence > 0)",
+    "ALTER TABLE chapter_revision_tasks ADD COLUMN publish_path TEXT",
+    "ALTER TABLE chapter_revision_tasks ADD COLUMN is_initial_publication INTEGER NOT NULL DEFAULT 0 CHECK (is_initial_publication IN (0, 1))",
+    `UPDATE chapter_revision_tasks SET chapter_sequence = (
+      SELECT sequence FROM chapter_index WHERE chapter_index.project_id = chapter_revision_tasks.project_id
+        AND chapter_index.chapter_id = chapter_revision_tasks.chapter_id
+    )`,
+    "CREATE UNIQUE INDEX chapter_revision_tasks_unpublished_sequence ON chapter_revision_tasks(project_id, chapter_sequence) WHERE is_initial_publication = 1 AND status NOT IN ('retired', 'completed')",
+    `CREATE TABLE revision_draft_versions_new (
+      version_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      revision_task_id TEXT NOT NULL REFERENCES chapter_revision_tasks(id) ON DELETE CASCADE,
+      parent_version_id TEXT REFERENCES revision_draft_versions_new(version_id),
+      source TEXT NOT NULL CHECK (source IN ('baseline', 'agent', 'manual', 'workflow', 'rollback')),
+      message_id TEXT,
+      heading TEXT NOT NULL,
+      body TEXT NOT NULL,
+      body_digest TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL
+    )`,
+    "INSERT INTO revision_draft_versions_new SELECT * FROM revision_draft_versions",
+    "DROP TABLE revision_draft_versions",
+    "ALTER TABLE revision_draft_versions_new RENAME TO revision_draft_versions",
+    "CREATE INDEX revision_draft_versions_revision ON revision_draft_versions(revision_task_id, created_at_ms ASC)",
+  ]),
 ])

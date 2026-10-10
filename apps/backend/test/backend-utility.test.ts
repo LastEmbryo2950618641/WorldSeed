@@ -192,13 +192,14 @@ describe("backend utility runtime", () => {
     const taskId = readTaskId(started)
     const completed = await waitForCompletedTask(facade, taskId)
     expect(completed.ok).toBe(true)
-    expect(existsSync(join(workspaceRootRef, "章节正文", "第一章 世界种子.md"))).toBe(true)
+    const published = await publishTurnDraft(facade, projectId, workspaceRootRef, taskId)
+    expect(existsSync(join(workspaceRootRef, published.publishPath))).toBe(true)
     const automaticHistory = await waitForHistoryEntries(facade, projectId, workspaceRootRef, 1)
     expect(automaticHistory).toMatchObject([{
       kind: "automatic",
       state: "complete_world",
       status: "ready",
-      taskId,
+      taskId: published.revisionTaskId,
     }])
 
     const manualOperationId = randomUUID()
@@ -277,7 +278,15 @@ describe("backend utility runtime", () => {
       { name: "主世界线", status: "active" },
       { name: "世界线 2", status: "active", forkEntryId: automaticHistory[0]?.entryId },
     ])
-    const graphAnchorIds = readGraphAnchorIds(completed)
+    const graphDatabase = new Database(join(root, "application-data", "projects", projectId, "project.sqlite"), { readonly: true })
+    let graphAnchorIds: string[]
+    try {
+      graphAnchorIds = (graphDatabase.prepare("select id from nodes where visibility = 'committed'").all() as { id: string }[])
+        .map((node) => node.id)
+      expect(graphAnchorIds.length).toBeGreaterThan(0)
+    } finally {
+      graphDatabase.close()
+    }
     const neighborhood = await facade.handle({
       protocolVersion: PROTOCOL_VERSION,
       requestId: randomUUID(),
@@ -425,7 +434,8 @@ describe("backend utility runtime", () => {
     if (interrupted.ok && typeof interrupted.data === "object" && interrupted.data !== null && "phaseRuns" in interrupted.data) {
       const phaseRuns = interrupted.data.phaseRuns
       expect(Array.isArray(phaseRuns)).toBe(true)
-      expect(phaseRuns?.every((run) => typeof run === "object" && run !== null && !("request" in run))).toBe(true)
+      if (!Array.isArray(phaseRuns)) throw new Error("Task phase runs are invalid")
+      expect((phaseRuns as unknown[]).every((run) => typeof run === "object" && run !== null && !("request" in run))).toBe(true)
     }
 
     const resumed = await facade.handle({
@@ -439,11 +449,12 @@ describe("backend utility runtime", () => {
     const completed = await waitForTaskStatus(facade, taskId, "completed")
     expect(readPhaseNames(completed).filter((phase) => phase === "interpret")).toHaveLength(1)
     expect(readPhaseNames(completed)[1]).toBe("rule_assembly")
-    expect(existsSync(join(workspaceRootRef, "章节正文", "第一章 世界种子.md"))).toBe(true)
+    const published = await publishTurnDraft(facade, projectId, workspaceRootRef, taskId)
+    expect(existsSync(join(workspaceRootRef, published.publishPath))).toBe(true)
     expect(await waitForHistoryEntries(facade, projectId, workspaceRootRef, 1)).toMatchObject([{
       kind: "automatic",
       status: "ready",
-      taskId,
+      taskId: published.revisionTaskId,
     }])
   })
 
@@ -473,6 +484,7 @@ describe("backend utility runtime", () => {
       payload: { projectId, workspaceRootRef, userInput: "世界从一盏灯开始。", chapterSequence: 1 },
     })
     await waitForTaskStatus(facade, readTaskId(started), "completed")
+    const published = await publishTurnDraft(facade, projectId, workspaceRootRef, readTaskId(started))
 
     const listed = await facade.handle({
       protocolVersion: PROTOCOL_VERSION,
@@ -529,7 +541,7 @@ describe("backend utility runtime", () => {
       payload: { projectId, workspaceRootRef, revisionTaskId, mode: "direct", forced: true },
     })
     if (!submitted.ok) throw new Error(`${submitted.error.code}: ${submitted.error.message}`)
-    expect(submitted.ok && submitted.data).toMatchObject({
+    expect(submitted.data).toMatchObject({
       revisionTaskId,
       decision: "submit",
       graphSyncStatus: "pending",
@@ -553,11 +565,12 @@ describe("backend utility runtime", () => {
     expect((current.data as { content: string }).content).toBe(revisedContent)
     expect(current.data).toMatchObject({
       heading: "第一章 灯火新生",
-      publishPath: "章节正文/第一章 灯火新生.md",
+      publishPath: published.publishPath.replace("第一章 世界种子.md", "第一章 灯火新生.md"),
     })
     expect((current.data as { sourceId: string }).sourceId).not.toBe(chapter.sourceId)
-    expect(existsSync(join(workspaceRootRef, "章节正文", "第一章 世界种子.md"))).toBe(false)
-    expect(existsSync(join(workspaceRootRef, "章节正文", "第一章 灯火新生.md"))).toBe(true)
+    expect(existsSync(join(workspaceRootRef, published.publishPath))).toBe(false)
+    const revisedPath = (current.data as { publishPath: string }).publishPath
+    expect(existsSync(join(workspaceRootRef, revisedPath))).toBe(true)
 
     const duplicateSubmit = await facade.handle({
       protocolVersion: PROTOCOL_VERSION,
@@ -566,7 +579,10 @@ describe("backend utility runtime", () => {
       payload: { projectId, workspaceRootRef, revisionTaskId, mode: "direct", forced: true },
     })
     expect(duplicateSubmit.ok).toBe(true)
-    expect(duplicateSubmit.data).toMatchObject({ revisionTaskId, status: "completed" })
+    expect(duplicateSubmit.data).toMatchObject({ revisionTaskId })
+    expect(await waitForChapterRevision(facade, {
+      projectId, workspaceRootRef, revisionTaskId, graphSyncStatus: "completed",
+    })).toMatchObject({ status: "completed" })
 
     const projectDatabase = new Database(join(root, "application-data", "projects", projectId, "project.sqlite"), {
       readonly: true,
@@ -630,7 +646,7 @@ describe("backend utility runtime", () => {
     if (!reviewResult.ok) throw new Error(reviewResult.error.message)
     const reviewId = (reviewResult.data as { review?: { reviewId: string } }).review?.reviewId
     expect(reviewId).toBeTruthy()
-    await writeFileAsync(join(workspaceRootRef, "章节正文", "第一章 灯火新生.md"), "外部程序修改。", "utf8")
+    await writeFileAsync(join(workspaceRootRef, revisedPath), "外部程序修改。", "utf8")
     const externalConflict = await facade.handle({
       protocolVersion: PROTOCOL_VERSION,
       requestId: randomUUID(),
@@ -642,14 +658,14 @@ describe("backend utility runtime", () => {
     expect(externalConflict.error.code).toBe("storage_failure")
   })
 
-  it("resumes failed revision graph synchronization without rolling back the committed prose", async () => {
+  it("preserves the published prose until failed revision graph synchronization is retried successfully", async () => {
     const root = mkdtempSync(join(tmpdir(), "worldseed-chapter-revision-recovery-"))
     temporaryDirectories.push(root)
     const workspaceRootRef = join(root, "workspace")
     const applicationDataRoot = join(root, "application-data")
     const promptPackageRoot = fileURLToPath(new URL("../../../packages/prompt-contracts/", import.meta.url))
     const fake = new FakeAiModelAdapter(randomUUID)
-    let failRevisionGraph = true
+    let failRevisionGraph = false
     const facade = new BackendFacade(await BackendContainer.open({
       applicationDataRoot,
       promptPackageRoot,
@@ -692,6 +708,8 @@ describe("backend utility runtime", () => {
       payload: { projectId, workspaceRootRef, userInput: "世界从一盏灯开始。", chapterSequence: 1 },
     })
     await waitForTaskStatus(facade, readTaskId(started), "completed")
+    await publishTurnDraft(facade, projectId, workspaceRootRef, readTaskId(started))
+    failRevisionGraph = true
     const chapters = await facade.handle({
       protocolVersion: PROTOCOL_VERSION,
       requestId: randomUUID(),
@@ -739,10 +757,6 @@ describe("backend utility runtime", () => {
       decision: "submit",
       graphSyncStatus: "failed",
       status: "awaiting_user_decision",
-      finalization: {
-        revisionTaskId,
-        status: "graph_sync_pending",
-      },
     })
     const activeAfterFailure = await facade.handle({
       protocolVersion: PROTOCOL_VERSION,
@@ -757,7 +771,8 @@ describe("backend utility runtime", () => {
       method: "chapter.read",
       payload: { projectId, workspaceRootRef, chapterId: chapter.chapterId },
     })
-    expect(committedAfterFailure.ok && (committedAfterFailure.data as { content: string }).content).toBe(revisedContent)
+    expect(committedAfterFailure.ok && (committedAfterFailure.data as { content: string }).content)
+      .toBe((original.data as { content: string }).content)
 
     failRevisionGraph = false
     const resumed = await facade.handle({
@@ -775,6 +790,12 @@ describe("backend utility runtime", () => {
       graphSyncStatus: "completed",
     })).toMatchObject({ status: "completed", graphSyncStatus: "completed" })
 
+    const committedAfterRetry = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION, requestId: randomUUID(), method: "chapter.read",
+      payload: { projectId, workspaceRootRef, chapterId: chapter.chapterId },
+    })
+    expect(committedAfterRetry.ok && (committedAfterRetry.data as { content: string }).content).toBe(revisedContent)
+
     const database = new Database(join(applicationDataRoot, "projects", projectId, "project.sqlite"), { readonly: true })
       try {
       expect(Number(database.prepare(`select count(*) count from model_context_messages where task_id = ? and kind = 'chapter_revision'`).get(revisionTaskId)?.count ?? 0)).toBe(1)
@@ -785,7 +806,7 @@ describe("backend utility runtime", () => {
     }
   })
 
-  it("persists runtime metric windows and requires an explicit reset before resume", async () => {
+  it("persists runtime metric windows and resumes with an explicitly reset budget", async () => {
     const root = mkdtempSync(join(tmpdir(), "worldseed-runtime-metrics-"))
     temporaryDirectories.push(root)
     const workspaceRootRef = join(root, "workspace")
@@ -826,14 +847,6 @@ describe("backend utility runtime", () => {
       resetGeneration: 0,
     })
 
-    const resumeWithoutReset = await facade.handle({
-      protocolVersion: PROTOCOL_VERSION,
-      requestId: randomUUID(),
-      method: "turn.resume",
-      payload: { taskId },
-    })
-    expect(resumeWithoutReset.ok).toBe(false)
-
     const reset = await facade.handle({
       protocolVersion: PROTOCOL_VERSION,
       requestId: randomUUID(),
@@ -855,10 +868,13 @@ describe("backend utility runtime", () => {
       protocolVersion: PROTOCOL_VERSION,
       requestId: randomUUID(),
       method: "turn.resume",
-      payload: { taskId },
+      payload: { taskId, maxModelCalls: 400 },
     })
     expect(resumed.ok && resumed.data).toMatchObject({ taskId, status: "running" })
-    await waitForTaskStatus(facade, taskId, "completed")
+    const completed = await waitForTaskStatus(facade, taskId, "completed")
+    const calls = readRuntimeMetrics(completed).metrics.find((metric) => metric.metricId === "model_calls")
+    expect(calls).toMatchObject({ limit: 400, cumulative: 6, blocking: false })
+    expect(calls?.resetGeneration).toBeGreaterThanOrEqual(1)
   })
 
   it("rehydrates an interrupted turn after the backend process is reopened", async () => {
@@ -928,7 +944,8 @@ describe("backend utility runtime", () => {
     expect(resumed.ok && resumed.data).toMatchObject({ taskId, status: "running" })
     const completed = await waitForTaskStatus(reopenedFacade, taskId, "completed")
     expect(readPhaseNames(completed).filter((phase) => phase === "interpret")).toHaveLength(1)
-    expect(existsSync(join(workspaceRootRef, "章节正文", "第一章 世界种子.md"))).toBe(true)
+    const published = await publishTurnDraft(reopenedFacade, projectId, workspaceRootRef, taskId)
+    expect(existsSync(join(workspaceRootRef, published.publishPath))).toBe(true)
   })
 
   it("rehydrates a query from a late phase whose checkpoint omits the workspace catalog", async () => {
@@ -1064,7 +1081,8 @@ describe("backend utility runtime", () => {
     expect(resumed.ok && resumed.data).toMatchObject({ taskId, status: "running" })
     const completed = await waitForTaskStatus(reopenedFacade, taskId, "completed")
     expect(readPhaseNames(completed).filter((phase) => phase === "interpret")).toHaveLength(2)
-    expect(existsSync(join(workspaceRootRef, "章节正文", "第一章 世界种子.md"))).toBe(true)
+    const published = await publishTurnDraft(reopenedFacade, projectId, workspaceRootRef, taskId)
+    expect(existsSync(join(workspaceRootRef, published.publishPath))).toBe(true)
   })
 
   it("serves the first status request after turn initialization while the model is still running", async () => {
@@ -1239,7 +1257,7 @@ describe("backend utility runtime", () => {
     await waitForTaskStatus(facade, taskId, "completed")
   })
 
-  it("automatically evolves the committed world on the same context chain without publishing a chapter", async () => {
+  it("does not schedule automatic evolution or save world history for an unpublished draft", async () => {
     const root = mkdtempSync(join(tmpdir(), "worldseed-auto-evolution-"))
     temporaryDirectories.push(root)
     const applicationDataRoot = join(root, "application-data")
@@ -1267,13 +1285,21 @@ describe("backend utility runtime", () => {
     const turnTaskId = readTaskId(started)
     await waitForTaskStatus(facade, turnTaskId, "completed")
 
-    const databasePath = join(applicationDataRoot, "projects", projectId, "project.sqlite")
-    const evolution = await waitForAutomaticEvolution(databasePath, turnTaskId)
-    expect(evolution.status).toBe("completed")
-    expect(evolution.origin).toEqual({ kind: "automatic_evolution", triggerTaskId: turnTaskId })
-    expect(evolution.graphRevisionCount).toBeGreaterThan(0)
-    expect(evolution.chapterCount).toBe(0)
-    expect(evolution.contextChainCount).toBe(1)
+    const history = await facade.handle({
+      protocolVersion: PROTOCOL_VERSION, requestId: randomUUID(), method: "history.list",
+      payload: { projectId, workspaceRootRef },
+    })
+    expect(history.ok && history.data).toMatchObject({ entries: [] })
+    const database = new Database(join(applicationDataRoot, "projects", projectId, "project.sqlite"), { readonly: true })
+    try {
+      expect(database.prepare("select count(*) count from tasks where kind = 'evolution'").get()?.count).toBe(0)
+      expect(database.prepare("select count(*) count from graph_revisions").get()?.count).toBe(0)
+      expect(database.prepare("select count(*) count from document_versions where visibility = 'committed'").get()?.count).toBe(0)
+      expect(database.prepare("select count(*) count from model_context_chains").get()?.count).toBe(1)
+      expect(database.prepare("select count(*) count from revision_draft_versions where source = 'workflow'").get()?.count).toBe(1)
+    } finally {
+      database.close()
+    }
   })
 
   it("can suppress automatic evolution for an isolated acceptance run", async () => {
@@ -1303,6 +1329,7 @@ describe("backend utility runtime", () => {
     })
     const turnTaskId = readTaskId(started)
     await waitForTaskStatus(facade, turnTaskId, "completed")
+    await publishTurnDraft(facade, projectId, workspaceRootRef, turnTaskId)
     await waitForHistoryEntries(facade, projectId, workspaceRootRef, 1)
 
     const database = new Database(join(applicationDataRoot, "projects", projectId, "project.sqlite"), {
@@ -1326,15 +1353,27 @@ function readTaskId(response: ClientResponse): string {
   return taskId
 }
 
-function readGraphAnchorIds(response: ClientResponse): string[] {
-  if (!response.ok || typeof response.data !== "object" || response.data === null || !("result" in response.data)) {
-    throw new Error("turn.status did not return a completed result")
-  }
-  const result = response.data.result
-  if (typeof result !== "object" || result === null || !("graphAnchorIds" in result) || !Array.isArray(result.graphAnchorIds)) {
-    throw new Error("completed turn has no graph anchors")
-  }
-  return result.graphAnchorIds.filter((value): value is string => typeof value === "string")
+async function publishTurnDraft(facade: BackendFacade, projectId: string, workspaceRootRef: string, taskId: string) {
+  const completed = await waitForTaskStatus(facade, taskId, "completed")
+  if (!completed.ok) throw new Error(completed.error.message)
+  const { result } = completed.data as { result: { kind: string; revisionTaskId: string; draftVersionId: string } }
+  expect(result.kind).toBe("draft")
+  expect(result.draftVersionId).toBeTruthy()
+  expect(readPhaseNames(completed)).not.toContain("graph_structure_plan")
+  const pending = await facade.handle({
+    protocolVersion: PROTOCOL_VERSION, requestId: randomUUID(), method: "chapter.readRevision",
+    payload: { projectId, workspaceRootRef, revisionTaskId: result.revisionTaskId },
+  })
+  if (!pending.ok) throw new Error(pending.error.message)
+  const { publishPath } = pending.data as { publishPath: string }
+  expect(existsSync(join(workspaceRootRef, publishPath))).toBe(false)
+  const submitted = await facade.handle({
+    protocolVersion: PROTOCOL_VERSION, requestId: randomUUID(), method: "chapter.submitRevision",
+    payload: { projectId, workspaceRootRef, revisionTaskId: result.revisionTaskId, mode: "direct", forced: true },
+  })
+  if (!submitted.ok) throw new Error(submitted.error.message)
+  await waitForChapterRevision(facade, { projectId, workspaceRootRef, revisionTaskId: result.revisionTaskId, graphSyncStatus: "completed" })
+  return { revisionTaskId: result.revisionTaskId, publishPath }
 }
 
 function readRuntimeMetrics(response: ClientResponse) {
@@ -1351,7 +1390,7 @@ function readLatestRequestInputTokens(response: ClientResponse): number {
   }
   const phaseRuns = response.data.phaseRuns
   if (!Array.isArray(phaseRuns)) throw new Error("Task phase runs are invalid")
-  const latest = phaseRuns.at(-1)
+  const latest: unknown = phaseRuns.at(-1)
   if (typeof latest !== "object" || latest === null || !("usage" in latest)) {
     throw new Error("Latest phase run has no usage")
   }
@@ -1399,7 +1438,7 @@ async function waitForChapterRevision(
     })
     if (response.ok && typeof response.data === "object" && response.data !== null
       && "graphSyncStatus" in response.data && response.data.graphSyncStatus === input.graphSyncStatus) {
-      return response.data as Record<string, unknown>
+      return response.data
     }
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
@@ -1430,47 +1469,6 @@ async function waitForHistoryEntries(
   throw new Error(`history list did not reach ${String(minimumCount)} entries`)
 }
 
-async function waitForAutomaticEvolution(databasePath: string, triggerTaskId: string): Promise<{
-  status: string
-  origin: unknown
-  graphRevisionCount: number
-  chapterCount: number
-  contextChainCount: number
-}> {
-  for (let attempt = 0; attempt < 500; attempt += 1) {
-    if (!existsSync(databasePath)) {
-      await new Promise((resolve) => setTimeout(resolve, 10))
-      continue
-    }
-    const database = new Database(databasePath, { readonly: true, fileMustExist: true })
-    try {
-      const rows = database.prepare(`
-        select id, status, scope_id, config_snapshot_json
-        from tasks where kind = 'evolution' order by created_at
-      `).all() as { id: string; status: string; scope_id: string; config_snapshot_json: string }[]
-      for (const row of rows) {
-        const config = JSON.parse(row.config_snapshot_json) as { executionOrigin?: unknown }
-        if (JSON.stringify(config.executionOrigin) !== JSON.stringify({ kind: "automatic_evolution", triggerTaskId })) continue
-        if (row.status === "awaiting_user_decision" || row.status === "failed" || row.status === "cancelled") {
-          throw new Error(`automatic evolution stopped with ${row.status}`)
-        }
-        if (row.status !== "completed") continue
-        return {
-          status: row.status,
-          origin: config.executionOrigin,
-          graphRevisionCount: Number(database.prepare("select count(*) count from graph_revisions where scope_id = ?").get(row.scope_id)?.count ?? 0),
-          chapterCount: Number(database.prepare("select count(*) count from canonical_chapter_messages where task_id = ?").get(row.id)?.count ?? 0),
-          contextChainCount: Number(database.prepare("select count(*) count from model_context_chains").get()?.count ?? 0),
-        }
-      }
-    } finally {
-      database.close()
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
-  throw new Error("automatic evolution did not complete")
-}
-
 async function waitForTaskStatus(facade: BackendFacade, taskId: string, expectedStatus: string): Promise<ClientResponse> {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const response = await facade.handle({
@@ -1498,7 +1496,7 @@ async function waitForPhaseRunStatus(facade: BackendFacade, taskId: string, expe
     })
     if (response.ok && typeof response.data === "object" && response.data !== null && "phaseRuns" in response.data) {
       const phaseRuns = response.data.phaseRuns
-      if (Array.isArray(phaseRuns) && phaseRuns.some((run) => (
+      if (Array.isArray(phaseRuns) && (phaseRuns as unknown[]).some((run) => (
         typeof run === "object" && run !== null && "status" in run && run.status === expectedStatus
       ))) return response
     }
@@ -1511,12 +1509,12 @@ function readPhaseNames(response: ClientResponse): string[] {
   if (!response.ok || typeof response.data !== "object" || response.data === null || !("phaseRuns" in response.data)) return []
   const phaseRuns = response.data.phaseRuns
   if (!Array.isArray(phaseRuns)) return []
-  return phaseRuns.flatMap((run) => typeof run === "object" && run !== null && "phase" in run && typeof run.phase === "string" ? [run.phase] : [])
+  return (phaseRuns as unknown[]).flatMap((run) => typeof run === "object" && run !== null && "phase" in run && typeof run.phase === "string" ? [run.phase] : [])
 }
 
 function readPhaseRunStatuses(response: ClientResponse): string[] {
   if (!response.ok || typeof response.data !== "object" || response.data === null || !("phaseRuns" in response.data)) return []
   const phaseRuns = response.data.phaseRuns
   if (!Array.isArray(phaseRuns)) return []
-  return phaseRuns.flatMap((run) => typeof run === "object" && run !== null && "status" in run && typeof run.status === "string" ? [run.status] : [])
+  return (phaseRuns as unknown[]).flatMap((run) => typeof run === "object" && run !== null && "status" in run && typeof run.status === "string" ? [run.status] : [])
 }

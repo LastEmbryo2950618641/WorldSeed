@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto"
-import { readFileSync, rmSync } from "node:fs"
+import { mkdirSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
 
-import { PROTOCOL_VERSION } from "@worldseed/contracts"
+import { PROTOCOL_VERSION, type ProjectSettings } from "@worldseed/contracts"
 
-import { openChapterHarness, waitForTask, type ChapterHarness } from "./helpers/chapter-coordination-harness.js"
+import { openChapterHarness, seedCommittedChapter, waitForTask, type ChapterHarness } from "./helpers/chapter-coordination-harness.js"
 
 const temporaryRoots: string[] = []
 
@@ -150,6 +150,14 @@ describe("synopsis conversation", () => {
         projectId: harness.projectId,
         workspaceRootRef: harness.workspaceRootRef,
       }
+      const settings = await invoke<ProjectSettings>(harness, "project.settings.read", base)
+      await invoke(harness, "project.settings.save", {
+        ...base,
+        settings: {
+          ...settings,
+          creationDesk: { ...settings.creationDesk, autoApproveGoalProposals: false },
+        },
+      })
       await invoke(harness, "synopsis.conversation.start", base)
       const created = await invoke<{ goals: Array<{ goalId: string }> }>(harness, "deduction.goals.create", {
         ...base,
@@ -210,7 +218,7 @@ describe("synopsis conversation", () => {
     })
   })
 
-  it("beginTurn locks planned progress and starts a turn with goal bundle", async () => {
+  it("beginTurn starts a draft turn without locking planned progress", async () => {
     await withHarness(async (harness) => {
       const base = {
         projectId: harness.projectId,
@@ -241,17 +249,21 @@ describe("synopsis conversation", () => {
       expect(begun.taskId).toMatch(/^[0-9a-f-]{36}$/iu)
 
       const snapshot = await invoke<{
-        progress: Array<{ goalId: string; lockedAtMs?: number; summary: string }>
+        progress: Array<{ goalId: string; lockedAtMs?: number; summary: string; status: string }>
       }>(harness, "deduction.goals.list", base)
-      const locked = snapshot.progress.find((item) => item.goalId === goalId)
-      expect(locked?.summary).toBe("获得登记簿副本")
-      expect(locked?.lockedAtMs).toBeTypeOf("number")
+      const planned = snapshot.progress.find((item) => item.goalId === goalId)
+      expect(planned?.summary).toBe("获得登记簿副本")
+      expect(planned?.status).toBe("planned")
+      expect(planned?.lockedAtMs).toBeUndefined()
 
       await waitForTask(harness.facade, begun.taskId)
+      const completed = await invoke<typeof snapshot>(harness, "deduction.goals.list", base)
+      expect(completed.progress.find((item) => item.goalId === goalId)).toEqual(planned)
+      expect(await invoke(harness, "chapter.list", base)).toEqual([])
     })
   })
 
-  it("reviews beginTurn-locked planned progress via progress.set after turn completes", async () => {
+  it("updates unlocked planned progress as the user after a draft turn completes", async () => {
     await withHarness(async (harness) => {
       const base = {
         projectId: harness.projectId,
@@ -292,7 +304,7 @@ describe("synopsis conversation", () => {
       })
       const current = reviewed.progress.find((item) => item.goalId === goalId && item.status !== "superseded")
       expect(current?.status).toBe("achieved")
-      expect(current?.source).toBe("turn_review")
+      expect(current?.source).toBe("user")
       expect(current?.lockedAtMs).toBeUndefined()
     })
   })
@@ -363,8 +375,10 @@ describe("synopsis conversation", () => {
     })
   }, 20_000)
 
-  it("setFocus changes chapter without creating a new session", async () => {
+  it("setFocus changes chapter after publication without creating a new session", async () => {
     await withHarness(async (harness) => {
+      // Match the volume used by the fake model when seeding the published chapter.
+      mkdirSync(join(harness.workspaceRootRef, "章节正文/第一卷 世界种子"), { recursive: true })
       const started = await invoke<{ session: { sessionId: string; chapterSequence: number } }>(
         harness,
         "synopsis.conversation.start",
@@ -378,6 +392,7 @@ describe("synopsis conversation", () => {
         workspaceRootRef: harness.workspaceRootRef,
         message: "这一章从雨夜站台开始",
       })
+      await seedCommittedChapter(harness)
       const focused = await invoke<{
         session: { sessionId: string; chapterSequence: number; focusKind: string }
         messages: Array<{ role: string; content: string }>

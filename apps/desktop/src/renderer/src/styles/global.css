@@ -1233,7 +1233,7 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   align-items: center;
   gap: 4px;
   min-width: 0;
-  overflow: hidden;
+  flex-wrap: wrap;
 }
 .chapter-version-title {
   flex: 0 0 auto;
@@ -1264,6 +1264,27 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   color: var(--success);
 }
 .chapter-version-mark-covered {
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+.editor-tab-actions .editor-create-first-draft {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  width: auto;
+  padding: 0 8px;
+  font-size: 11px;
+}
+.chapter-version-mark-agent {
+  background: var(--accent-soft);
+  color: var(--info);
+}
+.chapter-version-mark-manual {
+  background: var(--success-soft);
+  color: var(--success);
+}
+.chapter-version-mark-workflow {
   background: var(--warning-soft);
   color: var(--warning-text);
 }
@@ -2388,7 +2409,7 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
 }
 .right-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(108px, 1.5fr);
+  grid-template-columns: minmax(118px, 1.7fr) repeat(3, minmax(0, 1fr)) minmax(108px, 1.5fr);
   background: var(--bg-sidebar);
   border-bottom: 1px solid var(--border-subtle);
   min-width: 0;
@@ -2475,7 +2496,18 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   }
 }
 .right-content { min-height: 0; overflow: hidden; }
+.workflow-process-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 12px 10px;
+  font-size: 12px;
+}
+.workflow-process-heading span { color: var(--text-muted); }
 @container right-rail (max-width: 400px) {
+  .right-tabs { grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(108px, 1.5fr); }
   .right-tabs > .ui-tooltip-anchor:not(:last-child) .right-tab-label { display: none; }
   .right-tabs > .ui-tooltip-anchor:last-child .right-tab-label { display: inline; }
 }
@@ -2483,7 +2515,10 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
 .world-summary span { display: flex; justify-content: space-between; gap: 10px; }
 .world-summary strong { color: var(--text-secondary); font-weight: 600; text-align: right; }
 .process-panel, .evolution-panel, .graph-view, .history-panel { height: 100%; }
-.process-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
+.process-panel { display: flex; flex-direction: column; overflow: hidden; }
+.process-panel > .workflow-process-heading,
+.process-panel > .runtime-monitor { flex: 0 0 auto; }
+.process-panel > .phase-list { flex: 1; min-height: 0; }
 .evolution-panel, .graph-view, .history-panel { overflow: auto; }
 .phase-list {
   min-height: 0;
@@ -6161,17 +6196,31 @@ textarea::placeholder,
 .chapter-reader-header-compact {
   display: flex !important;
   align-items: center !important;
-  height: 40px !important;
+  height: auto !important;
   min-height: 40px !important;
-  max-height: 40px !important;
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
+  max-height: none !important;
+  padding-top: 6px !important;
+  padding-bottom: 6px !important;
   box-sizing: border-box !important;
 }
 .chapter-reader-header-compact .chapter-reader-topline {
   align-items: center !important;
-  height: 100% !important;
+  height: auto !important;
   min-height: 0 !important;
+  flex-wrap: wrap;
+}
+.chapter-reader-header-compact .chapter-draft-versions-inline {
+  order: 2;
+  flex-basis: 100%;
+  height: auto;
+}
+.chapter-draft-versions-inline .chapter-draft-versions-bar {
+  height: auto;
+  min-height: var(--chapter-header-control-height, 28px);
+  flex-wrap: wrap;
+}
+.chapter-draft-versions-inline .chapter-draft-revision-actions {
+  margin-right: 0;
 }
 .revision-pane-heading,
 .revision-pane-actions,

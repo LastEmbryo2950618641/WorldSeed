@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import { PROTOCOL_VERSION } from "@worldseed/contracts"
 
-import { openChapterHarness, type ChapterHarness } from "./helpers/chapter-coordination-harness.js"
+import { openChapterHarness, seedCommittedChapter, type ChapterHarness } from "./helpers/chapter-coordination-harness.js"
 import { ARC_PLAN_STAGING_PATH } from "../src/application/chapters/staging-entries.js"
 import { formatTurnHandoffSystemMessage, truncateChapterBodyDigest } from "../src/application/chapters/turn-handoff.js"
 import { FakeAiModelAdapter } from "../src/infrastructure/models/fake-ai-model-adapter.js"
@@ -81,6 +81,8 @@ describe("arc planning continuity and handoff", () => {
 
   it("keeps staging files after synopsis linkAfterPublish and preserves arc messages", async () => {
     await withHarness(async (harness) => {
+      // Match the volume used by the fake model when seeding the published chapter.
+      mkdirSync(join(harness.workspaceRootRef, "章节正文/第一卷 世界种子"), { recursive: true })
       writeFileSync(
         join(harness.workspaceRootRef, ARC_PLAN_STAGING_PATH),
         "# 弧线规划\n\n保留我\n",
@@ -115,7 +117,7 @@ describe("arc planning continuity and handoff", () => {
         workspaceRootRef: harness.workspaceRootRef,
         chapterId: "chapter-test-1",
         chapterSequence: started.session.chapterSequence,
-        chapterPath: "章节正文/第一章 世界种子.md",
+        chapterPath: "章节正文/第一卷 世界种子/第一章 世界种子.md",
       })
 
       expect(existsSync(notesPath)).toBe(true)
@@ -144,6 +146,7 @@ describe("arc planning continuity and handoff", () => {
       expect(next.session.chapterSequence).toBe(started.session.chapterSequence)
       expect(next.messages.some((message) => message.role === "user")).toBe(true)
 
+      await seedCommittedChapter(harness)
       const focused = await invoke<{
         session: { sessionId: string; chapterSequence: number }
         messages: Array<{ role: string }>
@@ -160,10 +163,12 @@ describe("arc planning continuity and handoff", () => {
 
   it("records turn handoff system message and auto-analysis without beginTurn", async () => {
     await withHarness(async (harness) => {
+      mkdirSync(join(harness.workspaceRootRef, "章节正文/第一卷 世界种子"), { recursive: true })
       await invoke(harness, "synopsis.conversation.start", {
         projectId: harness.projectId,
         workspaceRootRef: harness.workspaceRootRef,
       })
+      await seedCommittedChapter(harness)
       const runtime = harness.container.getCurrentRuntime()
       expect(runtime).toBeDefined()
       await runtime!.createSynopsisConversationService().recordTurnHandoff({
@@ -172,7 +177,7 @@ describe("arc planning continuity and handoff", () => {
         brief: {
           taskId: "task-handoff-1",
           chapterSequence: 1,
-          chapterPath: "章节正文/第一章 世界种子.md",
+          chapterPath: "章节正文/第一卷 世界种子/第一章 世界种子.md",
           chapterHeading: "第一章 世界种子",
           bodyDigest: truncateChapterBodyDigest("正文很长".repeat(100)),
           outlineNotes: ["兑现了开篇冲突"],

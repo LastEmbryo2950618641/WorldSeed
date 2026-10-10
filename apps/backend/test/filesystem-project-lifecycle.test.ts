@@ -345,7 +345,7 @@ describe("project lifecycle", () => {
     const internalStore = new NodeInternalStoreAdapter(appDataRoot)
     const store = await internalStore.prepareProject(projectId, workspaceRoot)
     const database = await openProjectDatabase(store.projectDatabaseRef)
-    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(48)
+    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(49)
     await database.destroy()
   })
 })

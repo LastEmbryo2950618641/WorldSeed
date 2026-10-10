@@ -15,6 +15,8 @@ import { RuntimeMonitor, TaskCheckpointDialog } from "./TaskCheckpointPrototype.
 
 type Props = Readonly<{
   task: TaskSnapshot | undefined
+  focusedChapterSequence?: number | undefined
+  executionPhases?: readonly string[] | undefined
   project?: OpenProject | undefined
   revisionModel?: ChapterReviewRevisionPayload["model"]
   graphSlice: GraphSlice | undefined
@@ -41,7 +43,7 @@ const labels: Record<string, string> = {
   source_retrieval: "选择性检索资料",
   emergence_planning: "规划内容出现",
   emergence_review: "审查出现依据",
-  draft: "撰写正文",
+  draft: "生成新草稿",
   chapter_naming: "生成章节标题",
   dependency_audit: "检查依赖闭合",
   settings_extraction: "抽取设定提案",
@@ -83,8 +85,12 @@ const visibleTopLevelPhases = aiPhaseValues.filter((phase) => (
   && !stagedGraphPhases.includes(phase as typeof stagedGraphPhases[number])
 ))
 
+const draftWorkflowPhases = ["interpret", "rule_assembly", "source_retrieval", "emergence_planning", "draft", "chapter_naming"] as const
+
 export function RightRail({
   task,
+  focusedChapterSequence,
+  executionPhases,
   project,
   revisionModel,
   graphSlice,
@@ -127,7 +133,7 @@ export function RightRail({
     }
     // Locked dialog must not linger after the task has already moved on (e.g. resume
     // started → running while proposals show "已全部处理").
-    if (status === "running" || status === "committing" || status === "completed"
+    if (status === undefined || status === "running" || status === "committing" || status === "completed"
       || status === "failed" || status === "cancelled" || status === "created") {
       setCheckpointOpen(false)
       setDismissedCheckpointKey(undefined)
@@ -135,7 +141,7 @@ export function RightRail({
   }, [task?.status, checkpointKey, dismissedCheckpointKey])
   return <><aside className="right-rail">
     <div className="right-tabs" role="tablist" aria-label="右侧面板">
-      <Tab id="process" tab={tab} onChange={setTab} icon={<Activity size={15} />} label="流程" />
+      <Tab id="process" tab={tab} onChange={setTab} icon={<Activity size={15} />} label="流程推理工具" />
       <Tab id="graph" tab={tab} onChange={setTab} icon={<Network size={15} />} label="世界图" />
       <Tab id="evolution" tab={tab} onChange={setTab} icon={<Orbit size={15} />} label="自洽演化" />
       <Tab id="history" tab={tab} onChange={setTab} icon={<History size={15} />} label="历史" />
@@ -145,6 +151,8 @@ export function RightRail({
       {tab === "graph-revisions" ? <GraphRevisionTasksPanel key={project?.projectId} project={project} model={revisionModel} onChanged={onRefreshWorkspace} /> : null}
       {tab === "process" ? <ProcessPanel
         task={task}
+        focusedChapterSequence={focusedChapterSequence}
+        executionPhases={executionPhases}
         onResetMetrics={onResetTaskMetrics}
         onOpenCheckpoint={openCheckpoint}
       /> : null}
@@ -204,10 +212,14 @@ function Tab({ id, tab, onChange, icon, label }: { id: RightTab; tab: RightTab; 
 
 function ProcessPanel({
   task,
+  focusedChapterSequence,
+  executionPhases,
   onResetMetrics,
   onOpenCheckpoint,
 }: {
   task: TaskSnapshot | undefined
+  focusedChapterSequence?: number | undefined
+  executionPhases?: readonly string[] | undefined
   onResetMetrics?: ((metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>) | undefined
   onOpenCheckpoint: () => void
 }): React.JSX.Element {
@@ -225,17 +237,23 @@ function ProcessPanel({
     return () => window.clearTimeout(timer)
   }, [taskErrorMessage, dismissedTaskError])
   const showTaskError = taskErrorMessage !== undefined && dismissedTaskError !== taskErrorMessage
+  const plannedPhases = executionPhases ?? [...draftWorkflowPhases, ...(task?.phaseRuns?.map((run) => run.phase) ?? []), ...(task?.lastPhase === undefined ? [] : [task.lastPhase])]
+  const graphPlanned = plannedPhases.some((phase) => phase === "graph_governance" || stagedGraphPhases.includes(phase as typeof stagedGraphPhases[number]))
+  const phases = executionPhases === undefined
+    ? visibleTopLevelPhases.filter((phase) => plannedPhases.includes(phase) && shouldShowTopLevelPhase(phase, task))
+    : [...new Set(executionPhases)].filter((phase) => phase !== "graph_governance" && !stagedGraphPhases.includes(phase as typeof stagedGraphPhases[number]))
   return <div className="process-panel">
+    <header className="workflow-process-heading">
+      <strong>流程推理工具</strong>
+      {focusedChapterSequence === undefined ? null : <span>第 {String(focusedChapterSequence)} 章</span>}
+    </header>
     <RuntimeMonitor
       task={task}
       onResetMetrics={onResetMetrics}
     />
     {task?.finalization === undefined || task.finalization.status === "completed" ? null : <p className="phase-empty">正式章节收尾：{task.finalization.status} · {task.finalization.chapterHeading}</p>}
-    <div className="phase-list">{visibleTopLevelPhases.flatMap((phase) => {
+    {task === undefined ? <p className="phase-empty" data-testid="workflow-task-empty">{focusedChapterSequence === undefined ? "暂无流程任务" : `第 ${String(focusedChapterSequence)} 章暂无流程任务`}</p> : <div className="phase-list">{phases.flatMap((phase) => {
       const rows: React.ReactNode[] = []
-      if (!shouldShowTopLevelPhase(phase, task)) {
-        return rows
-      }
       const runs = task?.phaseRuns?.filter((run) => run.phase === phase) ?? []
       const latest = runs.at(-1)
       const visual = resolvePhaseVisualState(task, phase, latest)
@@ -261,11 +279,11 @@ function ProcessPanel({
         </summary>
         {latest?.result === undefined ? <PhasePending latestStatus={latest?.status} visualKind={visual.kind} /> : <PhaseDetails result={latest.result} />}
       </details>)
-      if (phase === "dependency_audit") {
+      if (phase === "dependency_audit" && graphPlanned) {
         rows.push(<GraphGovernanceGroup task={task} onOpenCheckpoint={onOpenCheckpoint} key="staged-graph-governance" />)
       }
       return rows
-    })}</div>
+    })}{graphPlanned && !phases.includes("dependency_audit") ? <GraphGovernanceGroup task={task} onOpenCheckpoint={onOpenCheckpoint} /> : null}</div>}
     {showTaskError
       ? <p className="task-error" role="alert">
           <span className="task-error-text">{taskErrorMessage}</span>

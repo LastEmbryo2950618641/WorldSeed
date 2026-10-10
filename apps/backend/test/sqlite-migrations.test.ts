@@ -58,7 +58,7 @@ describe("SQLite migrations", () => {
     const sourceUnitColumns = await sql<{ name: string }>`PRAGMA table_info(source_units)`.execute(database)
 
     expect(migrations.map((migration) => migration.version)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
     ])
     expect(tableNames).toEqual(expect.objectContaining(new Set([
       "projects",
@@ -145,6 +145,9 @@ describe("SQLite migrations", () => {
     const revisionTaskColumns = await sql<{ name: string }>`PRAGMA table_info(chapter_revision_tasks)`.execute(database)
     const conversationColumns = await sql<{ name: string }>`PRAGMA table_info(revision_conversation_messages)`.execute(database)
     expect(revisionTaskColumns.rows.map((column) => column.name)).toContain("input_mode")
+    expect(revisionTaskColumns.rows.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "chapter_sequence", "publish_path", "is_initial_publication",
+    ]))
     expect(conversationColumns.rows.map((column) => column.name)).toEqual([
       "id",
       "project_id",

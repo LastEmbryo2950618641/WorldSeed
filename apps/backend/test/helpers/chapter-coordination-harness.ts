@@ -131,6 +131,19 @@ export async function seedCommittedChapter(harness: ChapterHarness): Promise<{
     "雨夜里，旧站台尽头亮起一盏无人认领的灯。",
     1,
   )
+  const runtime = harness.container.getCurrentRuntime()
+  if (runtime === undefined) throw new Error("Project runtime not open")
+  const drafts = await runtime.createChapterRevisionService().listUnpublished(harness.projectId)
+  const draft = drafts.find((item) => item.chapterSequence === 1)
+  if (draft !== undefined) {
+    const submitted = await harness.facade.handle({
+      protocolVersion: PROTOCOL_VERSION, requestId: randomUUID(), method: "chapter.submitRevision",
+      payload: { projectId: harness.projectId, workspaceRootRef: harness.workspaceRootRef,
+        revisionTaskId: draft.revisionTaskId, mode: "direct", forced: true },
+    })
+    if (!submitted.ok) throw new Error(submitted.error.message)
+    await waitForRevisionGraphSync(harness.facade, harness.projectId, harness.workspaceRootRef, draft.revisionTaskId)
+  }
   const chapter = await listFirstChapter(harness.facade, harness.projectId, harness.workspaceRootRef)
   const read = await harness.facade.handle({
     protocolVersion: PROTOCOL_VERSION,

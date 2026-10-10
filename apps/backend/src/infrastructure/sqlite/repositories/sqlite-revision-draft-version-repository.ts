@@ -34,7 +34,7 @@ export class SqliteRevisionDraftVersionRepository {
       ...(row.parent_version_id === null ? {} : { parentVersionId: row.parent_version_id }),
       source: row.source,
       ...(row.message_id === null ? {} : { messageId: row.message_id }),
-      label: `v${String(index)}`,
+      label: `v${String(index + (rows[0]?.source === "baseline" ? 0 : 1))}`,
       heading: row.heading,
       body: row.body,
       bodyDigest: row.body_digest,
@@ -52,8 +52,15 @@ export class SqliteRevisionDraftVersionRepository {
     return listed.find((item) => item.versionId === versionId)
   }
 
+  public async update(versionId: string, heading: string, body: string): Promise<void> {
+    await this.database.updateTable("revision_draft_versions").set({ heading, body, body_digest: digest(body), source: "manual" })
+      .where("version_id", "=", versionId).executeTakeFirstOrThrow()
+  }
+
   public async append(input: StoredDraftVersionInsert): Promise<RevisionDraftVersion> {
     const bodyDigest = digest(input.body)
+    const latest = await this.database.selectFrom("revision_draft_versions").select("created_at_ms")
+      .where("revision_task_id", "=", input.revisionTaskId).orderBy("created_at_ms", "desc").executeTakeFirst()
     await this.database.insertInto("revision_draft_versions").values({
       version_id: input.versionId,
       project_id: input.projectId,
@@ -64,7 +71,7 @@ export class SqliteRevisionDraftVersionRepository {
       heading: input.heading,
       body: input.body,
       body_digest: bodyDigest,
-      created_at_ms: input.createdAtMs,
+      created_at_ms: Math.max(input.createdAtMs, (latest?.created_at_ms ?? -1) + 1),
     }).execute()
     const stored = await this.find(input.versionId)
     if (stored === undefined) throw new Error("Failed to persist revision draft version")

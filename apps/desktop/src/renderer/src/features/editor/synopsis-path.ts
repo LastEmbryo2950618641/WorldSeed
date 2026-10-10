@@ -103,6 +103,37 @@ export function resolveChapterArtifactRelationsWithInventory(
   }
 }
 
+/**
+ * Recover a chapter artifact path after its title changed while the renderer
+ * still holds the previous workspace inventory.
+ */
+export function resolveChapterPathWithInventory(
+  path: string,
+  inventoryPaths: readonly string[],
+): string {
+  const normalized = path.replaceAll("\\", "/")
+  if (inventoryPaths.some((item) => item.replaceAll("\\", "/") === normalized)) return normalized
+
+  const kind = resolveChapterMarkdownKind(normalized)
+  const sequenceKey = parseChapterSequenceFromPath(normalized)
+  if (kind === undefined || sequenceKey === undefined) return normalized
+
+  const directory = normalized.includes("/")
+    ? normalized.slice(0, normalized.lastIndexOf("/"))
+    : "章节正文"
+  const candidates = [...new Set(inventoryPaths.map((item) => item.replaceAll("\\", "/")))]
+    .filter((item) => {
+      if (!item.startsWith("章节正文/") || !item.endsWith(".md")) return false
+      const itemDirectory = item.includes("/")
+        ? item.slice(0, item.lastIndexOf("/"))
+        : "章节正文"
+      return itemDirectory === directory
+        && parseChapterSequenceFromPath(item) === sequenceKey
+        && resolveChapterMarkdownKind(item) === kind
+    })
+  return candidates.length === 1 ? (candidates[0] ?? normalized) : normalized
+}
+
 export function chapterArtifactStageLabel(kind: ChapterMarkdownKind): string {
   if (kind === "plot_synopsis") return "梗概"
   if (kind === "plot_outline") return "细纲"

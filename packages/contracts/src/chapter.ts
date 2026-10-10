@@ -165,6 +165,9 @@ export const chapterRevisionSchema = z.object({
   revisionTaskId: idSchema,
   projectId: idSchema,
   chapterId: z.string().min(1),
+  chapterSequence: z.number().int().positive().optional(),
+  publishPath: z.string().min(1).optional(),
+  isInitialPublication: z.boolean().optional(),
   baseSourceId: z.string().min(1),
   proposedSourceId: z.string().min(1),
   predecessorSourceId: z.string().min(1).optional(),
@@ -212,7 +215,7 @@ export const chapterRevisionDecisionSchema = z.object({
 })
 export type ChapterRevisionDecision = z.infer<typeof chapterRevisionDecisionSchema>
 
-export const revisionDraftVersionSourceSchema = z.enum(["baseline", "agent", "manual", "rollback"])
+export const revisionDraftVersionSourceSchema = z.enum(["baseline", "agent", "manual", "workflow", "rollback"])
 export type RevisionDraftVersionSource = z.infer<typeof revisionDraftVersionSourceSchema>
 
 export const revisionDraftVersionSchema = z.object({

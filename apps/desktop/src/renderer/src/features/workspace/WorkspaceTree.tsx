@@ -23,9 +23,9 @@ type Props = Readonly<{
   onSelect: (path: string) => void
   onSelectLineage: () => void
   onRefresh: () => void
-  onCreateMarkdown?: (destination?: string) => void
-  onCreateDirectory?: (parentPath?: string) => void
-  onDeletePath?: (path: string) => void
+  onCreateMarkdown?: ((destination?: string) => void) | undefined
+  onCreateDirectory?: ((parentPath?: string) => void) | undefined
+  onDeletePath?: ((path: string) => void) | undefined
 }>
 
 type TreeNode = {
@@ -120,9 +120,9 @@ function TreeRow({
   expandedBySelection: ReadonlySet<string>
   onSelect: (path: string) => void
   onSelectLineage: () => void
-  onCreateMarkdown?: (destination?: string) => void
-  onCreateDirectory?: (parentPath?: string) => void
-  onDeletePath?: (path: string) => void
+  onCreateMarkdown?: ((destination?: string) => void) | undefined
+  onCreateDirectory?: ((parentPath?: string) => void) | undefined
+  onDeletePath?: ((path: string) => void) | undefined
   depth: number
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(() => expandedBySelection.has(node.path))

@@ -45,6 +45,8 @@ export const backendMethodValues = [
   "chapter.readRevision",
   "chapter.findActiveRevision",
   "chapter.startRevision",
+  "chapter.draft.start",
+  "chapter.draft.list",
   "chapter.updateRevision",
   "chapter.reviewRevision",
   "chapter.submitRevision",

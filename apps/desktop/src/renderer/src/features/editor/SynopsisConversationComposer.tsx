@@ -278,7 +278,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
                 <Sparkles size={28} aria-hidden="true" />
                 <h2>{isRail ? "修订这一章" : "剧情梗概讨论"}</h2>
                 <p>{isRail
-                  ? "描述你想如何改这一章，Agent 会自动写入新草稿；覆盖正式正文需要你确认。"
+                  ? "本章草稿讨论"
                   : "描述下一章想怎么写，Agent 会与你讨论并更新 `[剧情梗概].md`。"}</p>
                 {props.session === undefined && !isRail
                   ? <span className="creation-desk-empty-hint">发送首条消息后将创建占位文件</span>
@@ -425,7 +425,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
           ? null
           : <p className="creation-desk-discuss-status" data-testid="creation-desk-discuss-status" aria-live="polite">
               {discussStatusLabel}
-              <span className="creation-desk-discuss-status-hint">右侧「运行监控」仅反映正式推演</span>
+              <span className="creation-desk-discuss-status-hint">右侧「运行监控」显示流程推理工具状态</span>
             </p>}
         <CreationDeskComposerInput
           compact={isRail}
@@ -697,8 +697,8 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
                   props.onStartTurn()
                 }}
               >
-                <span><Play size={15} aria-hidden="true" />{props.running ? "推演中" : "开始推演"}</span>
-                <small>使用当前梗概直接推演</small>
+                <span><Play size={15} aria-hidden="true" />{props.running ? "流程推理工具运行中" : "调用流程推理工具"}</span>
+                <small>根据当前梗概生成新草稿</small>
               </button>
             </div>
           : null}
@@ -789,7 +789,7 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
                 void props.onSend(choice.label)
               }}
             >
-              {choice.label}
+              {choice.action === "start_turn" ? "调用流程推理工具" : choice.label}
             </button>)}
             {props.isLatestChoiceMessage
               ? <button

@@ -14,6 +14,14 @@ import {
 } from "../src/renderer/src/features/editor/chapter-draft-versions-prototype.js"
 
 describe("chapter draft versions prototype", () => {
+  it("creates a first manual draft without inventing an official baseline", () => {
+    const versions = appendManualDraftVersion([], { heading: "未发布章节", body: "首份草稿", createdAtMs: 1 })
+    const split = splitChapterPickerVersions(versions)
+    expect(split.official).toEqual([])
+    expect(split.drafts.map((version) => version.label)).toEqual(["草稿 · v1 · 人工"])
+    expect(versions[0]?.parentVersionId).toBeUndefined()
+  })
+
   it("labels persisted agent versions as latest", () => {
     const versions = fromPersistedDraftVersions([
       {
@@ -42,7 +50,7 @@ describe("chapter draft versions prototype", () => {
         isLatest: true,
       },
     ])
-    expect(versions.at(-1)?.label).toBe("v1 AI 最新")
+    expect(versions.at(-1)?.label).toBe("v1 讨论agent 最新")
   })
 
   it("merges content into the latest version without adding a new entry", () => {
@@ -83,7 +91,7 @@ describe("chapter draft versions prototype", () => {
     expect(merged).toHaveLength(base.length)
     expect(merged.at(-1)?.body).toBe("草稿 B")
     expect(merged.at(-1)?.updatedAtMs).toBe(200)
-    expect(merged.at(-1)?.label).toBe("v1 AI 最新")
+    expect(merged.at(-1)?.label).toBe("v1 讨论agent 最新")
   })
 
   it("appends a manual draft version from the current latest", () => {
@@ -132,7 +140,7 @@ describe("chapter draft versions prototype", () => {
       },
     ])
     expect(versions[0]?.label).toBe("正文")
-    expect(versions[1]?.label).toBe("v1 AI 最新")
+    expect(versions[1]?.label).toBe("v1 讨论agent 最新")
     expect(versions[1]?.body).toBe("Agent 草稿。")
   })
 
@@ -167,10 +175,10 @@ describe("chapter draft versions prototype", () => {
       },
     ])
     expect(versions[0]?.label).toBe("历史正文")
-    expect(versions[1]?.label).toBe("v2 AI · 已覆盖正文")
+    expect(versions[1]?.label).toBe("v2 讨论agent · 已覆盖正文")
     const split = splitChapterPickerVersions(versions)
     expect(split.official.map((version) => version.label)).toEqual(["正文 · v1", "当前正文 · v2"])
-    expect(split.drafts.map((version) => version.label)).toEqual(["草稿 · v1 · 已覆盖正文"])
+    expect(split.drafts.map((version) => version.label)).toEqual(["草稿 · v1 · 讨论agent · 已覆盖正文"])
   })
 
   it("splits official body versions from draft versions", () => {
@@ -219,9 +227,9 @@ describe("chapter draft versions prototype", () => {
     ])
     const split = splitChapterPickerVersions(versions)
     expect(split.official.map((version) => version.label)).toEqual(["正文 · v1", "当前正文 · v2"])
-    expect(split.drafts.map((version) => version.label)).toEqual(["草稿 · v1", "草稿 · v2 · 已覆盖正文"])
+    expect(split.drafts.map((version) => version.label)).toEqual(["草稿 · v1 · 讨论agent", "草稿 · v2 · 讨论agent · 已覆盖正文"])
     expect(split.official.map((version) => version.marks?.map((mark) => mark.kind))).toEqual([["ordinal"], ["current"]])
-    expect(split.drafts[1]?.marks?.map((mark) => mark.text)).toEqual(["v2", "已覆盖正文"])
+    expect(split.drafts[1]?.marks?.map((mark) => mark.text)).toEqual(["v2", "讨论agent", "已覆盖正文"])
     expect(preferredWorkingDraftId(split.drafts)).toBe(versions[1]?.versionId)
     expect(draftDisplayModeForSelection(split.drafts, versions[1]!.versionId)).toBe("view")
     expect(draftDisplayModeForSelection(split.drafts, versions[2]!.versionId)).toBe("view")
@@ -301,9 +309,9 @@ describe("chapter draft versions prototype", () => {
     const split = splitChapterPickerVersions(versions)
     expect(split.official.map((version) => version.label)).toEqual(["正文 · v1", "正文 · v2", "当前正文 · v3"])
     expect(split.drafts.map((version) => version.label)).toEqual([
-      "草稿 · v1",
-      "草稿 · v2",
-      "草稿 · v3 · 已覆盖正文",
+      "草稿 · v1 · 讨论agent",
+      "草稿 · v2 · 讨论agent",
+      "草稿 · v3 · 讨论agent · 已覆盖正文",
     ])
   })
 

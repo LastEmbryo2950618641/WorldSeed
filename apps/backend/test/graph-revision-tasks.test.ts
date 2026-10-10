@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { rm } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
@@ -82,7 +82,8 @@ describe("graph revision task operations", () => {
     }
     try {
       const chapter = await seedCommittedChapter(harness)
-      expect(await call("chapter.graphRevision.list")).toEqual([])
+      expect(await call("chapter.graphRevision.list")).toMatchObject([{ status: "completed" }])
+      revisionCalls = 0
       const revision = await call<{ revisionTaskId: string }>("chapter.startRevision", {
         chapterId: chapter.chapterId, baseSourceId: chapter.sourceId, heading: chapter.heading, body: `${chapter.body}\n\nA new detail.`,
       })
@@ -90,14 +91,16 @@ describe("graph revision task operations", () => {
       await call("chapter.submitRevision", { ...revision, mode: "direct", forced: true })
       await expect.poll(() => entered).toBe(true)
       const before = await call<{ sourceId: string; body: string }>("chapter.read", { chapterId: chapter.chapterId })
+      expect(before).toMatchObject({ sourceId: chapter.sourceId, body: chapter.body })
       const tasks = await call<GraphRevisionTask[]>("chapter.graphRevision.list")
-      expect(tasks).toHaveLength(1)
+      expect(tasks).toHaveLength(2)
       expect(tasks[0]).toMatchObject({ status: "running", canCancel: true, canRetry: false, blocksTurn: true })
       expect(JSON.stringify(tasks)).not.toContain("A new detail.")
       expect(tasks[0]?.progress.phase).toBe("graph_governance")
       expect(tasks[0]?.activity).toMatchObject({ phase: "graph_governance", stage: "thinking", attempt: 2, reasoningCharacters: 15 })
       await call("chapter.graphRevision.cancel", revision)
       expect(aborted).toBe(true)
+      expect(await call("chapter.read", { chapterId: chapter.chapterId })).toMatchObject(before)
       expect((await call<GraphRevisionTask[]>("chapter.graphRevision.list"))[0]).toMatchObject({ status: "cancelled", canCancel: false, canRetry: true, blocksTurn: true })
       await harness.container.getCurrentRuntime()?.close()
       expect((await call<GraphRevisionTask[]>("chapter.graphRevision.list"))[0]).toMatchObject({ status: "cancelled", canRetry: true })
@@ -106,7 +109,8 @@ describe("graph revision task operations", () => {
       await expect.poll(async () => (await call<GraphRevisionTask[]>("chapter.graphRevision.list"))[0]?.status, { timeout: 15000 }).toBe("completed")
       expect(revisionCalls).toBe(2)
       const after = await call<{ sourceId: string; body: string }>("chapter.read", { chapterId: chapter.chapterId })
-      expect(after).toMatchObject({ sourceId: before.sourceId, body: before.body })
+      expect(after.sourceId).not.toBe(before.sourceId)
+      expect(after.body).toBe(`${chapter.body}\n\nA new detail.`)
       expect((await call<GraphRevisionTask[]>("chapter.graphRevision.list"))[0]).toMatchObject({ canCancel: false, canRetry: false, blocksTurn: false })
     } finally {
       await harness.container.close()
@@ -133,7 +137,7 @@ describe("graph revision task operations", () => {
       await expect(call("chapter.submitRevision", { ...revision, mode: "direct", forced: true })).rejects.toThrow("conflicts with an existing file")
       expect(await call("chapter.read", { chapterId: chapter.chapterId })).toMatchObject(original)
       expect(await call("chapter.readRevision", revision)).toMatchObject({ decision: "pending", status: "editing" })
-      expect(await call("chapter.graphRevision.list")).toEqual([])
+      expect(await call("chapter.graphRevision.list")).toMatchObject([{ status: "completed" }])
       expect(readFileSync(conflictPath, "utf8")).toBe("Independent content")
       unlinkSync(conflictPath)
       await call("chapter.submitRevision", { ...revision, mode: "direct", forced: true })
@@ -156,7 +160,7 @@ describe("graph revision task operations", () => {
     }
     try {
       const chapter = await seedCommittedChapter(harness)
-      const original = await call<{ publishPath: string }>("chapter.read", { chapterId: chapter.chapterId })
+      const original = await call<{ sourceId: string; publishPath: string }>("chapter.read", { chapterId: chapter.chapterId })
       const conflictPath = join(harness.workspaceRootRef, dirname(original.publishPath), "第一章 Conflicting.md")
       validation.mockImplementationOnce(async (...args) => {
         await originalValidate(...args)
@@ -165,9 +169,10 @@ describe("graph revision task operations", () => {
       const revision = await call<{ revisionTaskId: string }>("chapter.startRevision", {
         chapterId: chapter.chapterId, baseSourceId: chapter.sourceId, heading: "第一章 Conflicting", body: `${chapter.body}\n\nNew content.`,
       })
-      await expect(call("chapter.submitRevision", { ...revision, mode: "direct", forced: true })).rejects.toThrow("conflicts with an existing file")
+      await call("chapter.submitRevision", { ...revision, mode: "direct", forced: true })
       await expect.poll(async () => (await call<GraphRevisionTask[]>("chapter.graphRevision.list"))[0]?.canRetry).toBe(true)
       const committed = await call<{ sourceId: string }>("chapter.read", { chapterId: chapter.chapterId })
+      expect(committed.sourceId).toBe(original.sourceId)
       await expect(call("chapter.graphRevision.retry", revision)).rejects.toThrow("conflicts with an existing file")
       await expect.poll(async () => (await call<GraphRevisionTask[]>("chapter.graphRevision.list"))[0]?.canRetry).toBe(true)
       const stopped = (await call<GraphRevisionTask[]>("chapter.graphRevision.list"))[0]
@@ -177,10 +182,9 @@ describe("graph revision task operations", () => {
       const persisted = await call<GraphRevisionTask[]>("chapter.graphRevision.list")
       expect(persisted[0]?.error).toContain("conflicts with an existing file")
       unlinkSync(conflictPath)
-      renameSync(join(harness.workspaceRootRef, original.publishPath), conflictPath)
       await call("chapter.graphRevision.retry", revision)
       await expect.poll(async () => (await call<GraphRevisionTask[]>("chapter.graphRevision.list"))[0]?.status, { timeout: 15000 }).toBe("completed")
-      expect((await call<{ sourceId: string }>("chapter.read", { chapterId: chapter.chapterId })).sourceId).toBe(committed.sourceId)
+      expect((await call<{ sourceId: string }>("chapter.read", { chapterId: chapter.chapterId })).sourceId).not.toBe(committed.sourceId)
     } finally {
       validation.mockRestore()
       await harness.container.close()

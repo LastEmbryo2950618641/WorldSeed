@@ -1,10 +1,10 @@
 import type { RevisionDraftVersion } from "@worldseed/contracts"
 
-export type DraftVersionSource = "baseline" | "agent" | "manual" | "rollback"
+export type DraftVersionSource = "baseline" | "agent" | "manual" | "rollback" | "workflow"
 
 export const COMMITTED_DRAFT_VERSION_ID = "proto-v0"
 
-export type VersionMarkKind = "ordinal" | "current" | "covered"
+export type VersionMarkKind = "ordinal" | "current" | "covered" | "agent" | "manual" | "workflow"
 
 export type VersionMark = Readonly<{
   kind: VersionMarkKind
@@ -49,12 +49,14 @@ export function fromPersistedDraftVersions(
 }
 
 function draftSourceTag(source: DraftVersionSource | RevisionDraftVersion["source"]): string {
-  if (source === "agent") return " AI"
+  if (source === "agent") return " 讨论agent"
+  if (source === "workflow") return " AI流程工具"
+  if (source === "manual") return " 人工"
   if (source === "rollback") return " 回退"
   return ""
 }
 
-export function isCoveringDraft(version: Readonly<{ source: DraftVersionSource; isCurrentOfficial?: boolean }>): boolean {
+export function isCoveringDraft(version: Readonly<{ source: DraftVersionSource; isCurrentOfficial?: boolean | undefined }>): boolean {
   return version.source !== "baseline" && version.isCurrentOfficial === true
 }
 
@@ -120,6 +122,10 @@ export function presentDraftAxis(versions: readonly PrototypeDraftVersion[]): Pr
   return ordered.map((version, index) => {
     const sequenceNo = index + 1
     const marks: VersionMark[] = [{ kind: "ordinal", text: `v${String(sequenceNo)}` }]
+    const source = version.source === "rollback" ? "manual" : version.source
+    if (source !== "baseline") {
+      marks.push({ kind: source, text: source === "agent" ? "讨论agent" : source === "workflow" ? "AI流程工具" : "人工" })
+    }
     if (isCoveringDraft(version)) marks.push({ kind: "covered", text: "已覆盖正文" })
     return withVersionPresentation(version, {
       title: "草稿",
@@ -179,9 +185,7 @@ export function relabelLatestDraftVersion(versions: PrototypeDraftVersion[]): Pr
     if (!isLast && version.label.endsWith(" 最新")) {
       versions[index] = {
         ...version,
-        label: version.source === "agent"
-          ? version.label.replace(/ 最新$/u, " AI")
-          : version.label.replace(/ 最新$/u, ""),
+        label: version.label.replace(/ 最新$/u, ""),
       }
       continue
     }
@@ -208,23 +212,19 @@ export function appendManualDraftVersion(
   versions: readonly PrototypeDraftVersion[],
   input: Readonly<{ heading: string; body: string; createdAtMs: number }>,
 ): PrototypeDraftVersion[] {
-  if (versions.length === 0) return [...versions]
   const parent = versions.at(-1)
-  if (parent === undefined) return [...versions]
   const versionIndex = versions.filter((version) => version.source !== "baseline").length + 1
   const stripped = versions.map((version) => (
     version.label.endsWith(" 最新")
       ? {
           ...version,
-          label: version.source === "agent"
-            ? version.label.replace(/ 最新$/u, " AI")
-            : version.label.replace(/ 最新$/u, ""),
+          label: version.label.replace(/ 最新$/u, ""),
         }
       : version
   ))
   stripped.push({
     versionId: `proto-manual-${String(input.createdAtMs)}`,
-    parentVersionId: parent.versionId,
+    parentVersionId: parent?.versionId,
     source: "manual",
     label: `v${String(versionIndex)} 最新`,
     heading: input.heading,

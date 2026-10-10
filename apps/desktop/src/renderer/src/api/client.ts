@@ -90,6 +90,7 @@ export type WorkspaceReport = Readonly<{
 }>
 
 export type TurnResult = Readonly<{
+  kind?: "turn" | "query" | "evolution"
   chapterPath: string
   chapterHeading: string
   graphAnchorIds: readonly string[]
@@ -101,11 +102,18 @@ export type TurnResult = Readonly<{
   kvCacheHitRate?: number
 }>
 
+export type DraftResult = Readonly<Omit<TurnResult, "kind" | "chapterPath" | "graphAnchorIds"> & {
+  kind: "draft"
+  chapterSequence: number
+  revisionTaskId: string
+  draftVersionId: string
+}>
+
 export type TaskSnapshot = Readonly<{
   handle?: Readonly<{ taskId: string; status: string }>
   status: string
   lastPhase?: string
-  result?: TurnResult
+  result?: TurnResult | DraftResult
   error?: { message?: string }
   phaseRuns?: readonly PhaseRunSnapshot[]
   finalization?: Readonly<{
@@ -728,6 +736,8 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
       return { imported: 1 }
     case "chapter.list":
       return [structuredClone(demoChapter)]
+    case "chapter.draft.list":
+      return []
     case "chapter.read":
       return { ...structuredClone(demoChapter), content: demoChapterContent, body: demoChapterContent.replace(/^#\s+[^\n]+\n*/u, "").trim() }
     case "chapter.graphRevision.list":

@@ -151,7 +151,7 @@ export type RevisionDraftVersionRow = {
   project_id: string
   revision_task_id: string
   parent_version_id: string | null
-  source: "baseline" | "agent" | "manual" | "rollback"
+  source: "baseline" | "agent" | "manual" | "workflow" | "rollback"
   message_id: string | null
   heading: string
   body: string
@@ -163,6 +163,9 @@ export type ChapterRevisionTaskRow = {
   id: string
   project_id: string
   chapter_id: string
+  chapter_sequence: number | null
+  publish_path: string | null
+  is_initial_publication: number
   base_source_id: string
   proposed_source_id: string
   predecessor_source_id: string | null

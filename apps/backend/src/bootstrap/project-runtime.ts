@@ -100,15 +100,16 @@ export class ProjectRuntime {
     return rows.map((revision): GraphRevisionTask => {
       const task = byId.get(revision.graph_sync_task_id ?? "")
       const row = { ...revision, task_status: task?.status, error_json: task?.error_json ?? null, revision_error: byId.get(revision.id)?.error_json ?? null }
-      const complete = row.graph_sync_status === "completed" || row.revision_status === "completed"
+      const complete = row.revision_status === "completed"
+      const publishing = row.task_status === "completed" || ["committing_content", "content_committed", "chapter_published", "chapter_registered"].includes(row.revision_status)
       const retired = row.revision_status === "retired"
       const live = this.revisionJobs.has(row.id)
       const status = complete ? "completed" : retired ? "retired"
         : row.task_status === "cancelled" ? "cancelled"
-          : live ? "running" : row.graph_sync_status === "running" || row.revision_status === "committing_content" ? "interrupted"
+          : live ? "running" : row.graph_sync_status === "running" || publishing ? "interrupted"
             : row.graph_sync_status === "failed" ? "failed" : "pending"
       let error: string | undefined
-      if (!live && row.revision_status === "committing_content") error = "章节内容提交尚未完成，需重试恢复；图同步尚未开始。"
+      if (!complete && !live && publishing) error = "图修订已完成，章节发布尚未完成，请重试恢复。"
       const errorJson = row.revision_error ?? row.error_json
       if (!complete && !retired && errorJson !== null) {
         const stored: unknown = JSON.parse(errorJson)
@@ -120,7 +121,7 @@ export class ProjectRuntime {
         revisionTaskId: row.id, chapterId: row.chapter_id, heading: row.heading,
         ...(row.graph_sync_task_id === null ? {} : { graphSyncTaskId: row.graph_sync_task_id }),
         status, blocksTurn: row.decision === "submit" && !complete && !retired,
-        canCancel: !complete && !retired && row.task_status !== "committing" && row.revision_status !== "committing_content" && (live || status === "pending" || status === "interrupted"),
+        canCancel: !complete && !retired && !publishing && row.task_status !== "committing" && (live || status === "pending" || status === "interrupted"),
         canRetry: !complete && !retired && this.revisionJobs.size === 0,
         ...(error === undefined ? {} : { error }), updatedAtMs: row.updated_at,
         ...(activity === undefined ? {} : { activity }),
@@ -132,8 +133,20 @@ export class ProjectRuntime {
   public submitChapterRevision(input: Parameters<ChapterRevisionService["submit"]>[0]): Promise<ChapterRevision> {
     const active = this.revisionJobs.get(input.revisionTaskId)
     if (active !== undefined) return active.ready
-    if (this.revisionJobs.size > 0) return Promise.reject(new Error("另一个图修订任务正在运行，请等待完成或先取消"))
+    if (this.revisionJobs.size > 0) {
+      return (async () => {
+        const repository = new SqliteChapterRevisionRepository(this.database)
+        for (const [taskId, job] of this.revisionJobs) {
+          if ((await repository.find(taskId))?.status !== "completed") throw new Error("另一个图修订任务正在运行，请等待完成或先取消")
+          await job.done
+        }
+        return this.submitChapterRevision(input)
+      })()
+    }
     const controller = new AbortController()
+    const abort = (): void => { controller.abort(input.signal?.reason) }
+    if (input.signal?.aborted === true) abort()
+    else input.signal?.addEventListener("abort", abort, { once: true })
     let resolveReady!: (revision: ChapterRevision) => void
     let rejectReady!: (error: unknown) => void
     const ready = new Promise<ChapterRevision>((resolve, reject) => { resolveReady = resolve; rejectReady = reject })
@@ -143,35 +156,41 @@ export class ProjectRuntime {
       if (previous === undefined || previous.projectId !== this.projectId) throw new Error("图修订任务不存在")
       if (previous.decision === "submit" && previous.status !== "completed" && previous.status !== "retired" && previous.graphSyncTaskId !== undefined) {
         const oldTask = await this.taskScopes.findTask(previous.graphSyncTaskId)
-        if (oldTask?.status === "completed") {
-          const completed = await this.createChapterRevisionService().completeGraphSync(previous.graphSyncTaskId)
-          if (completed !== undefined) { resolveReady(completed); return }
-        }
-        // Retrying graph work starts a fresh isolated scope; committed chapter content is retained.
-        if (oldTask !== undefined) {
+        // Interrupted graph work is retired; successful graph work is recovered by submit.
+        if (oldTask !== undefined && oldTask.status !== "completed") {
           const scope = await this.taskScopes.findScope(oldTask.scopeId)
           if (scope?.visibility === "pending") await new SqliteScopeCommitRepository(this.database).retire(oldTask.scopeId, Date.now())
           await this.persistenceUpdateTask(oldTask.taskId, "cancelled")
         }
-        await repository.updateState({ revisionTaskId: previous.revisionTaskId, status: "awaiting_user_decision", graphSyncStatus: "failed", graphSyncTaskId: randomUUID(), updatedAtMs: Date.now() })
       }
       const service = this.createChapterRevisionService()
       await this.database.updateTable("tasks").set({ error_json: null }).where("id", "=", input.revisionTaskId).execute()
       const { model, ...preparation } = input
-      const prepared = await service.submit(preparation)
+      const prepared = await service.submit({ ...preparation, signal: controller.signal })
       resolveReady(prepared)
       controller.signal.throwIfAborted()
       const result = prepared.status === "graph_sync_pending" && model !== undefined
         ? await service.submit({ ...input, signal: controller.signal }) : prepared
       if (result.status === "completed") {
+        if (result.chapterSequence !== undefined) {
+          await this.createDeductionGoalsService().lockForTurn({ projectId: this.projectId, chapterSequence: result.chapterSequence })
+        }
         await this.saveAutomaticHistory({ operationId: result.revisionTaskId, name: `章节修订 ${result.chapterId}`, taskId: result.revisionTaskId, createdAtMs: Date.now() })
       }
     }).catch(async (error: unknown) => {
       rejectReady(error)
+      const repository = new SqliteChapterRevisionRepository(this.database)
+      const failed = await repository.find(input.revisionTaskId)
+      if (failed !== undefined && failed.status !== "completed" && failed.status !== "retired") {
+        await repository.updateState({ revisionTaskId: failed.revisionTaskId, status: failed.status, graphSyncStatus: "failed", updatedAtMs: Date.now() })
+      }
       await this.database.updateTable("tasks").set({ error_json: JSON.stringify({ message: error instanceof Error ? error.message : String(error) }) })
         .where("id", "=", input.revisionTaskId).execute()
       runtimeLog("error", "graph-revision", "execution.stopped", { revisionTaskId: input.revisionTaskId, error: error instanceof Error ? error.message : String(error) })
-    }).finally(() => { this.revisionJobs.delete(input.revisionTaskId) })
+    }).finally(() => {
+      input.signal?.removeEventListener("abort", abort)
+      this.revisionJobs.delete(input.revisionTaskId)
+    })
     this.revisionJobs.set(input.revisionTaskId, { controller, ready, done })
     return ready
   }
@@ -193,12 +212,17 @@ export class ProjectRuntime {
     if (revision.decision !== "submit") throw new Error("该修订尚未提交图同步")
     if (revision.status === "completed" || revision.status === "retired") return
     const task = revision.graphSyncTaskId === undefined ? undefined : await this.taskScopes.findTask(revision.graphSyncTaskId)
-    if (task?.status === "committing" || revision.status === "committing_content") throw new Error("正在提交结果，请等待提交完成")
+    if (task?.status === "committing" || task?.status === "completed"
+      || ["committing_content", "content_committed", "chapter_published", "chapter_registered"].includes(revision.status)) {
+      throw new Error("图修订结果已进入发布阶段，请等待完成或重试恢复")
+    }
     const job = this.revisionJobs.get(revisionTaskId)
     job?.controller.abort(new Error("用户取消图同步"))
     await job?.done
     const latest = await repository.find(revisionTaskId)
     if (latest?.status === "completed") return
+    const latestTask = latest?.graphSyncTaskId === undefined ? undefined : await this.taskScopes.findTask(latest.graphSyncTaskId)
+    if (latestTask?.status === "completed" || latestTask?.status === "committing") return
     if (latest?.graphSyncTaskId !== undefined) await this.persistenceUpdateTask(latest.graphSyncTaskId, "cancelled")
     await repository.updateState({ revisionTaskId, status: "awaiting_user_decision", graphSyncStatus: "failed", updatedAtMs: Date.now() })
   }
@@ -255,6 +279,27 @@ export class ProjectRuntime {
       commit: new SqliteScopeCommitRepository(this.database),
       internalStore: this.internalStorePort,
       workspace: this.workspace,
+      appendDraft: async ({ projectId, workspaceRootRef, idempotencyKey, result }) => {
+        const existing = await this.database.selectFrom("revision_draft_versions")
+          .select(["revision_task_id", "version_id"])
+          .where("project_id", "=", projectId)
+          .where("message_id", "=", idempotencyKey)
+          .executeTakeFirst()
+        if (existing !== undefined) {
+          return { revisionTaskId: existing.revision_task_id, draftVersionId: existing.version_id }
+        }
+        const version = await this.createChapterRevisionService().startForChapterSequence({
+          projectId,
+          workspaceRootRef,
+          chapterSequence: result.chapterSequence,
+          heading: result.heading,
+          body: result.body,
+          volumeFolderName: result.volumeFolderName,
+          source: "workflow",
+          messageId: idempotencyKey,
+        })
+        return { revisionTaskId: version.revisionTaskId, draftVersionId: version.versionId }
+      },
       webResearch: createDefaultWebResearchPort(),
       chapterSynopsis: this.createChapterSynopsisService(),
       synopsisConversation: this.createSynopsisConversationService(),
@@ -279,8 +324,13 @@ export class ProjectRuntime {
     return this.taskScopes.listRecoverableTasks(this.projectId)
   }
 
-  public findLatestTask(): Promise<StoredTask | undefined> {
-    return this.taskScopes.findLatestTask(this.projectId)
+  public async findLatestTask(chapterSequence?: number): Promise<StoredTask | undefined> {
+    const rows = await this.database.selectFrom("tasks").select(["id", "config_snapshot_json"])
+      .where("project_id", "=", this.projectId).where("kind", "=", "turn")
+      .orderBy("created_at", "desc").orderBy("id", "desc").execute()
+    const latest = rows.find((row) => chapterSequence === undefined
+      || (JSON.parse(row.config_snapshot_json) as { chapterSequence?: number }).chapterSequence === chapterSequence)
+    return latest === undefined ? undefined : this.taskScopes.findTask(latest.id)
   }
 
   public async recoverStaleRunningTasks(
@@ -567,6 +617,7 @@ export class ProjectRuntime {
     const documents = new SqliteDocumentRepository(this.database)
     const chapterIndex = new SqliteChapterIndexRepository(this.database)
     return new ChapterRevisionService({
+      workspaceRootRef: this.workspaceRootRef,
       taskScopes: new SqliteTaskScopeRepository(this.database),
       documents,
       retrieval: new SqliteRetrievalRepository(this.database),
@@ -575,6 +626,10 @@ export class ProjectRuntime {
       draftVersions: new SqliteRevisionDraftVersionRepository(this.database),
       chapterIndex,
       recordLineageSnapshot: async (input) => {
+        const existing = await this.database.selectFrom("chapter_lineage_snapshots").select("id")
+          .where("project_id", "=", input.projectId).where("chapter_id", "=", input.chapterId)
+          .where("source_id", "=", input.sourceId).executeTakeFirst()
+        if (existing !== undefined) return
         await this.database.insertInto("chapter_lineage_snapshots").values({
           id: randomUUID(),
           project_id: input.projectId,
@@ -621,7 +676,7 @@ export class ProjectRuntime {
         const settings = await this.readSettings()
         const chapterIndex = new SqliteChapterIndexRepository(this.database)
         const index = await chapterIndex.find(input.revision.projectId, input.revision.chapterId)
-        const chapterSequence = index?.sequence ?? Math.max(1, (await documents.listCommittedChapters(input.revision.projectId))
+        const chapterSequence = input.revision.chapterSequence ?? index?.sequence ?? Math.max(1, (await documents.listCommittedChapters(input.revision.projectId))
           .findIndex((chapter) => chapter.chapterId === input.revision.chapterId) + 1)
         const content = await this.internalStorePort.readDocument(input.revision.contentRef)
         const model = createGraphRevisionModel(input.model, (activity) => {
@@ -657,8 +712,96 @@ export class ProjectRuntime {
     })
   }
 
+  public async readDraftTaskResult(taskId: string) {
+    const stored = await this.database.selectFrom("revision_draft_versions")
+      .select(["version_id", "revision_task_id"])
+      .where("project_id", "=", this.projectId)
+      .where("message_id", "=", `turn-draft:${taskId}`)
+      .executeTakeFirst()
+    if (stored === undefined) return undefined
+    const revisions = this.createChapterRevisionService()
+    const version = await revisions.readDraftVersion(stored.version_id)
+    const revision = await revisions.readRevision(stored.revision_task_id)
+    return {
+      kind: "draft" as const,
+      taskId,
+      revisionTaskId: stored.revision_task_id,
+      draftVersionId: stored.version_id,
+      heading: version.heading,
+      chapterSequence: revision.chapterSequence,
+    }
+  }
+
   public createSynopsisConversationService(): SynopsisConversationService {
     return new SynopsisConversationService({
+      executeWorkflowTool: async (input) => {
+        const chapters = this.createChapterResolveService()
+        if (input.chapterSequence > await chapters.nextChapterSequence(input.projectId)) {
+          throw new Error("前一章尚未发布为正文，不能处理下一章")
+        }
+        if (await chapters.isGraphSyncBlocking(input.projectId)) {
+          throw new Error("图修订尚未完成，请完成或取消后再调用流程推理工具")
+        }
+        await this.ensureWritableHistoryBranch(Date.now())
+        const settings = await this.readSettings()
+        const result = await this.createTurnOrchestrator(input.model, randomUUID, Date.now).execute({
+          workflow: "turn",
+          outputMode: "draft",
+          projectId: input.projectId,
+          workspaceRootRef: input.workspaceRootRef,
+          internalStore: this.internalStore,
+          userInput: input.heading === undefined ? input.userInput : `${input.heading}\n\n${input.userInput}`,
+          chapterSequence: input.chapterSequence,
+          allowWorkspaceChapterReads: true,
+          deductionGoalBundle: await this.createDeductionGoalsService().buildTurnBundle({ projectId: input.projectId, chapterSequence: input.chapterSequence }),
+          projectSettings: settings,
+          maxModelCalls: input.maxModelCalls ?? settings.execution.maxModelCalls,
+          deadlineMs: input.deadlineMs ?? settings.execution.maxWallTimeMs,
+          maxRetrievalRounds: settings.execution.maxRetrievalRounds,
+          ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
+          ...(input.chapterIntent === undefined ? {} : { chapterIntent: input.chapterIntent }),
+        }, { ...(input.signal === undefined ? {} : { signal: input.signal }) })
+        if (result.kind !== "draft" || result.revisionTaskId === undefined || result.draftVersionId === undefined) {
+          throw new Error("流程推理工具未生成可持久化的草稿")
+        }
+        const revisions = this.createChapterRevisionService()
+        const revision = await revisions.readRevision(result.revisionTaskId)
+        const version = await revisions.readDraftVersion(result.draftVersionId)
+        return {
+          revisionTaskId: revision.revisionTaskId,
+          chapterId: revision.chapterId,
+          draftVersionId: version.versionId,
+          draftLabel: version.label,
+          heading: version.heading,
+          body: version.body,
+        }
+      },
+      publishDraft: async (input) => {
+        input.signal?.throwIfAborted()
+        const revisions = this.createChapterRevisionService()
+        const revision = await revisions.getDraftWorkspace({
+          projectId: input.projectId,
+          chapterSequence: input.chapterSequence,
+          revisionTaskId: input.revisionTaskId,
+        })
+        if (revision === undefined) throw new Error("未找到当前章节的草稿")
+        const version = await revisions.readDraftVersion(input.draftVersionId)
+        if (version.revisionTaskId !== revision.revisionTaskId) throw new Error("草稿版本不属于指定修订")
+        const submitted = await this.submitChapterRevision({
+          revisionTaskId: input.revisionTaskId,
+          draftVersionId: input.draftVersionId,
+          workspaceRootRef: input.workspaceRootRef,
+          mode: "direct",
+          forced: true,
+          model: input.model,
+        })
+        return {
+          revisionTaskId: submitted.revisionTaskId,
+          chapterId: submitted.chapterId,
+          draftVersionId: input.draftVersionId,
+          status: submitted.status,
+        }
+      },
       chapters: this.createChapterResolveService(),
       revisions: this.createChapterRevisionService(),
       chapterSynopsis: this.createChapterSynopsisService(),
