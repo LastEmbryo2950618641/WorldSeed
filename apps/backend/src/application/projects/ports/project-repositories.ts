@@ -15,6 +15,7 @@ export interface ProjectRegistryRepository {
   findById(projectId: ProjectId): Promise<RegisteredProject | undefined>
   findByWorkspaceRoot(workspaceRootRef: string): Promise<RegisteredProject | undefined>
   touch(projectId: ProjectId, lastOpenedAtMs: number): Promise<void>
+  unregister(projectId: ProjectId): Promise<void>
   listOrderedByLastOpened(limit?: number): Promise<readonly RegisteredProject[]>
 }
 

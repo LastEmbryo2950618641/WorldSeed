@@ -47,6 +47,7 @@ import {
   startUpdateInstallerDownload,
 } from "./app-update-download.js"
 import { allocateUniqueBookPath } from "./book-path.js"
+import { readBookCoverDataUrl, setBookCoverFromPath } from "./book-cover.js"
 
 const MODEL_CREDENTIAL_PAYLOAD_SCHEMAS = {
   "turn.start": turnStartPayloadSchema,
@@ -235,6 +236,24 @@ export function registerIpcRouter(
     })
     return result.canceled ? [] : result.filePaths
   })
+  ipcMain.handle("worldseed:select-image-file", async (_event, input: unknown) => {
+    const options = parseSelectDirectoryPayload(input)
+    const result = await dialog.showOpenDialog(window, {
+      properties: ["openFile"],
+      title: options.title ?? "选择封面图片",
+      filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }],
+      ...(options.defaultPath === undefined ? {} : { defaultPath: options.defaultPath }),
+    })
+    return result.canceled ? undefined : result.filePaths[0]
+  })
+  ipcMain.handle("worldseed:book-cover:get", async (_event, input: unknown) => {
+    const workspaceRootRef = parseWorkspaceRootPayload(input)
+    return (await readBookCoverDataUrl(workspaceRootRef)) ?? null
+  })
+  ipcMain.handle("worldseed:book-cover:set", async (_event, input: unknown) => {
+    const payload = parseBookCoverSetPayload(input)
+    return setBookCoverFromPath(payload.workspaceRootRef, payload.sourcePath)
+  })
 }
 
 export function unregisterIpcRouter(): void {
@@ -258,6 +277,9 @@ export function unregisterIpcRouter(): void {
   ipcMain.removeHandler("worldseed:book-path:allocate")
   ipcMain.removeHandler("worldseed:select-directory")
   ipcMain.removeHandler("worldseed:select-markdown-files")
+  ipcMain.removeHandler("worldseed:select-image-file")
+  ipcMain.removeHandler("worldseed:book-cover:get")
+  ipcMain.removeHandler("worldseed:book-cover:set")
 }
 
 function parseUpdatePrefsPayload(input: unknown): AppUpdatePrefs {
@@ -358,6 +380,25 @@ function parseSelectDirectoryPayload(input: unknown): { title?: string; defaultP
       ? { defaultPath: payload.defaultPath }
       : {}),
   }
+}
+
+function parseWorkspaceRootPayload(input: unknown): string {
+  if (input === null || typeof input !== "object") throw new Error("无效的工作区参数")
+  const workspaceRootRef = (input as { workspaceRootRef?: unknown }).workspaceRootRef
+  if (typeof workspaceRootRef !== "string" || workspaceRootRef.trim().length === 0) {
+    throw new Error("工作区路径不能为空")
+  }
+  return workspaceRootRef.trim()
+}
+
+function parseBookCoverSetPayload(input: unknown): Readonly<{ workspaceRootRef: string; sourcePath: string }> {
+  if (input === null || typeof input !== "object") throw new Error("无效的封面参数")
+  const record = input as { workspaceRootRef?: unknown; sourcePath?: unknown }
+  const workspaceRootRef = typeof record.workspaceRootRef === "string" ? record.workspaceRootRef.trim() : ""
+  const sourcePath = typeof record.sourcePath === "string" ? record.sourcePath.trim() : ""
+  if (workspaceRootRef.length === 0) throw new Error("工作区路径不能为空")
+  if (sourcePath.length === 0) throw new Error("图片路径不能为空")
+  return { workspaceRootRef, sourcePath }
 }
 
 async function readModelProfiles(backend: BackendProcess, vault: FileCredentialVault): Promise<DesktopModelProfiles> {

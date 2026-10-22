@@ -440,14 +440,20 @@ export class SynopsisConversationService {
     lockedFocusKind?: DiscussFocusKind
     /** ChapterPanel 批量推演：自动确认梗概并允许同轮写细纲。 */
     automation?: "batch_chapter"
+    /**
+     * Creation-desk「批量推进」：跳过梗概/细纲/正文确认并自动连章。
+     * false/缺省 = 每步停等用户确认（即便 agentMode=auto）。
+     */
+    batchProceed?: boolean
     /** Claude Code–style discuss mode. */
     agentMode?: import("@worldseed/contracts").DiscussAgentMode
   }>): Promise<SynopsisConversationSendResult> {
     const focusLocked = input.focusLocked === true
     const batchAutomation = input.automation === "batch_chapter"
+    const batchProceed = input.batchProceed === true || batchAutomation
     const agentMode = input.agentMode ?? "auto"
-    // Auto = the Agent decides: no user confirmation steps (synopsis confirm, choices, promotes).
-    const autonomous = agentMode === "auto"
+    // Autonomous gates only when 批量推进（或卷批量 automation）开启；Auto  alone no longer skips confirms.
+    const autonomous = batchProceed && (agentMode === "auto" || agentMode === "accept_edits")
     if (input.lockedChapterSequence !== undefined) {
       await this.setFocus({
         projectId: input.projectId,
@@ -542,6 +548,7 @@ export class SynopsisConversationService {
         userEditedOutlineSinceAgent,
         synopsisConfirmed: synopsisConfirmed || autonomous,
         ...(batchAutomation ? { batchAutomation: true } : {}),
+        ...(batchProceed ? { batchProceed: true } : {}),
         ...(currentWorkDisplayName === undefined ? {} : { currentWorkDisplayName }),
         activeGoals,
         chapterProgress,
@@ -880,6 +887,8 @@ export class SynopsisConversationService {
         })
       }
 
+      const wroteOutlineThisTurn = lastOutlineAgentDigest !== undefined
+        && lastOutlineAgentDigest !== session.lastOutlineAgentDigest
       if (wroteSynopsisBody && batchAutomation) {
         nextSynopsisConfirmedAtMs = nowMs
       } else if (wroteSynopsisBody && !confirmingSynopsis) {
@@ -893,24 +902,61 @@ export class SynopsisConversationService {
         await this.tryRemoveEmptyVolumeDirectory(input.workspaceRootRef, volumeCleanupFolder)
       }
 
+      const confirmingOutline = isConfirmOutlineUserMessage(input.message)
+      const hasOutlineOnDisk = (outlineDigest !== undefined && outlineMarkdown.trim().length > 0)
+        || wroteOutlineThisTurn
+      // 批量推进关闭：须「按细纲写正文」或「跳过细纲按梗概开推」后才写正文。
+      const bodyWriteAllowed = autonomous || batchAutomation || confirmingOutline
+        || isSkipOutlineStartTurnMessage(input.message)
+      const mustStopAfterOutline = wroteOutlineThisTurn && !autonomous && !batchAutomation
+      const blockBodyPipeline = !bodyWriteAllowed || mustStopAfterOutline
+      let draftAssist = assist
+      if (blockBodyPipeline) {
+        if (
+          assist.chapterDraftProposal !== undefined
+          || (assist.chapterDraftProposals?.length ?? 0) > 0
+          || assist.appendedDraft !== undefined
+        ) {
+          writeNotices.push(
+            hasOutlineOnDisk || wroteOutlineThisTurn
+              ? "正文尚未确认可写：本轮草稿未落盘。请先点「按细纲写正文」。"
+              : "请先完成梗概确认并写细纲，或点「跳过细纲，按梗概开推」。",
+          )
+        }
+        draftAssist = {
+          ...assist,
+          chapterDraftProposal: undefined,
+          chapterDraftProposals: undefined,
+          appendedDraft: undefined,
+          continueTurn: undefined,
+          focusChange: undefined,
+          choices: (hasOutlineOnDisk || wroteOutlineThisTurn)
+            ? mergeConfirmOutlineChoice(assist.choices)
+            : assist.choices,
+        }
+      } else if (!autonomous && !batchAutomation) {
+        // 逐步确认：禁止自动跳章
+        draftAssist = { ...assist, continueTurn: undefined, focusChange: undefined }
+      }
+
       const assistantMessageId = this.dependencies.createId()
       const draftVolume = extractVolumeFolderNameFromPath(synopsisPath) ?? DEFAULT_VOLUME_FOLDER_NAME
       const deferredDraftSequences: number[] = []
       let draftApply: Awaited<ReturnType<SynopsisConversationService["applyDiscussChapterDraft"]>> =
-        assist.chapterDraftProposal === undefined && assist.appendedDraft !== undefined
-          ? { appended: assist.appendedDraft }
+        draftAssist.chapterDraftProposal === undefined && draftAssist.appendedDraft !== undefined
+          ? { appended: draftAssist.appendedDraft }
           : await this.applyDiscussChapterDraft({
             projectId: input.projectId,
             workspaceRootRef: input.workspaceRootRef,
             chapterSequence: session.chapterSequence,
             volumeFolderName: draftVolume,
-            ...(assist.chapterDraftProposal === undefined ? {} : { proposal: assist.chapterDraftProposal }),
+            ...(draftAssist.chapterDraftProposal === undefined ? {} : { proposal: draftAssist.chapterDraftProposal }),
             messageId: assistantMessageId,
           })
       if (draftApply.notice !== undefined) writeNotices.push(draftApply.notice)
       if (draftApply.deferredSequence !== undefined) deferredDraftSequences.push(draftApply.deferredSequence)
-      if (assist.chapterDraftProposals !== undefined) {
-        for (const entry of assist.chapterDraftProposals) {
+      if (draftAssist.chapterDraftProposals !== undefined) {
+        for (const entry of draftAssist.chapterDraftProposals) {
           const applied = await this.applyDiscussChapterDraft({
             projectId: input.projectId,
             workspaceRootRef: input.workspaceRootRef,
@@ -964,13 +1010,15 @@ export class SynopsisConversationService {
       }
       let appliedFocusSequence: number | undefined
       let focusGateDeferred = false
-      if (assist.focusChange !== undefined) {
+      if (draftAssist.focusChange !== undefined) {
         if (focusLocked) {
           writeNotices.push("当前入口已锁定焦点，本轮 focusChange 未生效。")
         } else if (batchAutomation) {
           writeNotices.push("批量推演中焦点由系统推进，本轮 focusChange 未生效。")
+        } else if (!autonomous) {
+          writeNotices.push("批量推进已关闭：本轮 focusChange 未生效，请确认后再手动换章。")
         } else {
-          const targetSequence = assist.focusChange.chapterSequence
+          const targetSequence = draftAssist.focusChange.chapterSequence
           const nextSequence = await this.waitForChapterSequenceGate(input.projectId, targetSequence)
           if (targetSequence > nextSequence) {
             focusGateDeferred = true
@@ -984,7 +1032,7 @@ export class SynopsisConversationService {
                 projectId: input.projectId,
                 workspaceRootRef: input.workspaceRootRef,
                 chapterSequence: targetSequence,
-                focusKind: assist.focusChange.focusKind ?? "plot_synopsis",
+                focusKind: draftAssist.focusChange.focusKind ?? "plot_synopsis",
               })
               appliedFocusSequence = targetSequence
               writeNotices.push(`已将讨论焦点调整到第 ${String(targetSequence)} 章（无需确认）。`)
@@ -999,27 +1047,34 @@ export class SynopsisConversationService {
       const gateDeferred = !focusLocked && (focusGateDeferred || deferredDraftSequences.length > 0)
       const persistedChoices = filterDiscussChoices(
         this.dependencies.publishDraft === undefined
-          ? withPromoteDraftChoice(assist.choices, draftApply.appended?.draftLabel)
-          : assist.choices,
+          ? withPromoteDraftChoice(draftAssist.choices, draftApply.appended?.draftLabel)
+          : draftAssist.choices,
         {
           focusLocked,
           ...(appliedFocusSequence === undefined ? {} : { appliedFocusSequence }),
         },
       )
-      // Auto / Accept edits own the Todo list: an open list with nothing to ask the user means keep going.
+      // 批量推进开启时：Todo 未清 / continueTurn / 自决 choices 都自动续跑。
+      // 关闭时：仅门禁延迟（如前章发布中）可续跑，流水线步骤必须等用户点确认。
       const todosStillOpen = !discussTodosAreSettled(
         synopsisConversationStreamHub.peek(input.projectId, session.sessionId).todos,
       )
       const offeredChoices = persistedChoices ?? []
-      // Auto never waits on a click: offered choices become the Agent's own decision next turn.
       const waitingOnUser = !autonomous && offeredChoices.length > 0
       const autoDecideChoices = autonomous && offeredChoices.length > 0
       const autoContinue = agentMode !== "plan" && !batchAutomation
-        && (gateDeferred || assist.continueTurn === true || autoDecideChoices || (todosStillOpen && !waitingOnUser))
+        && (
+          gateDeferred
+          || (autonomous && (
+            draftAssist.continueTurn === true
+            || autoDecideChoices
+            || (todosStillOpen && !waitingOnUser)
+          ))
+        )
         ? {
             message: autoDecideChoices
               ? [
-                  "继续（Auto 自决）：上一轮列出的选项无需用户确认——",
+                  "继续（批量推进·自决）：上一轮列出的选项无需用户确认——",
                   offeredChoices.slice(0, 6).map((choice) => `「${choice.label}」`).join("、"),
                   "。按最合理的顺序自行决定并执行（可依次全部完成），在回复里简述取舍理由；不要再给待选按钮。",
                 ].join("").slice(0, 500)
@@ -1684,6 +1739,8 @@ export class SynopsisConversationService {
     synopsisConfirmed?: boolean
     /** Injected by ChapterPanel 批量推演. */
     batchAutomation?: boolean
+    /** Creation-desk「批量推进」toggle. */
+    batchProceed?: boolean
     activeGoals: readonly DeductionGoal[]
     chapterProgress: readonly Readonly<{ goalId: string; chapterSequence: number; summary: string; status: "planned" | "achieved" | "partial" | "missed" | "superseded" }>[]
     hookScheduleAudit: HookScheduleAudit
@@ -1755,7 +1812,9 @@ export class SynopsisConversationService {
     const intentAppendix = chapterNarrativeIntentPhaseAppendix(input.chapterIntent, "synopsis_discuss")
     const presentationAppendix = chapterPresentationPhaseAppendix(input.presentation, "synopsis_discuss")
     const { discussAgentModePromptAppendix } = await import("./discuss-agent-mode.js")
-    const modeAppendix = discussAgentModePromptAppendix(input.agentMode ?? "auto")
+    const modeAppendix = discussAgentModePromptAppendix(input.agentMode ?? "auto", {
+      batchProceed: input.batchProceed === true || input.batchAutomation === true,
+    })
     const appendix = [intentAppendix, presentationAppendix, modeAppendix].filter((part): part is string => part !== undefined)
     const phasePrompt = appendix.length === 0
       ? basePhasePrompt
@@ -4244,4 +4303,30 @@ export function isConfirmSynopsisUserMessage(message: string): boolean {
     || /开始写细纲/u.test(text)
     || /确认梗概[，,]?\s*开始写细纲/u.test(text)
     || /按(?:照)?(?:这份)?梗概重写(?:整个)?细纲/u.test(text)
+}
+
+/** User confirmed outline → allow chapter body draft (逐步确认第二闸). */
+export function isConfirmOutlineUserMessage(message: string): boolean {
+  const text = message.trim()
+  if (text.length === 0) return false
+  return /按细纲写正文/u.test(text)
+    || /确认(?:本章)?细纲/u.test(text)
+    || /开始写正文/u.test(text)
+    || /按(?:照)?(?:这份)?细纲开推/u.test(text)
+}
+
+/** Skip outline and start body from synopsis. */
+export function isSkipOutlineStartTurnMessage(message: string): boolean {
+  const text = message.trim()
+  if (text.length === 0) return false
+  return /跳过细纲/u.test(text)
+    || /按梗概开推/u.test(text)
+    || /按这份梗概开推/u.test(text)
+}
+
+function mergeConfirmOutlineChoice(
+  choices: SynopsisConversationSendResult["messages"][number]["choices"] | undefined,
+): SynopsisConversationSendResult["messages"][number]["choices"] {
+  const rest = (choices ?? []).filter((choice) => choice.label !== "按细纲写正文")
+  return [...rest, { label: "按细纲写正文", action: "continue_discuss" as const }]
 }

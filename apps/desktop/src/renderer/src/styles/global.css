@@ -3444,6 +3444,15 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
 .secondary-command:disabled { opacity: .55; }
 .dialog-primary-command { border: 1px solid var(--accent); background: var(--accent); color: var(--text-on-accent); font-weight: 650; }
 .dialog-primary-command:hover { background: var(--accent-hover); }
+.work-name-prompt-dialog > footer .destructive-command {
+  border: 1px solid var(--danger);
+  background: var(--danger);
+  color: #fff;
+  font-weight: 650;
+}
+.work-name-prompt-dialog > footer .destructive-command:hover:not(:disabled) {
+  background: #c03537;
+}
 .project-settings-dialog {
   width: min(780px, calc(100vw - 64px));
   height: min(560px, calc(100vh - 96px));
@@ -3713,16 +3722,18 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   box-shadow: 0 2px 0 rgba(0, 0, 0, 0.16);
   transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
 }
-.launcher-book-card:hover:not(:disabled) {
+.launcher-book-card:hover {
   transform: translateY(-2px);
   border-color: var(--accent-soft-border);
   background: var(--bg-hover);
   color: var(--text);
 }
-.launcher-book-card:disabled {
+.launcher-book-card:disabled,
+.launcher-book-card button:disabled {
   opacity: 0.65;
 }
 .launcher-book-cover {
+  position: relative;
   width: 100%;
   aspect-ratio: 3 / 4;
   border-radius: 6px;
@@ -3735,6 +3746,53 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+.launcher-book-actions {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 8px;
+  background: rgba(12, 14, 20, 0.72);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
+}
+.launcher-book-card:hover .launcher-book-actions,
+.launcher-book-card:focus-within .launcher-book-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.launcher-book-action {
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.12);
+  color: #f4f6fb;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.launcher-book-action:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.22);
+}
+.launcher-book-action--primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+.launcher-book-action--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.launcher-book-action--danger {
+  border-color: rgba(232, 96, 96, 0.55);
+  background: rgba(180, 48, 48, 0.55);
+}
+.launcher-book-action--danger:hover:not(:disabled) {
+  background: rgba(210, 60, 60, 0.75);
 }
 .launcher-book-title {
   overflow: hidden;
@@ -5786,6 +5844,12 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   color: var(--text);
 }
 .creation-desk-word-count.invalid input { border-color: var(--danger); background: var(--danger-soft); }
+.creation-desk-batch-proceed {
+  height: 28px;
+  width: auto;
+  min-width: 96px;
+  flex: 0 0 auto;
+}
 .creation-desk-composer {
   width: min(760px, 100%);
   margin: 0 auto;

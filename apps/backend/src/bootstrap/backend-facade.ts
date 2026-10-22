@@ -27,6 +27,7 @@ import {
   projectCreatePayloadSchema,
   projectListPayloadSchema,
   projectRenamePayloadSchema,
+  projectDeletePayloadSchema,
   projectSuggestDisplayNamePayloadSchema,
   graphNeighborhoodPayloadSchema,
   historyBranchesPayloadSchema,
@@ -252,6 +253,15 @@ export class BackendFacade {
           displayName,
           workspaceRootRef: payload.workspaceRootRef,
         }
+      }
+      case "project.delete": {
+        const payload = projectDeletePayloadSchema.parse(request.payload)
+        await this.container.deleteProject({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          mode: payload.mode,
+        })
+        return { projectId: payload.projectId, ok: true as const }
       }
       case "project.suggestDisplayName": {
         const payload = projectSuggestDisplayNamePayloadSchema.parse(request.payload)
@@ -591,6 +601,7 @@ export class BackendFacade {
             : { lockedChapterSequence: payload.lockedChapterSequence }),
           ...(payload.lockedFocusKind === undefined ? {} : { lockedFocusKind: payload.lockedFocusKind }),
           ...(payload.automation === undefined ? {} : { automation: payload.automation }),
+          ...(payload.batchProceed === undefined ? {} : { batchProceed: payload.batchProceed }),
           ...(payload.agentMode === undefined ? {} : { agentMode: payload.agentMode }),
         })
       }

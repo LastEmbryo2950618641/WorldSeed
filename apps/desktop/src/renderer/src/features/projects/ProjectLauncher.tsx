@@ -2,9 +2,16 @@ import { useCallback, useEffect, useState } from "react"
 import { createPortal } from "react-dom"
 import { Plus } from "lucide-react"
 
-import { invokeBackend, type OpenProject } from "../../api/client.js"
+import {
+  getBookCover,
+  invokeBackend,
+  selectImageFile,
+  setBookCover,
+  type OpenProject,
+} from "../../api/client.js"
 import projectDefaultIcon from "../../assets/project-default-icon.png"
 import { folderLabelFromPath, isUnderWorkDirectories } from "./book-path.js"
+import { DeleteBookDialog } from "./DeleteBookDialog.js"
 import { type ProjectRailItem } from "./ProjectRail.js"
 import { useWorkDirectory } from "./use-work-directory.js"
 import { WorkNamePromptDialog } from "./WorkNamePromptDialog.js"
@@ -28,10 +35,12 @@ function formatOpenedAgo(lastOpenedAtMs: number, nowMs: number): string {
 export function ProjectLauncher({ onOpen }: Props): React.JSX.Element {
   const workDirectoryState = useWorkDirectory()
   const [projects, setProjects] = useState<readonly ProjectRailItem[]>([])
+  const [coverByProjectId, setCoverByProjectId] = useState<Readonly<Record<string, string>>>({})
   const [loadingProjects, setLoadingProjects] = useState(false)
   const [error, setError] = useState<string>()
   const [busy, setBusy] = useState<"new" | string>()
   const [pendingCreatePath, setPendingCreatePath] = useState<string>()
+  const [pendingDelete, setPendingDelete] = useState<ProjectRailItem>()
   const [nowMs, setNowMs] = useState(() => Date.now())
 
   const refreshProjects = useCallback(async (): Promise<void> => {
@@ -44,6 +53,19 @@ export function ProjectLauncher({ onOpen }: Props): React.JSX.Element {
       setProjects(filtered)
       setNowMs(Date.now())
       setError(undefined)
+      const covers = await Promise.all(filtered.map(async (project) => {
+        try {
+          const cover = await getBookCover(project.workspaceRootRef)
+          return cover === undefined ? undefined : ([project.projectId, cover] as const)
+        } catch {
+          return undefined
+        }
+      }))
+      const next: Record<string, string> = {}
+      for (const entry of covers) {
+        if (entry !== undefined) next[entry[0]] = entry[1]
+      }
+      setCoverByProjectId(next)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -109,6 +131,44 @@ export function ProjectLauncher({ onOpen }: Props): React.JSX.Element {
     }
   }
 
+  const changeCover = async (item: ProjectRailItem): Promise<void> => {
+    setError(undefined)
+    try {
+      const sourcePath = await selectImageFile({ title: "选择封面图片" })
+      if (sourcePath === undefined) return
+      setBusy(`cover:${item.projectId}`)
+      const dataUrl = await setBookCover({
+        workspaceRootRef: item.workspaceRootRef,
+        sourcePath,
+      })
+      setCoverByProjectId((prev) => ({ ...prev, [item.projectId]: dataUrl }))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  const confirmDelete = async (): Promise<void> => {
+    if (pendingDelete === undefined) return
+    const item = pendingDelete
+    setBusy(`delete:${item.projectId}`)
+    setError(undefined)
+    try {
+      await invokeBackend("project.delete", {
+        projectId: item.projectId,
+        workspaceRootRef: item.workspaceRootRef,
+        mode: "include_data",
+      })
+      setPendingDelete(undefined)
+      await refreshProjects()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
   if (workDirectoryState.loading || (workDirectoryState.workDirectory === undefined && workDirectoryState.defaultWorkDirectory.length === 0)) {
     return <main className="launcher"><p className="launcher-loading">正在加载工作目录…</p></main>
   }
@@ -131,7 +191,7 @@ export function ProjectLauncher({ onOpen }: Props): React.JSX.Element {
     </>
   }
 
-  const interactionLocked = busy !== undefined || pendingCreatePath !== undefined
+  const interactionLocked = busy !== undefined || pendingCreatePath !== undefined || pendingDelete !== undefined
 
   return (
     <main className="launcher launcher--library">
@@ -144,22 +204,48 @@ export function ProjectLauncher({ onOpen }: Props): React.JSX.Element {
         ? <p className="launcher-loading">正在加载书籍…</p>
         : null}
       <div className="launcher-book-grid" data-testid="launcher-book-grid">
-        {projects.map((item) => (
-          <button
-            key={item.projectId}
-            type="button"
-            className="launcher-book-card"
-            data-testid="launcher-book-card"
-            disabled={interactionLocked}
-            onClick={() => { void openBookCard(item) }}
-          >
-            <span className="launcher-book-cover" aria-hidden>
-              <img src={item.iconUrl ?? projectDefaultIcon} alt="" draggable={false} />
-            </span>
-            <strong className="launcher-book-title">{item.displayName}</strong>
-            <span className="launcher-book-meta">{formatOpenedAgo(item.lastOpenedAtMs, nowMs)}</span>
-          </button>
-        ))}
+        {projects.map((item) => {
+          const coverSrc = coverByProjectId[item.projectId] ?? item.iconUrl ?? projectDefaultIcon
+          return (
+            <div
+              key={item.projectId}
+              className="launcher-book-card"
+              data-testid="launcher-book-card"
+            >
+              <div className="launcher-book-cover" aria-hidden>
+                <img src={coverSrc} alt="" draggable={false} />
+                <div className="launcher-book-actions">
+                  <button
+                    type="button"
+                    className="launcher-book-action launcher-book-action--primary"
+                    disabled={interactionLocked}
+                    onClick={() => { void openBookCard(item) }}
+                  >
+                    打开
+                  </button>
+                  <button
+                    type="button"
+                    className="launcher-book-action"
+                    disabled={interactionLocked}
+                    onClick={() => { void changeCover(item) }}
+                  >
+                    更换封面
+                  </button>
+                  <button
+                    type="button"
+                    className="launcher-book-action launcher-book-action--danger"
+                    disabled={interactionLocked}
+                    onClick={() => { setPendingDelete(item) }}
+                  >
+                    删除
+                  </button>
+                </div>
+              </div>
+              <strong className="launcher-book-title">{item.displayName}</strong>
+              <span className="launcher-book-meta">{formatOpenedAgo(item.lastOpenedAtMs, nowMs)}</span>
+            </div>
+          )
+        })}
         <button
           type="button"
           className="launcher-book-card launcher-book-card--add"
@@ -193,6 +279,15 @@ export function ProjectLauncher({ onOpen }: Props): React.JSX.Element {
           folderLabel={folderLabelFromPath(pendingCreatePath)}
           onCancel={() => { setPendingCreatePath(undefined) }}
           onConfirm={(displayName) => { void finishCreate(pendingCreatePath, displayName) }}
+        />,
+        document.body,
+      )}
+      {pendingDelete === undefined ? null : createPortal(
+        <DeleteBookDialog
+          displayName={pendingDelete.displayName}
+          busy={busy === `delete:${pendingDelete.projectId}`}
+          onCancel={() => { setPendingDelete(undefined) }}
+          onConfirm={() => { void confirmDelete() }}
         />,
         document.body,
       )}

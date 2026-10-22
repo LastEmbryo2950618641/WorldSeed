@@ -126,6 +126,24 @@ export class BackendContainer {
     return this.lifecycle.listRegistered()
   }
 
+  public async deleteProject(input: Readonly<{
+    projectId: string
+    workspaceRootRef: string
+    mode: "keep_data" | "include_data"
+  }>): Promise<void> {
+    const resolvedRoot = resolve(input.workspaceRootRef)
+    if (
+      this.currentRuntime !== undefined
+      && this.currentRuntime.projectId === input.projectId
+      && this.currentRuntime.workspaceRootRef === resolvedRoot
+      && !this.currentRuntime.isClosed()
+    ) {
+      await this.currentRuntime.close()
+      this.currentRuntime = undefined
+    }
+    await this.lifecycle.deleteRegistered(input)
+  }
+
   public async peekProjectDisplayName(project: RegisteredProject): Promise<string | undefined> {
     return this.lifecycle.peekDisplayName(project)
   }

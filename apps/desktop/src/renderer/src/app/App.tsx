@@ -150,7 +150,11 @@ export function App(): React.JSX.Element {
   const [agentAutoChainActive, setAgentAutoChainActive] = useState(false)
   const sendSynopsisMessageRef = useRef<((
     message: string,
-    options?: Readonly<{ agentMode?: "auto" | "plan" | "accept_edits"; autoContinued?: boolean }>,
+    options?: Readonly<{
+      agentMode?: "auto" | "plan" | "accept_edits"
+      batchProceed?: boolean
+      autoContinued?: boolean
+    }>,
   ) => Promise<boolean>) | undefined>(undefined)
   const batchCancelRef = useRef(false)
   const batchPauseRequestedRef = useRef(false)
@@ -1286,6 +1290,7 @@ export function App(): React.JSX.Element {
       lockedChapterSequence?: number
       automation?: "batch_chapter"
       agentMode?: "auto" | "plan" | "accept_edits"
+      batchProceed?: boolean
       autoContinued?: boolean
     }>,
   ): Promise<boolean> => {
@@ -1435,6 +1440,7 @@ export function App(): React.JSX.Element {
           ? {}
           : { lockedChapterSequence: options.lockedChapterSequence, lockedFocusKind: "chapter_body" as const }),
         ...(options?.automation === undefined ? {} : { automation: options.automation }),
+        ...(options?.batchProceed === undefined ? {} : { batchProceed: options.batchProceed }),
         ...(options?.agentMode === undefined ? {} : { agentMode: options.agentMode }),
       }, {
         waitTimeoutMs: projectSettings?.execution.backendRequestWaitTimeoutMs
@@ -1443,8 +1449,12 @@ export function App(): React.JSX.Element {
           synopsisActiveRequestRef.current = requestId
         },
         onWaitTimeout: (info) => new Promise<"continue" | "abandon">((resolve) => {
-          // Auto runs unattended; the 停止 button remains the way to abandon it.
-          if (batchRunningRef.current || (options?.agentMode ?? "auto") === "auto") {
+          // Batch proceed / volume batch runs unattended; 停止 abandons.
+          if (
+            batchRunningRef.current
+            || options?.batchProceed === true
+            || options?.automation === "batch_chapter"
+          ) {
             resolve("continue")
             return
           }
@@ -1501,6 +1511,7 @@ export function App(): React.JSX.Element {
         setTimeout(() => {
           void sendSynopsisMessageRef.current?.(continuation, {
             ...(options?.agentMode === undefined ? {} : { agentMode: options.agentMode }),
+            ...(options?.batchProceed === undefined ? {} : { batchProceed: options.batchProceed }),
             autoContinued: true,
           })
         }, 1_500)
@@ -2809,6 +2820,7 @@ export function App(): React.JSX.Element {
       <ProjectRail
         activeProjectId={project.projectId}
         onOpen={resetWorkbenchForProject}
+        onBrowseAllBooks={() => { resetWorkbenchForProject(undefined) }}
         updateAvailable={appUpdate.available}
         onUpdateClick={() => {
           appUpdate.openUpdatePrompt()

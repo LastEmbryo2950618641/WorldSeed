@@ -1,3 +1,6 @@
+import { rm } from "node:fs/promises"
+import { resolve } from "node:path"
+
 import { PROTOCOL_VERSION, type ProjectId } from "@worldseed/contracts"
 
 import {
@@ -71,6 +74,34 @@ export class ProjectLifecycleService {
 
   public async listRegistered(limit = 100): Promise<readonly RegisteredProject[]> {
     return this.registry.listOrderedByLastOpened(limit)
+  }
+
+  /**
+   * Remove a book from the launcher registry.
+   * `include_data` also deletes the workspace folder and internal store.
+   * `keep_data` only unregisters (folders remain on disk).
+   */
+  public async deleteRegistered(
+    input: Readonly<{
+      projectId: string
+      workspaceRootRef: string
+      mode: "keep_data" | "include_data"
+    }>,
+  ): Promise<void> {
+    const registered = await this.registry.findById(input.projectId as ProjectId)
+    if (registered === undefined) {
+      throw new ProjectLifecycleError("project_not_registered", "书籍未在本机注册")
+    }
+    const expectedRoot = resolve(registered.workspaceRootRef)
+    const givenRoot = resolve(input.workspaceRootRef)
+    if (expectedRoot !== givenRoot) {
+      throw new ProjectLifecycleError("manifest_mismatch", "工作区路径与注册记录不一致")
+    }
+    await this.registry.unregister(registered.projectId)
+    if (input.mode === "include_data") {
+      await rm(registered.internalStoreRef, { recursive: true, force: true })
+      await rm(registered.workspaceRootRef, { recursive: true, force: true })
+    }
   }
 
   public async peekDisplayName(project: RegisteredProject): Promise<string | undefined> {

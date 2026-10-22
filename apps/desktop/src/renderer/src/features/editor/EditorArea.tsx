@@ -141,7 +141,10 @@ type Props = Readonly<{
   synopsisStream?: SynopsisConversationStreamSnapshot | undefined
   synopsisDraftRestore?: { text: string; token: number } | undefined
   pendingStagingPromotes?: readonly SynopsisStagingPromoteProposal[]
-  onSynopsisSend(message: string, options?: Readonly<{ agentMode?: "auto" | "plan" | "accept_edits" }>): Promise<void>
+  onSynopsisSend(message: string, options?: Readonly<{
+    agentMode?: "auto" | "plan" | "accept_edits"
+    batchProceed?: boolean
+  }>): Promise<void>
   onSynopsisStop?(): Promise<void>
   onSynopsisRefreshChoices(messageId: string): Promise<void>
   onPromoteStaging(): Promise<void>

@@ -268,6 +268,34 @@ export async function selectMarkdownFiles(input?: Readonly<{
   return bridge.selectMarkdownFiles(input)
 }
 
+export async function selectImageFile(input?: Readonly<{
+  title?: string
+  defaultPath?: string
+}>): Promise<string | undefined> {
+  const bridge = getWorldseedBridge()
+  if (bridge === undefined || typeof bridge.selectImageFile !== "function") {
+    throw new Error("请重启应用后再更换封面（主进程尚未加载选图能力）")
+  }
+  return bridge.selectImageFile(input)
+}
+
+export async function getBookCover(workspaceRootRef: string): Promise<string | undefined> {
+  const bridge = getWorldseedBridge()
+  if (bridge === undefined || typeof bridge.getBookCover !== "function") return undefined
+  return bridge.getBookCover(workspaceRootRef)
+}
+
+export async function setBookCover(input: Readonly<{
+  workspaceRootRef: string
+  sourcePath: string
+}>): Promise<string> {
+  const bridge = getWorldseedBridge()
+  if (bridge === undefined || typeof bridge.setBookCover !== "function") {
+    throw new Error("请重启应用后再更换封面（主进程尚未加载封面写入能力）")
+  }
+  return bridge.setBookCover(input)
+}
+
 export function resolveDefaultWorkDirectoryPath(): string {
   const bridge = getWorldseedBridge()
   if (bridge !== undefined && typeof bridge.defaultWorkDirectoryPath === "string" && bridge.defaultWorkDirectoryPath.length > 0) {
@@ -628,6 +656,15 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
               },
             ],
       }
+    case "project.delete": {
+      const projectId = typeof payload === "object" && payload !== null && "projectId" in payload
+        ? String((payload as { projectId: string }).projectId)
+        : undefined
+      if (browserDemoProject !== undefined && browserDemoProject.projectId === projectId) {
+        browserDemoProject = undefined
+      }
+      return { projectId: projectId ?? "00000000-0000-4000-8000-000000000000", ok: true as const }
+    }
     case "project.validate":
     case "workspace.list":
       return { inventory: demoInventory, issues: [] }

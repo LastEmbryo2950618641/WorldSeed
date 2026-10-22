@@ -54,6 +54,15 @@ export class SqliteProjectRegistryRepository implements ProjectRegistryRepositor
     }
   }
 
+  public async unregister(projectId: ProjectId): Promise<void> {
+    const result = await this.database.deleteFrom("registered_projects")
+      .where("project_id", "=", projectId)
+      .executeTakeFirst()
+    if (result.numDeletedRows !== 1n) {
+      throw new Error(`Registered project does not exist: ${projectId}`)
+    }
+  }
+
   public async listOrderedByLastOpened(limit = 100): Promise<readonly RegisteredProject[]> {
     const rows = await this.database.selectFrom("registered_projects")
       .selectAll()

@@ -180,6 +180,9 @@ export type WorldseedBridge = Readonly<{
   allocateBookPath(workDirectory: string): Promise<string>
   selectDirectory(input?: { title?: string; defaultPath?: string }): Promise<string | undefined>
   selectMarkdownFiles(input?: { title?: string; defaultPath?: string }): Promise<readonly string[]>
+  selectImageFile(input?: { title?: string; defaultPath?: string }): Promise<string | undefined>
+  getBookCover(workspaceRootRef: string): Promise<string | undefined>
+  setBookCover(input: Readonly<{ workspaceRootRef: string; sourcePath: string }>): Promise<string>
   onCommand(listener: (command: WorldseedCommand) => void): () => void
   windowControl(action: WindowControlAction): Promise<boolean | undefined>
   onWindowMaximized(listener: (maximized: boolean) => void): () => void
@@ -232,6 +235,12 @@ export const worldseedBridge: WorldseedBridge = {
     const paths = await ipcRenderer.invoke("worldseed:select-markdown-files", input ?? {}) as unknown
     return Array.isArray(paths) ? paths.filter((entry): entry is string => typeof entry === "string") : []
   },
+  selectImageFile: async (input) => ipcRenderer.invoke("worldseed:select-image-file", input) as Promise<string | undefined>,
+  getBookCover: async (workspaceRootRef) => {
+    const result = await ipcRenderer.invoke("worldseed:book-cover:get", { workspaceRootRef }) as unknown
+    return typeof result === "string" && result.length > 0 ? result : undefined
+  },
+  setBookCover: async (input) => ipcRenderer.invoke("worldseed:book-cover:set", input) as Promise<string>,
   onCommand: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, command: WorldseedCommand): void => { listener(command); }
     ipcRenderer.on("worldseed:command", handler)

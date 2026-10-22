@@ -68,6 +68,16 @@ export const projectRenamePayloadSchema = projectSettingsReadPayloadSchema.exten
   displayName: z.string().trim().min(1).max(200),
 })
 export type ProjectRenamePayload = z.infer<typeof projectRenamePayloadSchema>
+
+export const projectDeletePayloadSchema = projectSettingsReadPayloadSchema.extend({
+  mode: z.enum(["keep_data", "include_data"]).default("include_data"),
+})
+export type ProjectDeletePayload = z.infer<typeof projectDeletePayloadSchema>
+export const projectDeleteResultSchema = z.object({
+  projectId: idSchema,
+  ok: z.literal(true),
+})
+export type ProjectDeleteResult = z.infer<typeof projectDeleteResultSchema>
 export const projectSuggestDisplayNamePayloadSchema = projectSettingsReadPayloadSchema.extend({
   model: modelSelectionSchema.optional(),
   historyNames: z.array(z.string().trim().min(1).max(200)).max(16).optional(),
@@ -333,6 +343,12 @@ export const synopsisConversationSendPayloadSchema = projectSettingsReadPayloadS
    * auto-confirm synopsis when a body is written so outline can land same/next turn.
    */
   automation: synopsisConversationAutomationSchema.optional(),
+  /**
+   * Creation-desk「批量推进」toggle:
+   * true = skip synopsis/outline/body confirmation stops and auto-continue to next chapter;
+   * false = stop after each of 梗概 / 细纲 / 正文 for user confirmation.
+   */
+  batchProceed: z.boolean().optional(),
   /** Claude Code–style discuss mode: auto (default) | plan | accept_edits. */
   agentMode: z.enum(["auto", "plan", "accept_edits"]).optional(),
 })
@@ -639,6 +655,7 @@ export const backendPayloadSchemas = {
   "project.open": projectWorkspacePayloadSchema,
   "project.list": projectListPayloadSchema,
   "project.rename": projectRenamePayloadSchema,
+  "project.delete": projectDeletePayloadSchema,
   "project.suggestDisplayName": projectSuggestDisplayNamePayloadSchema,
   "project.validate": projectWorkspacePayloadSchema,
   "project.settings.read": projectSettingsReadPayloadSchema,

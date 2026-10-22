@@ -47,6 +47,10 @@ import {
   loadDiscussAgentMode,
   persistDiscussAgentMode,
 } from "./discuss-agent-mode.js"
+import {
+  loadBatchProceedEnabled,
+  persistBatchProceedEnabled,
+} from "./batch-proceed.js"
 import { CreationDeskTodoPopover } from "./CreationDeskTodoPopover.js"
 import {
   expandCreationDeskFooterCollapse,
@@ -107,7 +111,7 @@ type Props = Readonly<{
   draftRestore?: { text: string; token: number } | undefined
   running: boolean
   pendingStagingPromotes?: readonly SynopsisStagingPromoteProposal[]
-  onSend(message: string, options?: Readonly<{ agentMode?: DiscussAgentMode }>): Promise<void>
+  onSend(message: string, options?: Readonly<{ agentMode?: DiscussAgentMode; batchProceed?: boolean }>): Promise<void>
   onStop?(): Promise<void>
   onRefreshChoices(messageId: string): Promise<void>
   onPromoteStaging(): Promise<void>
@@ -137,6 +141,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
   const [advancedMenuOpen, setAdvancedMenuOpen] = useState(false)
   const [todoOpen, setTodoOpen] = useState(false)
   const [agentMode, setAgentMode] = useState<DiscussAgentMode>(() => loadDiscussAgentMode())
+  const [batchProceed, setBatchProceed] = useState(() => loadBatchProceedEnabled())
   const [goalsOpen, setGoalsOpen] = useState(false)
   const [focusUnfilled, setFocusUnfilled] = useState(false)
   const [choicesRefreshing, setChoicesRefreshing] = useState(false)
@@ -177,9 +182,9 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
   const sendMessage = useCallback(async (message: string): Promise<void> => {
     stickToLatestRef.current = true
     setShowJumpToLatest(false)
-    await props.onSend(message, { agentMode })
+    await props.onSend(message, { agentMode, batchProceed })
     await goals.refresh()
-  }, [agentMode, goals.refresh, props.onSend])
+  }, [agentMode, batchProceed, goals.refresh, props.onSend])
 
   const visibleTodos = resolveDiscussTodos(props.stream, props.messages)
 
@@ -521,6 +526,27 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
                     <option value="payoff">落点</option>
                   </select>
                 </label>
+                <UiTooltip label={batchProceed
+                  ? "已开启：一章写完自动下一章，梗概/细纲/正文不逐步停等确认"
+                  : "已关闭：梗概→细纲→正文每一步停下等你确认后再继续"}>
+                  <button
+                    type="button"
+                    className={`model-toggle creation-desk-batch-proceed${batchProceed ? " enabled" : ""}`}
+                    data-testid="creation-desk-batch-proceed"
+                    aria-pressed={batchProceed}
+                    aria-label="批量推进"
+                    onClick={() => {
+                      setBatchProceed((current) => {
+                        const next = !current
+                        persistBatchProceedEnabled(next)
+                        return next
+                      })
+                    }}
+                  >
+                    <i aria-hidden="true" />
+                    <strong>批量推进</strong>
+                  </button>
+                </UiTooltip>
               </div>
             </>
           : null}

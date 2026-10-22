@@ -32,7 +32,7 @@ describe("discuss focusChange", () => {
   })
 
   it("prompts Auto/Accept to use focusChange instead of confirmation buttons", () => {
-    expect(discussAgentModePromptAppendix("auto")).toContain("focusChange")
-    expect(discussAgentModePromptAppendix("accept_edits")).toContain("focusChange")
+    expect(discussAgentModePromptAppendix("auto", { batchProceed: true })).toContain("focusChange")
+    expect(discussAgentModePromptAppendix("accept_edits", { batchProceed: true })).toContain("换章用 focusChange")
   })
 })
