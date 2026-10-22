@@ -18,8 +18,10 @@ import {
   modelContextMessageSchema,
   synopsisConversationChoiceSchema,
   synopsisConversationStreamEditSchema,
+  synopsisConversationStreamRunSchema,
   synopsisConversationStreamSearchSchema,
   synopsisConversationThinkingRoundSchema,
+  synopsisConversationTodoSchema,
 } from "@worldseed/contracts"
 
 import { digest } from "../../../core/index.js"
@@ -184,7 +186,10 @@ export class SqliteSynopsisConversationRepository {
     thinkingRounds?: SynopsisConversationMessage["thinkingRounds"]
     searching?: SynopsisConversationMessage["searching"]
     editing?: SynopsisConversationMessage["editing"]
+    toolRuns?: SynopsisConversationMessage["toolRuns"]
+    todos?: SynopsisConversationMessage["todos"]
     choices?: SynopsisConversationMessage["choices"]
+    error?: string
     hidden?: boolean
     createdAtMs: number
   }>): Promise<SynopsisConversationMessage> {
@@ -198,7 +203,10 @@ export class SqliteSynopsisConversationRepository {
       thinking_rounds_json: input.thinkingRounds === undefined ? null : encodeJson(input.thinkingRounds),
       searching_json: input.searching === undefined ? null : encodeJson(input.searching),
       editing_json: input.editing === undefined ? null : encodeJson(input.editing),
+      tool_runs_json: input.toolRuns === undefined ? null : encodeJson(input.toolRuns),
+      todos_json: input.todos === undefined ? null : encodeJson(input.todos),
       choices_json: input.choices === undefined ? null : encodeJson(input.choices),
+      error_text: input.error === undefined || input.error.trim().length === 0 ? null : input.error.trim(),
       hidden: input.hidden === true ? 1 : 0,
       created_at_ms: input.createdAtMs,
     }).executeTakeFirstOrThrow()
@@ -212,7 +220,10 @@ export class SqliteSynopsisConversationRepository {
       ...(input.thinkingRounds === undefined ? {} : { thinkingRounds: input.thinkingRounds }),
       ...(input.searching === undefined ? {} : { searching: input.searching }),
       ...(input.editing === undefined ? {} : { editing: input.editing }),
+      ...(input.toolRuns === undefined ? {} : { toolRuns: input.toolRuns }),
+      ...(input.todos === undefined ? {} : { todos: input.todos }),
       ...(input.choices === undefined ? {} : { choices: input.choices }),
+      ...(input.error === undefined || input.error.trim().length === 0 ? {} : { error: input.error.trim() }),
       ...(input.hidden === true ? { hidden: true } : {}),
       createdAtMs: input.createdAtMs,
     }
@@ -496,8 +507,11 @@ function mapMessage(row: {
   reasoning_content: string | null
   searching_json: string | null
   editing_json: string | null
+  tool_runs_json: string | null
+  todos_json: string | null
   thinking_rounds_json: string | null
   choices_json: string | null
+  error_text: string | null
   hidden: number
   created_at_ms: number
 }): SynopsisConversationMessage {
@@ -510,6 +524,12 @@ function mapMessage(row: {
   const editing = row.editing_json === null
     ? undefined
     : parseEditing(decodeJson(row.editing_json))
+  const toolRuns = row.tool_runs_json === null
+    ? undefined
+    : parseToolRuns(decodeJson(row.tool_runs_json))
+  const todos = row.todos_json === null
+    ? undefined
+    : parseTodos(decodeJson(row.todos_json))
   const thinkingRounds = row.thinking_rounds_json === null
     ? undefined
     : parseThinkingRounds(decodeJson(row.thinking_rounds_json))
@@ -525,7 +545,10 @@ function mapMessage(row: {
     ...(thinkingRounds === undefined ? {} : { thinkingRounds }),
     ...(searching === undefined ? {} : { searching }),
     ...(editing === undefined ? {} : { editing }),
+    ...(toolRuns === undefined ? {} : { toolRuns }),
+    ...(todos === undefined ? {} : { todos }),
     ...(choices === undefined ? {} : { choices }),
+    ...(row.error_text === null || row.error_text.length === 0 ? {} : { error: row.error_text }),
     ...(row.hidden === 1 ? { hidden: true } : {}),
     createdAtMs: row.created_at_ms,
   }
@@ -544,6 +567,16 @@ function parseSearching(value: unknown): SynopsisConversationMessage["searching"
 function parseEditing(value: unknown): SynopsisConversationMessage["editing"] {
   if (!Array.isArray(value)) return undefined
   return value.map((item) => synopsisConversationStreamEditSchema.parse(item))
+}
+
+function parseToolRuns(value: unknown): SynopsisConversationMessage["toolRuns"] {
+  if (!Array.isArray(value)) return undefined
+  return value.map((item) => synopsisConversationStreamRunSchema.parse(item))
+}
+
+function parseTodos(value: unknown): SynopsisConversationMessage["todos"] {
+  if (!Array.isArray(value)) return undefined
+  return value.map((item) => synopsisConversationTodoSchema.parse(item))
 }
 
 function parseThinkingRounds(value: unknown): SynopsisConversationMessage["thinkingRounds"] {

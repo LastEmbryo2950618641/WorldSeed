@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react"
-import { CheckCircle2, Loader2, RefreshCw, RotateCcw, X } from "lucide-react"
-import type { ChapterReviewRevisionPayload, GraphRevisionTask } from "@worldseed/contracts"
-import { invokeBackend, type OpenProject } from "../../api/client.js"
+import { AlertCircle, Check, CheckCircle2, Circle, Loader2, RefreshCw, RotateCcw, X } from "lucide-react"
+import type { ChapterReviewRevisionPayload, GraphRevisionTask, ResettableRuntimeMetricId } from "@worldseed/contracts"
+import { invokeBackend, type OpenProject, type TaskSnapshot } from "../../api/client.js"
 import { UiTooltip } from "../../components/UiTooltip.js"
+import { PhaseIoDetails, PhaseIoPending } from "./phase-io-details.js"
+import { RuntimeMonitor } from "./TaskCheckpointPrototype.js"
 
 const statuses: Record<string, string> = {
   pending: "待同步", running: "同步中", completed: "已完成", failed: "待重试",
@@ -23,9 +25,61 @@ const phaseLabels: Record<string, string> = {
   settlement_review: "审核结算", frontier_settlement: "更新推演前沿", commit_review: "校验并提交",
 }
 
-export function GraphRevisionTasksPanel({ project, model, onChanged }: {
+type PhaseVisualKind = "done" | "failed" | "running" | "idle"
+
+function phaseVisual(status: string): { kind: PhaseVisualKind; css: string } {
+  if (status === "completed") return { kind: "done", css: "done" }
+  if (status === "failed" || status === "cancelled") return { kind: "failed", css: "failed" }
+  if (status === "running") return { kind: "running", css: "current" }
+  return { kind: "idle", css: "" }
+}
+
+function PhaseStatusIcon({ state }: { state: PhaseVisualKind }): React.JSX.Element {
+  if (state === "done") return <Check size={13} />
+  if (state === "failed") return <AlertCircle size={13} aria-label="失败" />
+  if (state === "running") return <span className="phase-spinner" aria-hidden="true" />
+  return <Circle size={10} />
+}
+
+export function StageRecordPanel({
+  task,
+  monitorTask,
+  onResetMetrics,
+}: {
+  task: GraphRevisionTask
+  monitorTask: TaskSnapshot | undefined
+  onResetMetrics?: ((metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>) | undefined
+}): React.JSX.Element {
+  const { progress } = task
+  return <div className="graph-revision-stage-record" data-testid="graph-revision-stage-record">
+    <RuntimeMonitor task={monitorTask} onResetMetrics={onResetMetrics} />
+    <div className="phase-list">
+      {progress.phases.map((phase) => {
+        const visual = phaseVisual(phase.status)
+        const runs = monitorTask?.phaseRuns?.filter((run) => run.phase === phase.phase) ?? []
+        const latest = runs.at(-1)
+        const label = phaseLabels[phase.phase] ?? phase.phase
+        return <details className={`phase-detail ${visual.css}`} key={phase.phase}>
+          <summary className={`phase-row ${visual.css}`}>
+            <span className="phase-icon" aria-hidden="true"><PhaseStatusIcon state={visual.kind} /></span>
+            <span className="phase-row-copy">
+              <strong>{label}</strong>
+            </span>
+          </summary>
+          {latest?.result === undefined
+            ? <PhaseIoPending latestStatus={latest?.status ?? phase.status} visualKind={visual.kind} />
+            : <PhaseIoDetails result={latest.result} />}
+        </details>
+      })}
+    </div>
+  </div>
+}
+
+export function GraphRevisionTasksPanel({ project, model, monitorTask, onResetMetrics, onChanged }: {
   project: OpenProject | undefined
   model?: ChapterReviewRevisionPayload["model"]
+  monitorTask?: TaskSnapshot | undefined
+  onResetMetrics?: ((metricIds: readonly ResettableRuntimeMetricId[]) => Promise<void>) | undefined
   onChanged?: (() => Promise<void>) | undefined
 }): React.JSX.Element {
   const [tasks, setTasks] = useState<readonly GraphRevisionTask[]>([])
@@ -79,15 +133,15 @@ export function GraphRevisionTasksPanel({ project, model, onChanged }: {
       setPending((previous) => Object.fromEntries(Object.entries(previous).filter(([id]) => id !== task.revisionTaskId)))
     }
   }
-  return <section className="graph-revision-panel" aria-label="图修订任务" data-testid="graph-revision-panel">
+  return <section className="graph-revision-panel" aria-label="图治理任务" data-testid="graph-revision-panel">
     <header className="graph-revision-heading">
-      <strong>图修订任务 <span>{tasks.length}</span></strong>
-      <UiTooltip label="刷新任务"><button type="button" aria-label="刷新图修订任务" onClick={() => { setRefresh((value) => value + 1) }}><RefreshCw size={15} /></button></UiTooltip>
+      <strong>图治理任务 <span>{tasks.length}</span></strong>
+      <UiTooltip label="刷新任务"><button type="button" aria-label="刷新图治理任务" onClick={() => { setRefresh((value) => value + 1) }}><RefreshCw size={15} /></button></UiTooltip>
     </header>
     {error === undefined ? null : <p role="alert" className="graph-revision-error">{error}</p>}
     {loadError === undefined ? null : <p role="alert" className="graph-revision-error">{loadError}</p>}
     {loading && tasks.length === 0 ? <p className="graph-revision-empty">正在读取任务…</p> : null}
-    {!loading && tasks.length === 0 ? <p className="graph-revision-empty">{project === undefined ? "请先打开项目" : "暂无图修订任务"}</p> : null}
+    {!loading && tasks.length === 0 ? <p className="graph-revision-empty">{project === undefined ? "请先打开项目" : "暂无图治理任务"}</p> : null}
     {tasks.map((task) => {
       const busy = pending[task.revisionTaskId]
       const { progress } = task
@@ -107,10 +161,13 @@ export function GraphRevisionTasksPanel({ project, model, onChanged }: {
         </div>}
         {task.blocksTurn ? <p className="graph-revision-blocker">世界图尚未同步，暂不能开始新推演</p> : null}
         {task.error === undefined ? null : <p className="graph-revision-error">{task.error}</p>}
-        {progress.phases.length > 0 ? <details><summary>阶段记录</summary><ol>{progress.phases.map((phase) => <li key={phase.phase}><span>{phaseLabels[phase.phase] ?? phase.phase}</span><span>{phase.status === "completed" ? "完成" : phase.status === "running" ? (activity?.phase === phase.phase ? `${activityLabels[activity.stage]} · 第 ${String(activity.attempt)} 次请求` : task.status === "running" ? "进行中" : "已停止") : phase.status === "cancelled" ? "已取消" : "未完成"}{phase.attempt > 1 ? ` · 阶段第 ${String(phase.attempt)} 次` : ""}</span></li>)}</ol></details> : null}
+        {progress.phases.length > 0 ? <details className="graph-revision-stages">
+          <summary>阶段记录</summary>
+          <StageRecordPanel task={task} monitorTask={monitorTask} onResetMetrics={onResetMetrics} />
+        </details> : null}
         <footer><time dateTime={new Date(task.updatedAtMs).toISOString()}>{new Date(task.updatedAtMs).toLocaleString("zh-CN", { hour12: false })}</time><div>
-          <button type="button" disabled={!task.canCancel || busy !== undefined} onClick={() => { void act(task, "cancel") }}><X size={14} />{busy === "cancel" ? "取消中" : "取消"}</button>
-          <button type="button" disabled={!task.canRetry || busy !== undefined} onClick={() => { void act(task, "retry") }}><RotateCcw size={14} />{busy === "retry" ? "提交中" : "重试"}</button>
+          <button type="button" disabled={!task.canCancel || busy !== undefined} onClick={() => { void act(task, "cancel") }}><X size={12} aria-hidden="true" />{busy === "cancel" ? "取消中" : "取消"}</button>
+          <button type="button" disabled={!task.canRetry || busy !== undefined} onClick={() => { void act(task, "retry") }}><RotateCcw size={12} aria-hidden="true" />{busy === "retry" ? "提交中" : "重试"}</button>
         </div></footer>
       </article>
     })}

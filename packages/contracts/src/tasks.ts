@@ -10,3 +10,20 @@ export const taskHandleSchema = z.object({
   status: taskStatusSchema,
 })
 export type TaskHandle = z.infer<typeof taskHandleSchema>
+
+export type DeductionTask = Readonly<{
+  taskId: string
+  heading: string
+  chapterSequence?: number
+  status: string
+  canCancel: boolean
+  canRetry: boolean
+  error?: string
+  updatedAtMs: number
+  progress: Readonly<{
+    completed: number
+    total: number | null
+    phase?: string
+    phases: readonly Readonly<{ phase: string; status: string; attempt: number }>[]
+  }>
+}>

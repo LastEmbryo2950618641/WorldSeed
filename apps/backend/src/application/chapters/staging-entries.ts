@@ -222,6 +222,16 @@ export const STAGING_FILE_KEYS = {
 /** Arc outline file — staging-adjacent, not entry-list managed. */
 export const ARC_PLAN_STAGING_PATH = "暂存区/弧线规划.md" as const
 
+/** Per-volume outline under「大纲/」— filename must equal 章节正文 volume folder name. */
+export const VOLUME_OUTLINE_ROOT = "大纲" as const
+
+export const BATCH_VOLUME_DEDUCTION_PLAN_PATH =
+  "世界推演规则/基础规则/batch-volume-deduction-plan.md" as const
+
+export function volumeOutlinePlanPath(volumeFolderName: string): string {
+  return `${VOLUME_OUTLINE_ROOT}/${volumeFolderName}.md`
+}
+
 export function stagingFileTitle(relativePath: string): string {
   switch (relativePath) {
     case STAGING_FILE_KEYS.notes: return "本章讨论笔记"

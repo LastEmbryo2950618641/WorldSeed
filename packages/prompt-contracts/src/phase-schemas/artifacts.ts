@@ -2,6 +2,7 @@ import { z } from "zod"
 
 import {
   aiPhaseSchema,
+  discussFocusKindSchema,
   type AIPhase,
 } from "@worldseed/contracts"
 
@@ -611,7 +612,7 @@ export const synopsisDiscussArtifactSchema = z.object({
   assistantMessage: z.string().min(1),
   /** Parameters and writing guidance are disclosed only by a successful describe. */
   toolRequest: z.object({
-    name: z.enum(["chapter_workflow", "publish_draft"]),
+    name: z.enum(["chapter_workflow", "publish_draft", "restage_chapter", "bash", "todo_write", "memory_write"]),
     action: z.enum(["describe", "invoke"]),
     arguments: z.string().max(200_000).optional(),
   }).strict().optional(),
@@ -654,6 +655,11 @@ export const synopsisDiscussArtifactSchema = z.object({
     })).min(1).max(20),
   }).optional(),
   /**
+   * Auto / Accept edits: set true when the user's multi-step request is not finished yet
+   * (e.g. more chapters to draft/publish). The client auto-sends a continuation turn.
+   */
+  continueTurn: z.boolean().optional(),
+  /**
    * Full chapter draft for the focused (or locked) chapter, including its first draft.
    * Applied immediately as a new draft version; official 章节正文/*.md is unchanged.
    */
@@ -662,6 +668,36 @@ export const synopsisDiscussArtifactSchema = z.object({
     baseDraftVersionId: z.string().min(1).optional(),
     heading: z.string().min(1),
     body: z.string().min(1).max(200_000),
+  }).optional(),
+  /**
+   * Multi-chapter drafts in one reply (volume batch). Each entry targets an absolute chapterSequence.
+   * Preferred over repeating set_focus + chapterDraftProposal.
+   */
+  chapterDraftProposals: z.array(z.object({
+    chapterSequence: z.number().int().positive().max(10_000),
+    base: z.enum(["body", "draft"]).default("body"),
+    baseDraftVersionId: z.string().min(1).optional(),
+    heading: z.string().min(1),
+    body: z.string().min(1).max(200_000),
+  })).min(1).max(50).optional(),
+  /**
+   * Volume batch planning: write synopsis+outline for many chapters in one reply.
+   * Prefer this over per-chapter synopsisBody/outlineBody when planning a whole volume.
+   */
+  volumeChapterPlans: z.array(z.object({
+    chapterSequence: z.number().int().positive().max(10_000),
+    chapterTitle: z.string().min(1).max(200).optional(),
+    synopsisBody: z.string().min(1).max(80_000),
+    outlineBody: z.string().min(1).max(120_000),
+  })).min(1).max(50).optional(),
+  /**
+   * Immediately move discussion focus after this turn's writes (no user click).
+   * Prefer over `choices: set_focus` for automation. Forbidden when focusLocked
+   * or during volume batch (frontend advances focus).
+   */
+  focusChange: z.object({
+    chapterSequence: z.number().int().positive().max(10_000),
+    focusKind: discussFocusKindSchema.optional(),
   }).optional(),
   choices: z.array(z.object({
     label: z.string().min(1),
@@ -673,7 +709,6 @@ export const synopsisDiscussArtifactSchema = z.object({
       "confirm_synopsis",
       "set_focus",
       "promote_draft_to_body",
-      "restore_body_version",
     ]),
     chapterSequence: z.number().int().positive().optional(),
   })).optional(),
@@ -691,10 +726,18 @@ export const synopsisDiscussArtifactSchema = z.object({
       purpose: z.string().min(1).max(500),
     })).max(30).optional(),
   }).optional(),
+  /** Optional volume-level targets when emitting volumeChapterPlans. */
+  volumePlanMeta: z.object({
+    targetWordCount: z.number().int().positive().max(10_000_000).optional(),
+    targetChapterCount: z.number().int().positive().max(500).optional(),
+    notes: z.string().min(1).max(2_000).optional(),
+  }).optional(),
   finalSelfReview: z.string().min(1),
 }).superRefine((value, ctx) => {
+  // Hard gate after coerce: toolRequest must stand alone. Prefer
+  // coerceSynopsisDiscussToolExclusive() before parse so discuss can auto-defer writes.
   if (value.toolRequest !== undefined && Object.entries(value).some(([key, field]) =>
-    field !== undefined && !["assistantMessage", "finalSelfReview", "toolRequest"].includes(key))) {
+    field !== undefined && !DISCUSS_TOOL_EXCLUSIVE_KEYS.has(key))) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: "toolRequest 不可与章节写入、草稿提案或其他动作同回；先等待工具结果再继续",
@@ -796,5 +839,49 @@ export type FrontierSettlementArtifact = z.infer<typeof frontierSettlementArtifa
 export type CommitReviewArtifact = z.infer<typeof commitReviewArtifactSchema>
 export type RevisionReviewArtifact = z.infer<typeof revisionReviewArtifactSchema>
 export type SynopsisDiscussArtifact = z.infer<typeof synopsisDiscussArtifactSchema>
+
+/** Keys allowed alongside toolRequest: continueTurn is loop control, not a write. */
+const DISCUSS_TOOL_EXCLUSIVE_KEYS: ReadonlySet<string> = new Set([
+  "assistantMessage",
+  "finalSelfReview",
+  "toolRequest",
+  "continueTurn",
+])
+
+/**
+ * Gate auto-fix: when the model packs toolRequest with writes/choices/focusChange,
+ * keep only the tool turn (tools must run first) and report stripped keys.
+ */
+export function coerceSynopsisDiscussToolExclusive(input: unknown): Readonly<{
+  value: unknown
+  strippedKeys: readonly string[]
+}> {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return { value: input, strippedKeys: [] }
+  }
+  const record = { ...(input as Record<string, unknown>) }
+  if (record.toolRequest === undefined) return { value: record, strippedKeys: [] }
+  const strippedKeys: string[] = []
+  for (const key of Object.keys(record)) {
+    if (DISCUSS_TOOL_EXCLUSIVE_KEYS.has(key)) continue
+    if (record[key] === undefined) continue
+    strippedKeys.push(key)
+    delete record[key]
+  }
+  return { value: record, strippedKeys }
+}
+
+/** Side channel: last coerce strip from parsePhaseArtifact (single-threaded discuss). */
+let lastDiscussToolExclusiveStrip: readonly string[] | undefined
+
+export function consumeDiscussToolExclusiveStrip(): readonly string[] | undefined {
+  const value = lastDiscussToolExclusiveStrip
+  lastDiscussToolExclusiveStrip = undefined
+  return value
+}
+
+export function recordDiscussToolExclusiveStrip(strippedKeys: readonly string[]): void {
+  lastDiscussToolExclusiveStrip = strippedKeys.length === 0 ? undefined : [...strippedKeys]
+}
 export type SynopsisPresentationWrite = z.infer<typeof synopsisPresentationWriteSchema>
 export type SettingsExtractionArtifact = z.infer<typeof settingsExtractionArtifactSchema>

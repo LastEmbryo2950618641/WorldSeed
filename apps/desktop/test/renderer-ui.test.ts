@@ -12,8 +12,11 @@ import { SynopsisConversationComposer } from "../src/renderer/src/features/edito
 import { ChapterWorkspaceToolbar } from "../src/renderer/src/features/editor/ChapterWorkspaceToolbar.js"
 import { ChapterDraftVersionsPrototype } from "../src/renderer/src/features/editor/ChapterDraftVersionsPrototype.js"
 import { CreationDeskProgressReview } from "../src/renderer/src/features/editor/CreationDeskProgressReview.js"
-import { RightRail } from "../src/renderer/src/features/status/RightRail.js"
+import { ProcessPanel, RightRail } from "../src/renderer/src/features/status/RightRail.js"
+import { DeductionTasksPanel } from "../src/renderer/src/features/status/DeductionTasksPanel.js"
 import { RightPanelViewport } from "../src/renderer/src/features/status/RightPanelViewport.js"
+import { useWorkbenchStore } from "../src/renderer/src/state/workbench-store.js"
+import { GraphRevisionTasksPanel, StageRecordPanel } from "../src/renderer/src/features/status/GraphRevisionTasksPanel.js"
 import { HistoryPanel } from "../src/renderer/src/features/status/HistoryPanel.js"
 import { TaskCheckpointDialog, resolveCheckpointPauseReason, isCheckpointResumeAlreadyProgressed } from "../src/renderer/src/features/status/TaskCheckpointPrototype.js"
 import { ProjectSettingsDialog } from "../src/renderer/src/features/settings/ProjectSettingsDialog.js"
@@ -178,7 +181,7 @@ describe("renderer workbench UI contract", () => {
     expect(html).toContain("流程工具生成的草稿")
     expect(html).toContain("草稿 · v1 · 讨论agent")
     expect(html).toContain("草稿 · v2 · 人工")
-    expect(html).toContain("草稿 · v3 · AI流程工具")
+    expect(html).toContain("草稿 · v3 · 正文推演")
     for (const source of ["agent", "manual", "workflow"]) expect(html).toContain(`chapter-version-mark-${source}`)
     expect(html).not.toContain('data-testid="chapter-document-committed"')
     expect(html).not.toContain("当前正文")
@@ -226,7 +229,7 @@ describe("renderer workbench UI contract", () => {
     const html = renderToStaticMarkup(React.createElement(EditorArea, editorDefaults({
       synopsisMessages: [{ messageId: "message-1", sessionId: "session-1", role: "assistant", content: "梗概已准备好", createdAtMs: 1, choices: [{ label: "开始推演", action: "start_turn" }] }],
     })))
-    expect(html).toContain("调用流程推理工具")
+    expect(html).toContain("调用正文推演工具")
     expect(html).not.toContain("开始推演")
   })
 
@@ -266,6 +269,15 @@ describe("renderer workbench UI contract", () => {
         content: "正式输出正文。",
         thinkingRounds: [{ round: 1, text: "先想检索范围。" }],
         searching: [{ query: "Sakura 词条", status: "completed", round: 1 }],
+        toolRuns: [{
+          runId: "run-bash-1",
+          name: "bash",
+          action: "invoke",
+          arguments: JSON.stringify({ command: "dir /b" }),
+          status: "completed",
+          round: 1,
+          resultSummary: "exit=0\nimported.txt",
+        }],
         editing: [{
           path: "章节正文/第一章 [剧情梗概].md",
           kind: "synopsis",
@@ -276,10 +288,16 @@ describe("renderer workbench UI contract", () => {
       }],
     })))
 
+    expect(html).toContain("data-testid=\"agent-stream-activity\"")
+    expect(html).toContain("思考与工具")
+    expect(html).toContain("thinking · run 1 · searched 1 · edited 1")
     expect(html).toContain("agent-stream-block thinking")
     expect(html).toContain("agent-stream-block searching")
+    expect(html).toContain("agent-stream-block running")
+    expect(html).toContain("run(&quot;dir /b&quot;)")
     expect(html).toContain("agent-stream-block editing")
-    expect(html).not.toMatch(/agent-stream-block (?:thinking|searching|editing|resulting)[^>]*\sopen/)
+    expect(html).not.toMatch(/agent-stream-activity[^>]*\sopen/)
+    expect(html).not.toMatch(/agent-stream-block (?:thinking|searching|running|editing|resulting)[^>]*\sopen/)
   })
 
   it("renders a searchable chapter focus bar on the creation desk", () => {
@@ -604,7 +622,7 @@ describe("renderer workbench UI contract", () => {
         content: "已写入草稿。",
         choices: [
           { label: "是否将焦点调整到第2章", action: "set_focus", chapterSequence: 2 },
-          { label: "是否确认用草稿(v1)覆盖正式正文（当前正文将备份为旧版本）", action: "promote_draft_to_body" },
+          { label: "是否确认用草稿(v1)经图治理覆盖正式正文", action: "promote_draft_to_body" },
         ],
         createdAtMs: 2,
       }],
@@ -818,10 +836,8 @@ describe("renderer workbench UI contract", () => {
 
     expect(html).toContain("继续图同步")
     expect(html).toContain("chapter-reader-header-compact")
-    expect(html).toContain("正文版本")
-    expect(html).toContain("正文 · v1")
-    expect(html).toContain("当前正文 · v2")
-    expect(html).toContain("chapter-version-mark-ordinal")
+    expect(html).toContain("正式正文")
+    expect(html).toContain("正式正文 · 当前")
     expect(html).toContain("chapter-version-mark-current")
     expect(html).toContain("data-version-kind=\"official\"")
     expect(html).toContain("aria-selected=\"true\"")
@@ -1026,13 +1042,106 @@ describe("renderer workbench UI contract", () => {
 })
 
 describe("right rail process UI contract", () => {
-  it("ends the draft workflow at naming and omits graph and publication stages", () => {
+  it("shows a deduction task list panel instead of the bare process monitor", () => {
+    useWorkbenchStore.setState({ rightTab: "process" })
     const html = renderToStaticMarkup(React.createElement(RightRail, {
       graphSlice: undefined,
       task: { status: "running", lastPhase: "draft" },
       focusedChapterSequence: 3,
     }))
-    expect(html).toContain("流程推理工具")
+    expect(html).toContain("data-testid=\"deduction-tasks-panel\"")
+    expect(html).toContain("正文推演任务")
+    expect(html).toContain("图治理任务")
+    expect(html).not.toContain('class="process-panel"')
+    expect(html).not.toContain("data-testid=\"tool-monitor-split\"")
+    expect(html).not.toContain("data-testid=\"graph-revision-panel\"")
+  })
+
+  it("shows an empty deduction task list when no project is open", () => {
+    const html = renderToStaticMarkup(React.createElement(DeductionTasksPanel, {
+      project: undefined,
+    }))
+    expect(html).toContain("data-testid=\"deduction-tasks-panel\"")
+    expect(html).toContain("请先打开项目")
+    expect(html).not.toContain('class="phase-list"')
+  })
+
+  it("switches process and graph-revision panels instead of stacking them", () => {
+    useWorkbenchStore.setState({ rightTab: "process" })
+    const processHtml = renderToStaticMarkup(React.createElement(RightRail, {
+      graphSlice: undefined,
+      task: { status: "idle" },
+    }))
+    expect(processHtml).toContain("aria-label=\"正文推演任务\"")
+    expect(processHtml).toContain("aria-label=\"图治理任务\"")
+    expect(processHtml).toContain("data-testid=\"deduction-tasks-panel\"")
+    expect(processHtml).not.toContain("data-testid=\"graph-revision-panel\"")
+    expect(processHtml).not.toContain("data-testid=\"tool-monitor-split\"")
+
+    const graphHtml = renderToStaticMarkup(React.createElement(GraphRevisionTasksPanel, {
+      project: undefined,
+      monitorTask: { status: "completed" },
+    }))
+    expect(graphHtml).toContain("data-testid=\"graph-revision-panel\"")
+    expect(graphHtml).toContain("图治理任务")
+    expect(graphHtml).not.toContain("data-testid=\"deduction-tasks-panel\"")
+    expect(graphHtml).not.toContain("data-testid=\"tool-monitor-split\"")
+
+    const stageHtml = renderToStaticMarkup(React.createElement(StageRecordPanel, {
+      task: {
+        revisionTaskId: "rev-1",
+        chapterId: "ch-1",
+        heading: "第一章",
+        status: "completed",
+        blocksTurn: false,
+        canCancel: false,
+        canRetry: true,
+        updatedAtMs: 1,
+        progress: {
+          completed: 2,
+          total: 2,
+          phase: "commit_review",
+          phases: [
+            { phase: "interpret", status: "completed", attempt: 1 },
+            { phase: "commit_review", status: "completed", attempt: 1 },
+          ],
+        },
+      },
+      monitorTask: {
+        status: "completed",
+        phaseRuns: [{
+          phaseRunId: "run-1",
+          phase: "interpret",
+          status: "completed",
+          attempt: 1,
+          usage: {},
+          startedAtMs: 1,
+          finishedAtMs: 2,
+          result: { modelReasoning: "思考内容", rawModelOutput: "正式输出" },
+        }],
+      },
+    }))
+    expect(stageHtml).toContain("data-testid=\"graph-revision-stage-record\"")
+    expect(stageHtml).toContain("运行监控")
+    expect(stageHtml).toContain('class="phase-list"')
+    expect(stageHtml).toContain("理解章节修订")
+    expect(stageHtml).toContain("校验并提交")
+    expect(stageHtml).not.toContain("<small>interpret</small>")
+    expect(stageHtml).not.toContain("<small>commit_review</small>")
+    expect(stageHtml).not.toContain("phase-metric-rings")
+    expect(stageHtml).toContain("AI 思考")
+    expect(stageHtml).toContain("AI 输出")
+    expect(stageHtml).toContain("正式输出")
+  })
+
+  it("ends the draft workflow at naming and omits graph and publication stages", () => {
+    const html = renderToStaticMarkup(React.createElement(ProcessPanel, {
+      task: { status: "running", lastPhase: "draft" },
+      focusedChapterSequence: 3,
+      onOpenCheckpoint: () => undefined,
+    }))
+    expect(html).toContain("正文推演任务")
+    expect(html).toContain("运行监控")
     expect(html).toContain("第 3 章")
     expect(html).toContain("生成新草稿")
     expect(html).toContain("生成章节标题")
@@ -1043,21 +1152,20 @@ describe("right rail process UI contract", () => {
   })
 
   it("shows a chapter-specific empty state when App filters out an unrelated task", () => {
-    const html = renderToStaticMarkup(React.createElement(RightRail, {
-      graphSlice: undefined,
+    const html = renderToStaticMarkup(React.createElement(ProcessPanel, {
       task: undefined,
       focusedChapterSequence: 4,
+      onOpenCheckpoint: () => undefined,
     }))
     expect(html).toContain("第 4 章暂无流程任务")
     expect(html).not.toContain('class="phase-list"')
-    expect(html).not.toContain("checkpoint-dialog")
   })
 
   it("uses the explicit execution plan in order and omits unplanned recorded phases", () => {
-    const html = renderToStaticMarkup(React.createElement(RightRail, {
-      graphSlice: undefined,
+    const html = renderToStaticMarkup(React.createElement(ProcessPanel, {
       task: { status: "completed", lastPhase: "dependency_audit" },
       executionPhases: ["draft", "chapter_naming"],
+      onOpenCheckpoint: () => undefined,
     }))
     expect(html.indexOf("生成新草稿")).toBeLessThan(html.indexOf("生成章节标题"))
     expect(html).not.toContain("理解用户输入")
@@ -1066,8 +1174,7 @@ describe("right rail process UI contract", () => {
   })
 
   it("renders backend runtime descriptors instead of front-end default limits", () => {
-    const html = renderToStaticMarkup(React.createElement(RightRail, {
-      graphSlice: undefined,
+    const html = renderToStaticMarkup(React.createElement(ProcessPanel, {
       task: {
         handle: { taskId: "task-metrics", status: "paused" },
         status: "paused",
@@ -1092,6 +1199,7 @@ describe("right rail process UI contract", () => {
           }],
         },
       },
+      onOpenCheckpoint: () => undefined,
     }))
 
     expect(html).not.toContain("7 / 9")
@@ -1149,8 +1257,7 @@ describe("right rail process UI contract", () => {
   })
 
   it("shows an explicit model-in-flight state before a phase result returns", () => {
-    const html = renderToStaticMarkup(React.createElement(RightRail, {
-      graphSlice: undefined,
+    const html = renderToStaticMarkup(React.createElement(ProcessPanel, {
       task: {
         status: "running",
         lastPhase: "interpret",
@@ -1163,17 +1270,18 @@ describe("right rail process UI contract", () => {
           startedAtMs: 1,
         }],
       },
+      onOpenCheckpoint: () => undefined,
     }))
 
     expect(html).toContain("已向模型发起请求")
     expect(html).toContain("等待 AI 返回思考记录与正式输出")
-    expect(html).toContain("流程推理工具运行中")
+    expect(html).toContain("正文推演")
   })
 
   it("omits the redundant text status column from phase rows", () => {
-    const html = renderToStaticMarkup(React.createElement(RightRail, {
-      graphSlice: undefined,
+    const html = renderToStaticMarkup(React.createElement(ProcessPanel, {
       task: { status: "paused" },
+      onOpenCheckpoint: () => undefined,
     }))
 
     const phaseList = html.slice(html.indexOf('class="phase-list"'))
@@ -1182,8 +1290,7 @@ describe("right rail process UI contract", () => {
   })
 
   it("keeps phase status icons without rendering text labels", () => {
-    const html = renderToStaticMarkup(React.createElement(RightRail, {
-      graphSlice: undefined,
+    const html = renderToStaticMarkup(React.createElement(ProcessPanel, {
       task: {
         status: "running",
         phaseRuns: [
@@ -1192,6 +1299,7 @@ describe("right rail process UI contract", () => {
           { phaseRunId: "failed", phase: "source_retrieval", status: "failed", attempt: 1, usage: {}, startedAtMs: 4 },
         ],
       },
+      onOpenCheckpoint: () => undefined,
     }))
 
     expect(html).not.toContain("<em>已完成</em>")
@@ -1201,8 +1309,7 @@ describe("right rail process UI contract", () => {
   })
 
   it("shows cost, KV cache hit rate, and collapsible AI panels", () => {
-    const html = renderToStaticMarkup(React.createElement(RightRail, {
-      graphSlice: undefined,
+    const html = renderToStaticMarkup(React.createElement(ProcessPanel, {
       task: {
         status: "completed",
         result: {
@@ -1240,6 +1347,7 @@ describe("right rail process UI contract", () => {
         }],
         runtimeMetrics: runtimeMetricsFixture(3, 1200, 450, 0.68),
       },
+      onOpenCheckpoint: () => undefined,
     }))
 
     expect(html).not.toContain("实际运行模型")
@@ -1286,8 +1394,7 @@ describe("right rail process UI contract", () => {
   })
 
   it("shows advisory continuity results collapsed without changing the completed task state", () => {
-    const html = renderToStaticMarkup(React.createElement(RightRail, {
-      graphSlice: undefined,
+    const html = renderToStaticMarkup(React.createElement(ProcessPanel, {
       task: {
         status: "completed",
         lastPhase: "commit_review",
@@ -1315,20 +1422,20 @@ describe("right rail process UI contract", () => {
           finishedAtMs: 2,
         }],
       },
+      onOpenCheckpoint: () => undefined,
     }))
 
     expect(html).toContain("连续性建议")
     expect(html).toContain("昨天留下的痕迹仍在。")
     expect(html).toContain("冲突")
     expect(html).toContain("改成与当前场景时间一致的表达。")
-    expect(html).toContain("completed")
+    expect(html).toContain("phase-detail done")
     expect(html).not.toContain("class=\"task-error\"")
     expect(html).not.toContain("<details class=\"continuity-advice\" open=\"\"")
   })
 
   it("hides retired turn review rows on a completed historical task", () => {
-    const html = renderToStaticMarkup(React.createElement(RightRail, {
-      graphSlice: undefined,
+    const html = renderToStaticMarkup(React.createElement(ProcessPanel, {
       task: {
         status: "completed",
         lastPhase: "commit_review",
@@ -1340,6 +1447,7 @@ describe("right rail process UI contract", () => {
           { phaseRunId: "p-commit", phase: "commit_review", status: "completed", attempt: 1, usage: {}, startedAtMs: 9, finishedAtMs: 10 },
         ],
       },
+      onOpenCheckpoint: () => undefined,
     }))
 
     expect(html).not.toContain("审查出现依据")
@@ -1381,8 +1489,8 @@ describe("right rail process UI contract", () => {
       runtimeMetrics: runtimeMetricsFixture(3, 350, 100),
     } as const
 
-    const initialHtml = renderToStaticMarkup(React.createElement(RightRail, { graphSlice: undefined, task: baseTask }))
-    const updatedHtml = renderToStaticMarkup(React.createElement(RightRail, { graphSlice: undefined, task: updatedTask }))
+    const initialHtml = renderToStaticMarkup(React.createElement(ProcessPanel, { task: baseTask, onOpenCheckpoint: () => undefined }))
+    const updatedHtml = renderToStaticMarkup(React.createElement(ProcessPanel, { task: updatedTask, onOpenCheckpoint: () => undefined }))
 
     expect(initialHtml).toContain("interpret")
     expect(initialHtml).toContain("1 活动链累计")
@@ -1392,8 +1500,7 @@ describe("right rail process UI contract", () => {
   })
 
   it("summarizes repeated phase requests into compact phase metrics", () => {
-    const html = renderToStaticMarkup(React.createElement(RightRail, {
-      graphSlice: undefined,
+    const html = renderToStaticMarkup(React.createElement(ProcessPanel, {
       task: {
         status: "completed",
         lastPhase: "interpret",
@@ -1417,6 +1524,7 @@ describe("right rail process UI contract", () => {
           finishedAtMs: 4002,
         }],
       },
+      onOpenCheckpoint: () => undefined,
     }))
 
     expect(html).toContain("平均上下文请求 Token 数: 100")
@@ -1453,7 +1561,7 @@ describe("right rail process UI contract", () => {
       onRollbackRound: vi.fn(() => Promise.resolve()),
     }))
 
-    expect(html).toContain("流程推理工具已暂停")
+    expect(html).toContain("正文推演已暂停")
     expect(html).toContain("draft")
     expect(html).toContain("暂停原因")
     expect(html).toContain("本轮执行时间已到上限")
@@ -1468,8 +1576,7 @@ describe("right rail process UI contract", () => {
   })
 
   it("shows a handle button on the interrupted phase so recovery can reopen after dismiss", () => {
-    const html = renderToStaticMarkup(React.createElement(RightRail, {
-      graphSlice: undefined,
+    const html = renderToStaticMarkup(React.createElement(ProcessPanel, {
       task: {
         handle: { taskId: "task-deadline", status: "awaiting_user_decision" },
         status: "awaiting_user_decision",
@@ -1498,6 +1605,7 @@ describe("right rail process UI contract", () => {
           startedAtMs: 3,
         }],
       },
+      onOpenCheckpoint: () => undefined,
     }))
 
     expect(html).toContain("data-testid=\"phase-handle-graph_governance\"")
@@ -1732,6 +1840,9 @@ describe("project settings UI contract", () => {
     expect(html).toContain("推演发散程度")
     expect(html).toContain("基于世界观生成设定")
     expect(html).toContain("下一轮推演开始生效")
+    expect(html).toContain("钩子时限强制完整")
+    expect(html).toContain('data-testid="settings-require-hook-schedules-on"')
+    expect(html).toContain('data-testid="settings-require-hook-schedules-off"')
   })
 })
 

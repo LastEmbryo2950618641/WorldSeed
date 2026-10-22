@@ -8,6 +8,7 @@ import type {
   RuntimeMetricsSnapshot,
   TaskStatus,
   ChapterRevision,
+  DeductionTask,
   GraphRevisionTask,
 } from "@worldseed/contracts"
 import { PROTOCOL_VERSION } from "@worldseed/contracts"
@@ -70,6 +71,7 @@ import type { ProjectDatabase } from "../infrastructure/sqlite/database-types.js
 import { runtimeLog } from "../infrastructure/diagnostics/index.js"
 import { graphRevisionProgress } from "../application/chapters/graph-revision-progress.js"
 import { createGraphRevisionModel } from "../application/chapters/graph-revision-model.js"
+import { deductionTaskProgress } from "../application/turns/deduction-task-progress.js"
 import type { HistoryBranchSummary, HistoryCheckoutResult, HistoryEntrySummary, HistoryOverview, HistoryRetentionPreview } from "@worldseed/contracts"
 
 export class ProjectRuntime {
@@ -193,6 +195,22 @@ export class ProjectRuntime {
     })
     this.revisionJobs.set(input.revisionTaskId, { controller, ready, done })
     return ready
+  }
+
+  /** Wait for in-flight graph revision jobs (bounded); returns true when none remain. */
+  public async waitForActiveRevisionJobs(input: Readonly<{ timeoutMs: number; signal?: AbortSignal }>): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, input.timeoutMs)
+    while (this.revisionJobs.size > 0) {
+      input.signal?.throwIfAborted()
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) return false
+      const jobs = [...this.revisionJobs.values()].map((job) => job.done.catch(() => undefined))
+      await Promise.race([
+        Promise.all(jobs),
+        new Promise((resolve) => setTimeout(resolve, Math.min(remaining, 5_000))),
+      ])
+    }
+    return true
   }
 
   public async retryGraphRevision(revisionTaskId: string, model: AIModelPort): Promise<ChapterRevision> {
@@ -322,6 +340,68 @@ export class ProjectRuntime {
 
   public listRecoverableTasks(): Promise<readonly StoredTask[]> {
     return this.taskScopes.listRecoverableTasks(this.projectId)
+  }
+
+  public async listDeductionTasks(limit = 50): Promise<readonly DeductionTask[]> {
+    const tasks = await this.taskScopes.listTurnTasks(this.projectId, limit)
+    if (tasks.length === 0) return []
+    const taskIds = tasks.map((task) => task.taskId)
+    const runs = await this.database.selectFrom("phase_runs")
+      .select(["task_id", "phase", "status", "attempt"])
+      .where("project_id", "=", this.projectId)
+      .where("task_id", "in", taskIds)
+      .orderBy("started_at", "asc")
+      .execute()
+    const finalizations = await this.database.selectFrom("turn_finalizations")
+      .select(["task_id", "chapter_heading"])
+      .where("project_id", "=", this.projectId)
+      .where("task_id", "in", taskIds)
+      .execute()
+    const headingByTask = new Map(
+      finalizations
+        .filter((row) => row.chapter_heading.trim().length > 0)
+        .map((row) => [row.task_id, row.chapter_heading]),
+    )
+    return tasks.map((task): DeductionTask => {
+      const config = typeof task.configSnapshot === "object" && task.configSnapshot !== null
+        ? task.configSnapshot as { chapterSequence?: unknown }
+        : {}
+      const chapterSequence = typeof config.chapterSequence === "number" && Number.isFinite(config.chapterSequence)
+        ? config.chapterSequence
+        : undefined
+      const chapterHeading = headingByTask.get(task.taskId)
+      const heading = chapterHeading !== undefined
+        ? chapterHeading
+        : chapterSequence === undefined
+          ? "正文推演"
+          : `第 ${String(chapterSequence)} 章`
+      const complete = task.status === "completed"
+      const progress = deductionTaskProgress(
+        runs.filter((run) => run.task_id === task.taskId),
+        complete,
+      )
+      const error = readTaskErrorMessage(task.error)
+      const recoverable = task.status === "paused"
+        || task.status === "awaiting_user_decision"
+        || task.status === "waiting_for_review"
+        || task.status === "failed"
+      const active = task.status === "running"
+        || task.status === "waiting_for_model"
+        || task.status === "waiting_for_read"
+        || task.status === "committing"
+        || task.status === "needs_revision"
+      return {
+        taskId: task.taskId,
+        heading,
+        ...(chapterSequence === undefined ? {} : { chapterSequence }),
+        status: task.status,
+        canCancel: active || recoverable,
+        canRetry: recoverable || task.status === "cancelled",
+        ...(error === undefined ? {} : { error }),
+        updatedAtMs: task.updatedAtMs,
+        progress,
+      }
+    })
   }
 
   public async findLatestTask(chapterSequence?: number): Promise<StoredTask | undefined> {
@@ -736,44 +816,80 @@ export class ProjectRuntime {
     return new SynopsisConversationService({
       executeWorkflowTool: async (input) => {
         const chapters = this.createChapterResolveService()
-        if (input.chapterSequence > await chapters.nextChapterSequence(input.projectId)) {
-          throw new Error("前一章尚未发布为正文，不能处理下一章")
-        }
         if (await chapters.isGraphSyncBlocking(input.projectId)) {
-          throw new Error("图修订尚未完成，请完成或取消后再调用流程推理工具")
+          throw new Error("图修订尚未完成，请完成或取消后再调用正文推演工具")
+        }
+        const sequences = input.chapterSequences !== undefined && input.chapterSequences.length > 0
+          ? [...new Set(input.chapterSequences)].sort((left, right) => left - right)
+          : [input.chapterSequence]
+        // Single-chapter keep publish-order gate; multi-chapter batch drafts may precede serial publish.
+        if (sequences.length === 1) {
+          const only = sequences[0]!
+          if (only > await chapters.nextChapterSequence(input.projectId)) {
+            throw new Error("前一章尚未发布为正文，不能处理下一章")
+          }
         }
         await this.ensureWritableHistoryBranch(Date.now())
         const settings = await this.readSettings()
-        const result = await this.createTurnOrchestrator(input.model, randomUUID, Date.now).execute({
-          workflow: "turn",
-          outputMode: "draft",
-          projectId: input.projectId,
-          workspaceRootRef: input.workspaceRootRef,
-          internalStore: this.internalStore,
-          userInput: input.heading === undefined ? input.userInput : `${input.heading}\n\n${input.userInput}`,
-          chapterSequence: input.chapterSequence,
-          allowWorkspaceChapterReads: true,
-          deductionGoalBundle: await this.createDeductionGoalsService().buildTurnBundle({ projectId: input.projectId, chapterSequence: input.chapterSequence }),
-          projectSettings: settings,
-          maxModelCalls: input.maxModelCalls ?? settings.execution.maxModelCalls,
-          deadlineMs: input.deadlineMs ?? settings.execution.maxWallTimeMs,
-          maxRetrievalRounds: settings.execution.maxRetrievalRounds,
-          ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
-          ...(input.chapterIntent === undefined ? {} : { chapterIntent: input.chapterIntent }),
-        }, { ...(input.signal === undefined ? {} : { signal: input.signal }) })
-        if (result.kind !== "draft" || result.revisionTaskId === undefined || result.draftVersionId === undefined) {
-          throw new Error("流程推理工具未生成可持久化的草稿")
-        }
         const revisions = this.createChapterRevisionService()
-        const revision = await revisions.readRevision(result.revisionTaskId)
-        const version = await revisions.readDraftVersion(result.draftVersionId)
+        const drafts: Array<{
+          revisionTaskId: string
+          chapterId: string
+          draftVersionId: string
+          draftLabel: string
+          heading: string
+          body: string
+          chapterSequence: number
+        }> = []
+        for (const chapterSequence of sequences) {
+          input.signal?.throwIfAborted()
+          const result = await this.createTurnOrchestrator(input.model, randomUUID, Date.now).execute({
+            workflow: "turn",
+            outputMode: "draft",
+            projectId: input.projectId,
+            workspaceRootRef: input.workspaceRootRef,
+            internalStore: this.internalStore,
+            userInput: input.heading === undefined
+              ? input.userInput
+              : `${input.heading}\n\n${input.userInput}`,
+            chapterSequence,
+            allowWorkspaceChapterReads: true,
+            deductionGoalBundle: await this.createDeductionGoalsService().buildTurnBundle({
+              projectId: input.projectId,
+              chapterSequence,
+            }),
+            projectSettings: settings,
+            maxModelCalls: input.maxModelCalls ?? settings.execution.maxModelCalls,
+            deadlineMs: input.deadlineMs ?? settings.execution.maxWallTimeMs,
+            maxRetrievalRounds: settings.execution.maxRetrievalRounds,
+            ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
+            ...(input.chapterIntent === undefined ? {} : { chapterIntent: input.chapterIntent }),
+          }, { ...(input.signal === undefined ? {} : { signal: input.signal }) })
+          if (result.kind !== "draft" || result.revisionTaskId === undefined || result.draftVersionId === undefined) {
+            throw new Error(`正文推演工具未生成第 ${String(chapterSequence)} 章可持久化草稿`)
+          }
+          const revision = await revisions.readRevision(result.revisionTaskId)
+          const version = await revisions.readDraftVersion(result.draftVersionId)
+          drafts.push({
+            revisionTaskId: revision.revisionTaskId,
+            chapterId: revision.chapterId,
+            draftVersionId: version.versionId,
+            draftLabel: version.label,
+            heading: version.heading,
+            body: version.body,
+            chapterSequence,
+          })
+        }
+        const primary = drafts[0]!
         return {
-          revisionTaskId: revision.revisionTaskId,
-          chapterId: revision.chapterId,
-          draftVersionId: version.versionId,
-          draftLabel: version.label,
-          heading: version.heading,
-          body: version.body,
+          revisionTaskId: primary.revisionTaskId,
+          chapterId: primary.chapterId,
+          draftVersionId: primary.draftVersionId,
+          draftLabel: primary.draftLabel,
+          heading: primary.heading,
+          body: primary.body,
+          chapterSequence: primary.chapterSequence,
+          ...(drafts.length > 1 ? { drafts } : {}),
         }
       },
       publishDraft: async (input) => {
@@ -795,11 +911,92 @@ export class ProjectRuntime {
           forced: true,
           model: input.model,
         })
+        if (submitted.status === "completed") {
+          return {
+            revisionTaskId: submitted.revisionTaskId,
+            chapterId: submitted.chapterId,
+            draftVersionId: input.draftVersionId,
+            status: submitted.status,
+          }
+        }
+        // Keep the discuss turn alive until graph sync publishes the chapter, so the agent can move on.
+        const waitMs = Math.max(0, (input.deadlineMs ?? 300_000) - 30_000)
+        const settled = await this.waitForActiveRevisionJobs({
+          timeoutMs: waitMs,
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        })
+        const latest = await new SqliteChapterRevisionRepository(this.database).find(submitted.revisionTaskId)
+        const status = latest?.status ?? submitted.status
         return {
           revisionTaskId: submitted.revisionTaskId,
           chapterId: submitted.chapterId,
           draftVersionId: input.draftVersionId,
-          status: submitted.status,
+          status,
+          summary: status === "completed"
+            ? "图修订完成，已发布为正式正文；可继续下一章。"
+            : settled
+              ? `图修订结束但未发布（${status}），请检查图修订任务。`
+              : "图同步仍在进行，本轮先等待；下一轮继续时会自动等它完成。",
+        }
+      },
+      waitForPendingPublications: async (input) => this.waitForActiveRevisionJobs(input),
+      restageChapter: async (input) => {
+        input.signal?.throwIfAborted()
+        if (input.chapterSequence > await this.createChapterResolveService().nextChapterSequence(input.projectId)) {
+          throw new Error("不能回退尚未创建的章节")
+        }
+        return this.createChapterSynopsisService().restageChapter({
+          projectId: input.projectId,
+          workspaceRootRef: input.workspaceRootRef,
+          chapterSequence: input.chapterSequence,
+          targetStage: input.targetStage,
+          reason: input.reason,
+        })
+      },
+      runBash: async (input) => {
+        input.signal?.throwIfAborted()
+        const { executeSynopsisHostBash } = await import("../application/chapters/synopsis-host-bash.js")
+        return executeSynopsisHostBash({
+          workspaceRootRef: input.workspaceRootRef,
+          command: input.command,
+          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+          ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        })
+      },
+      writeTodos: async (input) => {
+        input.signal?.throwIfAborted()
+        const { synopsisConversationStreamHub } = await import("../application/chapters/synopsis-conversation-stream-hub.js")
+        synopsisConversationStreamHub.setTodos(
+          input.projectId,
+          input.todos,
+          Date.now(),
+          { merge: input.merge === true },
+        )
+        return {
+          todos: synopsisConversationStreamHub.peek(input.projectId, input.sessionId).todos,
+          merge: input.merge === true,
+        }
+      },
+      writeMemory: async (input) => {
+        input.signal?.throwIfAborted()
+        const {
+          AGENT_MEMORY_INDEX_PATH,
+          resolveAgentMemoryTopicPath,
+          truncateAgentMemoryIndex,
+        } = await import("../application/chapters/agent-memory.js")
+        const relativePath = input.target === "index"
+          ? AGENT_MEMORY_INDEX_PATH
+          : resolveAgentMemoryTopicPath(input.filename ?? "")
+        const prepared = input.target === "index"
+          ? truncateAgentMemoryIndex(input.markdown)
+          : { text: input.markdown.replaceAll("\r\n", "\n"), truncated: false }
+        await this.workspace.saveUserMarkdown(input.workspaceRootRef, relativePath, prepared.text)
+        return {
+          relativePath,
+          target: input.target,
+          truncated: prepared.truncated,
+          byteLength: new TextEncoder().encode(prepared.text).byteLength,
         }
       },
       chapters: this.createChapterResolveService(),
@@ -876,6 +1073,10 @@ export class ProjectRuntime {
       goals: new SqliteDeductionGoalsRepository(this.database),
       createId: randomUUID,
       now: Date.now,
+      readRequireCompleteHookSchedules: async () => {
+        const settings = await this.readSettings()
+        return settings.creationDesk.requireCompleteHookSchedules !== false
+      },
     })
   }
 
@@ -1011,4 +1212,12 @@ export class ProjectRuntime {
       })
     }
   }
+}
+
+function readTaskErrorMessage(error: unknown): string | undefined {
+  if (typeof error === "object" && error !== null && "message" in error && typeof error.message === "string") {
+    return error.message
+  }
+  if (typeof error === "string" && error.trim().length > 0) return error
+  return undefined
 }

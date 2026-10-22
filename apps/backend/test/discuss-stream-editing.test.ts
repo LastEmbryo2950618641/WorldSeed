@@ -47,4 +47,37 @@ describe("synopsis conversation stream hub editing", () => {
     }, 3)
     expect(synopsisConversationStreamHub.peek(projectId).editing).toEqual([])
   })
+
+  it("upserts Claude-style tool runs by runId", () => {
+    const projectId = "project-tool-run"
+    synopsisConversationStreamHub.clear(projectId)
+    synopsisConversationStreamHub.resetCumulativeUsage(projectId)
+    synopsisConversationStreamHub.begin(projectId, "session-1", 1)
+    synopsisConversationStreamHub.upsertToolRun(projectId, {
+      runId: "run-1",
+      name: "bash",
+      action: "invoke",
+      arguments: JSON.stringify({ command: "echo hi" }),
+      status: "running",
+      round: 1,
+    }, 2)
+    synopsisConversationStreamHub.upsertToolRun(projectId, {
+      runId: "run-1",
+      name: "bash",
+      action: "invoke",
+      arguments: JSON.stringify({ command: "echo hi" }),
+      status: "completed",
+      resultSummary: "exit=0\nhi",
+      round: 1,
+    }, 3)
+    expect(synopsisConversationStreamHub.peek(projectId).toolRuns).toEqual([{
+      runId: "run-1",
+      name: "bash",
+      action: "invoke",
+      arguments: JSON.stringify({ command: "echo hi" }),
+      status: "completed",
+      resultSummary: "exit=0\nhi",
+      round: 1,
+    }])
+  })
 })

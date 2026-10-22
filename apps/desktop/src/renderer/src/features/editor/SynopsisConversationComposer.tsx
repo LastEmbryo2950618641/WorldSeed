@@ -1,12 +1,14 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react"
-import { Bot, ChevronDown, ChevronRight, Ellipsis, FileText, Globe, Loader2, Play, RefreshCw, Send, Settings2, Sparkles, Square, UserRound } from "lucide-react"
+import { Bot, ChevronDown, ChevronRight, Ellipsis, FileText, Globe, ListTodo, Loader2, Play, RefreshCw, Send, Settings2, Sparkles, Square, Terminal, UserRound } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type {
+  DiscussAgentMode,
   DiscussFocusKind,
   SynopsisConversationMessage,
   SynopsisConversationSession,
   SynopsisConversationStreamSnapshot,
+  SynopsisConversationTodo,
   SynopsisStagingPromoteProposal,
   ChapterNarrativeIntent,
 } from "@worldseed/contracts"
@@ -36,6 +38,23 @@ import {
   toAgentTimeline,
   type AgentTimelineSegment,
 } from "./agent-timeline.js"
+import {
+  formatSynopsisToolRunCall,
+  formatSynopsisToolRunStatus,
+} from "./tool-run-label.js"
+import {
+  DISCUSS_AGENT_MODE_OPTIONS,
+  loadDiscussAgentMode,
+  persistDiscussAgentMode,
+} from "./discuss-agent-mode.js"
+import { CreationDeskTodoPopover } from "./CreationDeskTodoPopover.js"
+import {
+  expandCreationDeskFooterCollapse,
+  loadCreationDeskFooterCollapse,
+  persistCreationDeskFooterCollapse,
+  resolveCreationDeskFooterCollapseDrag,
+  type CreationDeskFooterCollapse,
+} from "./creation-desk-footer-collapse.js"
 import { CreationDeskFocusBar } from "./CreationDeskFocusBar.js"
 import { type DiscussFocusChapterOption } from "./synopsis-path.js"
 import { useDeductionGoals } from "./use-deduction-goals.js"
@@ -88,7 +107,7 @@ type Props = Readonly<{
   draftRestore?: { text: string; token: number } | undefined
   running: boolean
   pendingStagingPromotes?: readonly SynopsisStagingPromoteProposal[]
-  onSend(message: string): Promise<void>
+  onSend(message: string, options?: Readonly<{ agentMode?: DiscussAgentMode }>): Promise<void>
   onStop?(): Promise<void>
   onRefreshChoices(messageId: string): Promise<void>
   onPromoteStaging(): Promise<void>
@@ -101,6 +120,11 @@ type Props = Readonly<{
   layout?: "desk" | "rail"
   onPromoteDraftToBody?(): Promise<void>
   onOpenSettingsLineage?(): void
+  requireCompleteHookSchedules?: boolean
+  /** When false, hide「调用正文推演工具」and ignore start_turn choices. */
+  chapterWorkflowEnabled?: boolean
+  /** Desk-only: volume batch / chapter-once controls + progress list. */
+  batchPanel?: React.ReactNode
   tokenMetrics?: Readonly<{
     kvRate?: number
     totalTokens?: number
@@ -111,9 +135,14 @@ type Props = Readonly<{
 
 export function SynopsisConversationComposer(props: Props): React.JSX.Element {
   const [advancedMenuOpen, setAdvancedMenuOpen] = useState(false)
+  const [todoOpen, setTodoOpen] = useState(false)
+  const [agentMode, setAgentMode] = useState<DiscussAgentMode>(() => loadDiscussAgentMode())
   const [goalsOpen, setGoalsOpen] = useState(false)
   const [focusUnfilled, setFocusUnfilled] = useState(false)
   const [choicesRefreshing, setChoicesRefreshing] = useState(false)
+  const [footerCollapse, setFooterCollapse] = useState<CreationDeskFooterCollapse>(() => loadCreationDeskFooterCollapse())
+  const footerDragRef = useRef<Readonly<{ startY: number, startLevel: CreationDeskFooterCollapse }> | null>(null)
+  const todoMenuRef = useRef<HTMLDivElement>(null)
   const goals = useDeductionGoals({
     projectId: props.projectId,
     workspaceRootRef: props.workspaceRootRef,
@@ -123,6 +152,8 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
   const advancedMenuRef = useRef<HTMLDivElement>(null)
   const stickToLatestRef = useRef(true)
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
+  const isRail = props.layout === "rail"
+  const showFooterToolbar = !isRail && footerCollapse === "full"
   const visibleMessages = props.messages.filter((message) => message.hidden !== true)
   const streamPreview = extractAssistantPreview(props.stream?.content)
   // Stream can be "completed" while send() still persists; don't keep showing Stop.
@@ -146,9 +177,11 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
   const sendMessage = useCallback(async (message: string): Promise<void> => {
     stickToLatestRef.current = true
     setShowJumpToLatest(false)
-    await props.onSend(message)
+    await props.onSend(message, { agentMode })
     await goals.refresh()
-  }, [goals.refresh, props.onSend])
+  }, [agentMode, goals.refresh, props.onSend])
+
+  const visibleTodos = resolveDiscussTodos(props.stream, props.messages)
 
   const refreshChoices = useCallback(async (messageId: string): Promise<void> => {
     if (props.busy || choicesRefreshing) return
@@ -165,7 +198,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
     const thread = threadRef.current
     if (thread === null) return
     thread.scrollTop = thread.scrollHeight
-  }, [props.messages.length, props.busy, props.stream?.thinking, props.stream?.thinkingRounds, props.stream?.content, props.stream?.searching, props.stream?.editing])
+  }, [props.messages.length, props.busy, props.stream?.thinking, props.stream?.thinkingRounds, props.stream?.content, props.stream?.searching, props.stream?.editing, props.stream?.toolRuns])
 
   useEffect(() => {
     if (!advancedMenuOpen) return
@@ -184,6 +217,28 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
       window.removeEventListener("keydown", onKeyDown)
     }
   }, [advancedMenuOpen])
+
+  useEffect(() => {
+    if (!todoOpen) return
+    const onPointerDown = (event: MouseEvent): void => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (todoMenuRef.current?.contains(target)) return
+      if (target instanceof Element && target.closest("[data-testid='creation-desk-todo-popover']") !== null) {
+        return
+      }
+      setTodoOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setTodoOpen(false)
+    }
+    window.addEventListener("mousedown", onPointerDown)
+    window.addEventListener("keydown", onKeyDown)
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown)
+      window.removeEventListener("keydown", onKeyDown)
+    }
+  }, [todoOpen])
 
   useEffect(() => {
     const thread = threadRef.current
@@ -225,12 +280,39 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
     }
   }, [])
 
-  const isRail = props.layout === "rail"
   const badgeCount = toolbarBadgeCount(goals.snapshot, chapterSequence)
   const latestChoiceMessageId = [...visibleMessages]
     .reverse()
     .find((message) => message.role === "assistant" && (message.choices?.length ?? 0) > 0)
     ?.messageId
+
+  useEffect(() => {
+    if (isRail) return
+    persistCreationDeskFooterCollapse(footerCollapse)
+  }, [footerCollapse, isRail])
+
+  const beginFooterCollapseDrag = (event: React.PointerEvent<HTMLButtonElement>): void => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    const startLevel = footerCollapse
+    footerDragRef.current = { startY: event.clientY, startLevel }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const moveFooterCollapseDrag = (event: React.PointerEvent<HTMLButtonElement>): void => {
+    const drag = footerDragRef.current
+    if (drag === null) return
+    const next = resolveCreationDeskFooterCollapseDrag(drag.startLevel, event.clientY - drag.startY)
+    if (next !== footerCollapse) setFooterCollapse(next)
+  }
+
+  const endFooterCollapseDrag = (event: React.PointerEvent<HTMLButtonElement>): void => {
+    if (footerDragRef.current === null) return
+    footerDragRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }
 
   return <div
     className={`creation-desk-workspace${isRail ? " creation-desk-workspace--rail" : ""}`}
@@ -257,6 +339,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
             snapshot={goals.snapshot}
             chapterSequence={chapterSequence}
             focusUnfilled={focusUnfilled}
+            requireCompleteHookSchedules={props.requireCompleteHookSchedules !== false}
             onClose={() => {
               setGoalsOpen(false)
               setFocusUnfilled(false)
@@ -271,6 +354,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
             onReject={goals.rejectProposals}
           />}
         />}
+        {!isRail && props.batchPanel !== undefined ? props.batchPanel : null}
         <div className="creation-desk-thread overlay-scrollbar" ref={threadRef} aria-live="polite">
         <div className="creation-desk-thread-inner">
           {visibleMessages.length === 0 && !props.busy
@@ -293,6 +377,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
                   choicesRefreshing={choicesRefreshing}
                   isLatestChoiceMessage={message.messageId === latestChoiceMessageId}
                   focusLocked={props.focusLocked === true}
+                  chapterWorkflowEnabled={props.chapterWorkflowEnabled === true}
                   onSend={sendMessage}
                   onPromoteStaging={props.onPromoteStaging}
                   onStartTurn={props.onStartTurn}
@@ -343,92 +428,114 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
       </div>
       </div>
 
-      <footer className="creation-desk-footer">
+      <footer
+        className={`creation-desk-footer${isRail ? "" : ` collapse-${footerCollapse}`}`}
+        data-footer-collapse={isRail ? undefined : footerCollapse}
+      >
         {isRail
           ? null
-          : props.session !== undefined && props.onSetFocus !== undefined
-          ? <CreationDeskFocusBar
-              session={props.session}
-              chapters={props.focusChapters ?? []}
-              onSelectChapter={props.onSetFocus}
-              onOpenFile={(path) => { props.onOpenSynopsisFile?.(path); }}
-            />
-          : props.session !== undefined
-          ? <div className="creation-desk-session-bar">
-              <FileText size={13} aria-hidden="true" />
-              <span>{props.session.synopsisPath}</span>
-            </div>
+          : <button
+              type="button"
+              className="creation-desk-footer-handle"
+              data-testid="creation-desk-footer-handle"
+              aria-label="拖拽调整输入区：下拉隐藏工具栏，最小仅保留发送"
+              title="拖拽调整高度 · 双击展开一档"
+              onPointerDown={beginFooterCollapseDrag}
+              onPointerMove={moveFooterCollapseDrag}
+              onPointerUp={endFooterCollapseDrag}
+              onPointerCancel={endFooterCollapseDrag}
+              onDoubleClick={() => {
+                setFooterCollapse((current) => expandCreationDeskFooterCollapse(current))
+              }}
+            >
+              <span className="creation-desk-footer-handle-grip" aria-hidden="true" />
+            </button>}
+        {showFooterToolbar
+          ? <>
+              {props.session !== undefined && props.onSetFocus !== undefined
+                ? <CreationDeskFocusBar
+                    session={props.session}
+                    chapters={props.focusChapters ?? []}
+                    onSelectChapter={props.onSetFocus}
+                    onOpenFile={(path) => { props.onOpenSynopsisFile?.(path); }}
+                  />
+                : props.session !== undefined
+                  ? <div className="creation-desk-session-bar">
+                      <FileText size={13} aria-hidden="true" />
+                      <span>{props.session.synopsisPath}</span>
+                    </div>
+                  : null}
+              <div className="creation-desk-settings">
+                <Settings2 size={13} aria-hidden="true" />
+                <label>
+                  <span>描写</span>
+                  <select value={props.descriptionRule} onChange={(event) => { props.onDescriptionRuleChange(event.target.value); }}>
+                    <option value="">自动</option>
+                    {props.descriptionRules.map((rule) => <option key={rule} value={rule}>{rule.split("/").at(-1)}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span>笔风</span>
+                  <select value={props.proseRule} onChange={(event) => { props.onProseRuleChange(event.target.value); }}>
+                    <option value="">默认</option>
+                    {props.proseRules.map((rule) => <option key={rule} value={rule}>{rule.split("/").at(-1)}</option>)}
+                  </select>
+                </label>
+                <label className={`creation-desk-word-count${props.wordCountValid ? "" : " invalid"}`}>
+                  <UiTooltip label="正文主体字数范围，标题不计入">
+                    <span>字数</span>
+                  </UiTooltip>
+                  <input aria-label="正文最少字数" type="number" min="1" step="100" value={props.minimumWordCount} onChange={(event) => { props.onMinimumWordCountChange(event.target.value); }} />
+                  <span>—</span>
+                  <input aria-label="正文最多字数" type="number" min="1" step="100" value={props.maximumWordCount} onChange={(event) => { props.onMaximumWordCountChange(event.target.value); }} />
+                </label>
+                <label>
+                  <UiTooltip label="管情节节奏，不管设定发散。压而不决：加压与过程选择，禁止不可逆定局。">
+                    <span>边界节奏</span>
+                  </UiTooltip>
+                  <select
+                    aria-label="边界节奏"
+                    value={props.boundaryPace}
+                    onChange={(event) => {
+                      props.onBoundaryPaceChange(event.target.value as ChapterNarrativeIntent["boundaryPace"])
+                    }}
+                  >
+                    <option value="advance_allowed">可推进（仍贴梗概）</option>
+                    <option value="hold_without_resolution">压而不决</option>
+                  </select>
+                </label>
+                <label>
+                  <UiTooltip label="本章因果描写重心；细调可在对话里说明。">
+                    <span>因果焦点</span>
+                  </UiTooltip>
+                  <select
+                    aria-label="因果焦点"
+                    value={props.causalityFocus}
+                    onChange={(event) => {
+                      props.onCausalityFocusChange(event.target.value as ChapterNarrativeIntent["causalityFocus"])
+                    }}
+                  >
+                    <option value="auto">自动</option>
+                    <option value="buildup">蓄势</option>
+                    <option value="action">行动</option>
+                    <option value="payoff">落点</option>
+                  </select>
+                </label>
+              </div>
+            </>
           : null}
         {goals.error !== undefined
           ? <div className="creation-desk-goals-error" role="alert">{goals.error}</div>
           : null}
-        {isRail
-          ? null
-          : <div className="creation-desk-settings">
-          <Settings2 size={13} aria-hidden="true" />
-          <label>
-            <span>描写</span>
-            <select value={props.descriptionRule} onChange={(event) => { props.onDescriptionRuleChange(event.target.value); }}>
-              <option value="">自动</option>
-              {props.descriptionRules.map((rule) => <option key={rule} value={rule}>{rule.split("/").at(-1)}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>笔风</span>
-            <select value={props.proseRule} onChange={(event) => { props.onProseRuleChange(event.target.value); }}>
-              <option value="">默认</option>
-              {props.proseRules.map((rule) => <option key={rule} value={rule}>{rule.split("/").at(-1)}</option>)}
-            </select>
-          </label>
-          <label className={`creation-desk-word-count${props.wordCountValid ? "" : " invalid"}`}>
-            <UiTooltip label="正文主体字数范围，标题不计入">
-              <span>字数</span>
-            </UiTooltip>
-            <input aria-label="正文最少字数" type="number" min="1" step="100" value={props.minimumWordCount} onChange={(event) => { props.onMinimumWordCountChange(event.target.value); }} />
-            <span>—</span>
-            <input aria-label="正文最多字数" type="number" min="1" step="100" value={props.maximumWordCount} onChange={(event) => { props.onMaximumWordCountChange(event.target.value); }} />
-          </label>
-          <label>
-            <UiTooltip label="管情节节奏，不管设定发散。压而不决：加压与过程选择，禁止不可逆定局。">
-              <span>边界节奏</span>
-            </UiTooltip>
-            <select
-              aria-label="边界节奏"
-              value={props.boundaryPace}
-              onChange={(event) => {
-                props.onBoundaryPaceChange(event.target.value as ChapterNarrativeIntent["boundaryPace"])
-              }}
-            >
-              <option value="advance_allowed">可推进（仍贴梗概）</option>
-              <option value="hold_without_resolution">压而不决</option>
-            </select>
-          </label>
-          <label>
-            <UiTooltip label="本章因果描写重心；细调可在对话里说明。">
-              <span>因果焦点</span>
-            </UiTooltip>
-            <select
-              aria-label="因果焦点"
-              value={props.causalityFocus}
-              onChange={(event) => {
-                props.onCausalityFocusChange(event.target.value as ChapterNarrativeIntent["causalityFocus"])
-              }}
-            >
-              <option value="auto">自动</option>
-              <option value="buildup">蓄势</option>
-              <option value="action">行动</option>
-              <option value="payoff">落点</option>
-            </select>
-          </label>
-        </div>}
-        {discussStatusLabel === undefined
+        {discussStatusLabel === undefined || footerCollapse === "minimal"
           ? null
           : <p className="creation-desk-discuss-status" data-testid="creation-desk-discuss-status" aria-live="polite">
               {discussStatusLabel}
-              <span className="creation-desk-discuss-status-hint">右侧「运行监控」显示流程推理工具状态</span>
+              <span className="creation-desk-discuss-status-hint">右侧「运行监控」显示正文推演/图治理状态</span>
             </p>}
         <CreationDeskComposerInput
           compact={isRail}
+          footerCollapse={isRail ? "full" : footerCollapse}
           busy={props.busy}
           running={props.running}
           showStop={showStop}
@@ -439,10 +546,21 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
           activeModelProfileId={props.activeModelProfileId}
           onActiveModelIdChange={props.onActiveModelIdChange}
           onReasoningEffortChange={props.onReasoningEffortChange}
+          agentMode={agentMode}
+          onAgentModeChange={(mode) => {
+            setAgentMode(mode)
+            persistDiscussAgentMode(mode)
+          }}
+          todos={visibleTodos}
+          todoOpen={todoOpen}
+          todoMenuRef={todoMenuRef}
+          onToggleTodoMenu={() => { setTodoOpen((open) => !open); }}
+          onCloseTodoMenu={() => { setTodoOpen(false); }}
           onToggleAdvancedMenu={() => { setAdvancedMenuOpen((open) => !open); }}
           onCloseAdvancedMenu={() => { setAdvancedMenuOpen(false); }}
           onSend={sendMessage}
           onStartTurn={props.onStartTurn}
+          chapterWorkflowEnabled={props.chapterWorkflowEnabled === true}
           {...(props.tokenMetrics === undefined ? {} : { tokenMetrics: props.tokenMetrics })}
           {...(props.draftRestore === undefined ? {} : { draftRestore: props.draftRestore })}
           {...(props.onStop === undefined ? {} : { onStop: props.onStop })}
@@ -454,6 +572,7 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
 
 type ComposerInputProps = Readonly<{
   compact?: boolean
+  footerCollapse?: CreationDeskFooterCollapse
   busy: boolean
   running: boolean
   showStop: boolean
@@ -466,11 +585,19 @@ type ComposerInputProps = Readonly<{
   activeModelProfileId: string
   onActiveModelIdChange(modelId: string): void
   onReasoningEffortChange(effort: ReasoningEffort): void
+  agentMode: DiscussAgentMode
+  onAgentModeChange(mode: DiscussAgentMode): void
+  todos: readonly SynopsisConversationTodo[]
+  todoOpen: boolean
+  todoMenuRef: React.RefObject<HTMLDivElement | null>
+  onToggleTodoMenu(): void
+  onCloseTodoMenu(): void
   onToggleAdvancedMenu(): void
   onCloseAdvancedMenu(): void
   onSend(message: string): Promise<void>
   onStop?(): Promise<void>
   onStartTurn(): void
+  chapterWorkflowEnabled?: boolean
 }>
 
 /** Owns draft text so keystrokes do not re-render the markdown message thread. */
@@ -566,8 +693,12 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
     return catalogModels
   })()
 
-  return <div className={`creation-desk-composer${props.compact === true ? " is-compact" : ""}`}>
-    {props.compact === true
+  const footerCollapse = props.footerCollapse ?? "full"
+  const isMinimal = footerCollapse === "minimal"
+  const hideChrome = props.compact === true || isMinimal
+
+  return <div className={`creation-desk-composer${props.compact === true ? " is-compact" : ""}${isMinimal ? " is-minimal" : ""}`}>
+    {hideChrome
       ? null
       : <div className="creation-desk-token-metrics" data-testid="creation-desk-token-metrics">
           <span>KV <strong>{formatDeskKv(props.tokenMetrics?.kvRate)}</strong></span>
@@ -578,7 +709,7 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
       value={draft}
       disabled={props.busy || props.running}
       placeholder="告诉 Agent 下一章想怎么推进…"
-      rows={props.compact === true ? 2 : 3}
+      rows={isMinimal ? 1 : props.compact === true ? 2 : 3}
       onChange={(event) => { setDraft(event.target.value); }}
       onKeyDown={(event) => {
         if (event.key === "Enter" && !event.shiftKey) {
@@ -588,7 +719,7 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
       }}
     />
     <div className="creation-desk-composer-actions">
-      {props.compact === true
+      {hideChrome
         ? null
         : <div className="creation-desk-model-quick" data-testid="creation-desk-model-quick">
         <label>
@@ -635,7 +766,54 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
             <option value="max">最大</option>
           </select>
         </label>
+        <label>
+          <UiTooltip label="Claude Code 风格讨论模式：Auto 自主执行；Plan 只规划不落盘；Accept edits 自动接受写入">
+            <span>模式</span>
+          </UiTooltip>
+          <select
+            aria-label="讨论模式"
+            data-testid="creation-desk-agent-mode"
+            value={props.agentMode}
+            onChange={(event) => {
+              props.onAgentModeChange(event.target.value as DiscussAgentMode)
+            }}
+          >
+            {DISCUSS_AGENT_MODE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value} title={option.hint}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>}
+      {hideChrome
+        ? null
+        : <div className="creation-desk-todo-menu" ref={props.todoMenuRef}>
+            <UiTooltip label="Todo 列表（Claude Code 可视化）">
+              <button
+                type="button"
+                className={`creation-desk-todo-trigger${props.todoOpen ? " open" : ""}`}
+                data-testid="creation-desk-todo-trigger"
+                aria-label="Todo 列表"
+                aria-expanded={props.todoOpen}
+                aria-haspopup="dialog"
+                onClick={() => { props.onToggleTodoMenu(); }}
+              >
+                <ListTodo size={15} aria-hidden="true" />
+                Todo
+                {props.todos.length > 0
+                  ? <span className="creation-desk-todo-count">{props.todos.length}</span>
+                  : null}
+              </button>
+            </UiTooltip>
+            {props.todoOpen
+              ? <CreationDeskTodoPopover
+                  todos={props.todos}
+                  anchorRef={props.todoMenuRef}
+                  onClose={props.onCloseTodoMenu}
+                />
+              : null}
+          </div>}
       {props.showStop
         ? <button
             type="button"
@@ -666,7 +844,7 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
           >
             <Send size={15} aria-hidden="true" />发送
           </button>}
-      {props.compact === true
+      {hideChrome
         ? null
         : <div className="creation-desk-advanced-menu" ref={props.advancedMenuRef}>
         <UiTooltip label="更多操作">
@@ -686,20 +864,24 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
         {props.advancedMenuOpen
           ? <div className="creation-desk-advanced-panel" role="menu" data-testid="creation-desk-advanced-menu">
               <p className="creation-desk-advanced-hint">建议先与 Agent 讨论并确认梗概</p>
-              <button
-                type="button"
-                role="menuitem"
-                className="creation-desk-start-turn"
-                data-testid="creation-desk-start-turn"
-                disabled={props.running || props.busy}
-                onClick={() => {
-                  props.onCloseAdvancedMenu()
-                  props.onStartTurn()
-                }}
-              >
-                <span><Play size={15} aria-hidden="true" />{props.running ? "流程推理工具运行中" : "调用流程推理工具"}</span>
-                <small>根据当前梗概生成新草稿</small>
-              </button>
+              {props.chapterWorkflowEnabled !== true
+                ? <p className="creation-desk-advanced-hint" data-testid="creation-desk-start-turn-disabled">
+                    正文推演工具已在项目设置中关闭；讨论 Agent 可用 chapterDraftProposal 写草稿
+                  </p>
+                : <button
+                    type="button"
+                    role="menuitem"
+                    className="creation-desk-start-turn"
+                    data-testid="creation-desk-start-turn"
+                    disabled={props.running || props.busy}
+                    onClick={() => {
+                      props.onCloseAdvancedMenu()
+                      props.onStartTurn()
+                    }}
+                  >
+                    <span><Play size={15} aria-hidden="true" />{props.running ? "正文推演工具运行中" : "调用正文推演工具"}</span>
+                    <small>根据当前梗概生成新草稿</small>
+                  </button>}
             </div>
           : null}
       </div>}
@@ -715,6 +897,7 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
   isLatestChoiceMessage: boolean
   focusLocked: boolean
   pendingStagingPromotes?: readonly SynopsisStagingPromoteProposal[]
+  chapterWorkflowEnabled?: boolean
   onSend(message: string): Promise<void>
   onPromoteStaging(): Promise<void>
   onRejectStagingPromote?(proposalIds: readonly string[]): Promise<void>
@@ -726,7 +909,8 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
 }>): React.JSX.Element {
   const { message } = props
   const choices = (message.choices ?? []).filter((choice) => (
-    !props.focusLocked || choice.action !== "set_focus"
+    (!props.focusLocked || choice.action !== "set_focus")
+    && (props.chapterWorkflowEnabled === true || choice.action !== "start_turn")
   ))
   return <article className={`creation-desk-message ${message.role}`}>
     <div className="creation-desk-message-avatar" aria-hidden="true">
@@ -749,6 +933,9 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
               : { onOpenSettingsLineage: props.onOpenSettingsLineage })}
           />
         : <p>{message.content}</p>}
+      {message.role === "assistant" && message.error !== undefined
+        ? <p className="creation-desk-message-error" role="status">{message.error}</p>
+        : null}
       {message.role === "assistant" && choices.length > 0
         ? <div className="synopsis-conversation-choices">
             {choices.map((choice) => <button
@@ -789,7 +976,7 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
                 void props.onSend(choice.label)
               }}
             >
-              {choice.action === "start_turn" ? "调用流程推理工具" : choice.label}
+              {choice.action === "start_turn" ? "调用正文推演工具" : choice.label}
             </button>)}
             {props.isLatestChoiceMessage
               ? <button
@@ -812,6 +999,8 @@ const CreationDeskMessage = memo(function CreationDeskMessage(props: Readonly<{
   </article>
 })
 
+const PROCESS_SEGMENT_KINDS = new Set(["thinking", "searching", "running", "editing"])
+
 const AgentStructuredBody = memo(function AgentStructuredBody({
   segments,
   streaming = false,
@@ -824,94 +1013,55 @@ const AgentStructuredBody = memo(function AgentStructuredBody({
   onOpenSettingsLineage?(): void
 }>): React.JSX.Element {
   const hasAny = segments.length > 0
+  const processSegments = segments.filter((segment) => PROCESS_SEGMENT_KINDS.has(segment.kind))
+  const outputSegments = segments.filter((segment) => !PROCESS_SEGMENT_KINDS.has(segment.kind))
   const lastThinkingIndex = (() => {
     let index = -1
-    for (let i = 0; i < segments.length; i += 1) {
-      if (segments[i]?.kind === "thinking") index = i
+    for (let i = 0; i < processSegments.length; i += 1) {
+      if (processSegments[i]?.kind === "thinking") index = i
     }
     return index
   })()
+  const processSummary = summarizeAgentProcess(processSegments)
+  const processActive = processSummary.active
+  const [activityOpen, setActivityOpen] = useState(streaming)
+  useEffect(() => {
+    if (streaming) setActivityOpen(true)
+  }, [streaming])
   return <div className="agent-structured-body">
-    {segments.map((segment, index) => {
-      if (segment.kind === "thinking") {
-        return <details
-          key={`thinking-${String(segment.round)}-${String(index)}`}
-          className="agent-stream-block thinking"
+    {processSegments.length > 0
+      ? <details
+          className={`agent-stream-activity${processActive && streaming ? " is-live" : ""}`}
+          data-testid="agent-stream-activity"
+          open={activityOpen}
+          onToggle={(event) => {
+            setActivityOpen(event.currentTarget.open)
+          }}
         >
           <summary>
             <ChevronRight size={14} aria-hidden="true" />
-            thinking
-            {streaming && index === lastThinkingIndex ? <em>流式</em> : null}
+            <span className="agent-stream-activity-title">思考与工具</span>
+            {processSummary.meta.length > 0
+              ? <span className="agent-stream-activity-meta">{processSummary.meta}</span>
+              : null}
+            {streaming
+              ? <em>{processActive ? "进行中" : "完成"}</em>
+              : processSummary.stepCount > 0
+                ? <span className="agent-stream-count">{processSummary.stepCount}</span>
+                : null}
           </summary>
-          <div className="agent-stream-thinking-markdown">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{segment.text}</ReactMarkdown>
+          <div className="agent-stream-activity-body">
+            {processSegments.map((segment, index) => renderAgentProcessSegment({
+              segment,
+              index,
+              streaming,
+              lastThinkingIndex,
+              ...(onOpenSettingsLineage === undefined ? {} : { onOpenSettingsLineage }),
+            }))}
           </div>
         </details>
-      }
-      if (segment.kind === "searching") {
-        const active = segment.items.some((item) => item.status === "running")
-        const noun = streaming && active ? "searching" : "searched"
-        return <details
-          key={`searching-${String(segment.round)}-${String(index)}`}
-          className="agent-stream-block searching"
-        >
-          <summary>
-            <ChevronRight size={14} aria-hidden="true" />
-            <Globe size={13} aria-hidden="true" />
-            {noun}
-            <span className="agent-stream-count">{segment.items.length}</span>
-            {streaming ? <em>{active ? "查询中" : "完成"}</em> : null}
-          </summary>
-          <ul>
-            {segment.items.map((item) => <li key={`${String(item.round ?? "x")}:${item.query}`}>
-              <strong>{item.query}</strong>
-              {item.asOfChapterSequence !== undefined && item.temporalRole === "as_of"
-                ? onOpenSettingsLineage === undefined
-                  ? <span className="settings-as-of-chip">按第 {item.asOfChapterSequence} 章视角（非当前设定全文）</span>
-                  : <button
-                      type="button"
-                      className="settings-as-of-chip settings-as-of-chip-button"
-                      onClick={onOpenSettingsLineage}
-                    >
-                      按第 {item.asOfChapterSequence} 章视角（非当前设定全文）
-                    </button>
-                : null}
-              <small>{item.status === "running" ? "查询中" : item.status === "failed" ? "失败" : "完成"}</small>
-              {item.resultSummary === undefined ? null : <pre>{item.resultSummary}</pre>}
-            </li>)}
-          </ul>
-        </details>
-      }
-      if (segment.kind === "editing") {
-        const active = segment.items.some((item) => item.status === "running")
-        const noun = streaming && active ? "editing" : "edited"
-        return <details
-          key={`editing-${String(index)}`}
-          className="agent-stream-block editing"
-        >
-          <summary>
-            <ChevronRight size={14} aria-hidden="true" />
-            <FileText size={13} aria-hidden="true" />
-            {noun}
-            <span className="agent-stream-count">{segment.items.length}</span>
-            {streaming ? <em>{active ? "写入中" : "已写入"}</em> : null}
-          </summary>
-          <ul>
-            {segment.items.map((item) => <li key={item.path}>
-              <strong>{item.path}</strong>
-              <small>{item.status === "running"
-                ? "写入中"
-                : item.status === "failed"
-                  ? "未落盘"
-                  : "已写入"}</small>
-              {item.summary === undefined ? null : <pre>{item.summary}</pre>}
-              {item.opsAttempted === undefined
-                ? null
-                : <small>{`${String(item.opsApplied ?? 0)}/${String(item.opsAttempted)} 处`}</small>}
-            </li>)}
-          </ul>
-        </details>
-      }
+      : null}
+    {outputSegments.map((segment, index) => {
       if (segment.kind === "resulting") {
         const noun = segment.active ? "resulting" : "resulted"
         const present = segment.fields.filter((field) => field.present)
@@ -955,7 +1105,16 @@ const AgentStructuredBody = memo(function AgentStructuredBody({
     })}
     {!hasAny && streaming
       ? <>
-          <div className="agent-stream-block thinking muted"><span>thinking</span><p className="creation-desk-pending">深度思考中…</p></div>
+          <details className="agent-stream-activity is-live" data-testid="agent-stream-activity" open>
+            <summary>
+              <ChevronRight size={14} aria-hidden="true" />
+              <span className="agent-stream-activity-title">思考与工具</span>
+              <em>进行中</em>
+            </summary>
+            <div className="agent-stream-activity-body">
+              <div className="agent-stream-block thinking muted"><span>thinking</span><p className="creation-desk-pending">深度思考中…</p></div>
+            </div>
+          </details>
           <p className="creation-desk-pending">正在生成正式回复…</p>
         </>
       : null}
@@ -966,6 +1125,168 @@ const AgentStructuredBody = memo(function AgentStructuredBody({
       : null}
   </div>
 })
+
+function summarizeAgentProcess(segments: readonly AgentTimelineSegment[]): Readonly<{
+  meta: string
+  stepCount: number
+  active: boolean
+}> {
+  let thinking = 0
+  let searches = 0
+  let runs = 0
+  let edits = 0
+  let active = false
+  for (const segment of segments) {
+    if (segment.kind === "thinking") {
+      thinking += 1
+      continue
+    }
+    if (segment.kind === "searching") {
+      searches += segment.items.length
+      active ||= segment.items.some((item) => item.status === "running")
+      continue
+    }
+    if (segment.kind === "running") {
+      runs += segment.items.length
+      active ||= segment.items.some((item) => item.status === "running")
+      continue
+    }
+    if (segment.kind === "editing") {
+      edits += segment.items.length
+      active ||= segment.items.some((item) => item.status === "running")
+    }
+  }
+  const parts: string[] = []
+  if (thinking > 0) parts.push(thinking === 1 ? "thinking" : `thinking ${String(thinking)}`)
+  if (runs > 0) parts.push(`run ${String(runs)}`)
+  if (searches > 0) parts.push(`searched ${String(searches)}`)
+  if (edits > 0) parts.push(`edited ${String(edits)}`)
+  return {
+    meta: parts.join(" · "),
+    stepCount: thinking + searches + runs + edits,
+    active,
+  }
+}
+
+function renderAgentProcessSegment(input: Readonly<{
+  segment: AgentTimelineSegment
+  index: number
+  streaming: boolean
+  lastThinkingIndex: number
+  onOpenSettingsLineage?(): void
+}>): React.JSX.Element | null {
+  const { segment, index, streaming, lastThinkingIndex, onOpenSettingsLineage } = input
+  if (segment.kind === "thinking") {
+    return <details
+      key={`thinking-${String(segment.round)}-${String(index)}`}
+      className="agent-stream-block thinking"
+    >
+      <summary>
+        <ChevronRight size={14} aria-hidden="true" />
+        thinking
+        {streaming && index === lastThinkingIndex ? <em>流式</em> : null}
+      </summary>
+      <div className="agent-stream-thinking-markdown">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{segment.text}</ReactMarkdown>
+      </div>
+    </details>
+  }
+  if (segment.kind === "searching") {
+    const active = segment.items.some((item) => item.status === "running")
+    const noun = streaming && active ? "searching" : "searched"
+    return <details
+      key={`searching-${String(segment.round)}-${String(index)}`}
+      className="agent-stream-block searching"
+    >
+      <summary>
+        <ChevronRight size={14} aria-hidden="true" />
+        <Globe size={13} aria-hidden="true" />
+        {noun}
+        <span className="agent-stream-count">{segment.items.length}</span>
+        {streaming ? <em>{active ? "查询中" : "完成"}</em> : null}
+      </summary>
+      <ul>
+        {segment.items.map((item) => <li key={`${String(item.round ?? "x")}:${item.query}`}>
+          <strong>{item.query}</strong>
+          {item.asOfChapterSequence !== undefined && item.temporalRole === "as_of"
+            ? onOpenSettingsLineage === undefined
+              ? <span className="settings-as-of-chip">按第 {item.asOfChapterSequence} 章视角（非当前设定全文）</span>
+              : <button
+                  type="button"
+                  className="settings-as-of-chip settings-as-of-chip-button"
+                  onClick={onOpenSettingsLineage}
+                >
+                  按第 {item.asOfChapterSequence} 章视角（非当前设定全文）
+                </button>
+            : null}
+          <small>{item.status === "running" ? "查询中" : item.status === "failed" ? "失败" : "完成"}</small>
+          {item.resultSummary === undefined ? null : <pre>{item.resultSummary}</pre>}
+        </li>)}
+      </ul>
+    </details>
+  }
+  if (segment.kind === "running") {
+    const active = segment.items.some((item) => item.status === "running")
+    const noun = streaming && active ? "running" : "run"
+    return <details
+      key={`running-${String(segment.round)}-${String(index)}`}
+      className="agent-stream-block running"
+    >
+      <summary>
+        <ChevronRight size={14} aria-hidden="true" />
+        <Terminal size={13} aria-hidden="true" />
+        {noun}
+        <span className="agent-stream-count">{segment.items.length}</span>
+        {streaming ? <em>{active ? "执行中" : "完成"}</em> : null}
+      </summary>
+      <ul className="agent-stream-run-list">
+        {segment.items.map((item) => {
+          const call = formatSynopsisToolRunCall(item)
+          return <li key={item.runId} className="agent-stream-run-item">
+            <div className="agent-stream-run-meta">
+              <code className="agent-stream-run-call" title={call}>{call}</code>
+              <small>{formatSynopsisToolRunStatus(item)}</small>
+            </div>
+            {item.resultSummary === undefined
+              ? null
+              : <pre className="agent-stream-run-output">{item.resultSummary}</pre>}
+          </li>
+        })}
+      </ul>
+    </details>
+  }
+  if (segment.kind === "editing") {
+    const active = segment.items.some((item) => item.status === "running")
+    const noun = streaming && active ? "editing" : "edited"
+    return <details
+      key={`editing-${String(index)}`}
+      className="agent-stream-block editing"
+    >
+      <summary>
+        <ChevronRight size={14} aria-hidden="true" />
+        <FileText size={13} aria-hidden="true" />
+        {noun}
+        <span className="agent-stream-count">{segment.items.length}</span>
+        {streaming ? <em>{active ? "写入中" : "已写入"}</em> : null}
+      </summary>
+      <ul>
+        {segment.items.map((item) => <li key={item.path}>
+          <strong>{item.path}</strong>
+          <small>{item.status === "running"
+            ? "写入中"
+            : item.status === "failed"
+              ? "未落盘"
+              : "已写入"}</small>
+          {item.summary === undefined ? null : <pre>{item.summary}</pre>}
+          {item.opsAttempted === undefined
+            ? null
+            : <small>{`${String(item.opsApplied ?? 0)}/${String(item.opsAttempted)} 处`}</small>}
+        </li>)}
+      </ul>
+    </details>
+  }
+  return null
+}
 
 function buildLiveTimeline(
   stream: SynopsisConversationStreamSnapshot | undefined,
@@ -988,6 +1309,7 @@ function buildLiveTimeline(
         ? undefined
         : [{ round: Math.max(1, stream.thinkingRounds.at(-1)?.round ?? 1), text: liveThinking }],
     searching: stream.searching,
+    toolRuns: stream.toolRuns,
     editing: stream.editing,
     content: contentPreview ?? extractAssistantPreview(stream.content) ?? (stream.content.trimStart().startsWith("{")
       ? undefined
@@ -1008,6 +1330,19 @@ function buildLiveTimeline(
     })
   }
   return segments
+}
+
+function resolveDiscussTodos(
+  stream: SynopsisConversationStreamSnapshot | undefined,
+  messages: readonly SynopsisConversationMessage[],
+): readonly SynopsisConversationTodo[] {
+  if (stream !== undefined && stream.todos.length > 0) return stream.todos
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.role !== "assistant") continue
+    if (message.todos !== undefined && message.todos.length > 0) return message.todos
+  }
+  return []
 }
 
 function resolveThinkingDisplay(thinking: string | undefined, phaseJson?: string): string | undefined {

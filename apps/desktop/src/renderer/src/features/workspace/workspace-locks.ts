@@ -23,15 +23,20 @@ const IMMUTABLE_FILE_PATHS = new Set([
   "暂存区/待落盘清单.md",
   "世界推演规则/基础规则/base-rules.md",
   "世界推演规则/基础规则/content-handling.md",
+  "世界推演规则/基础规则/webnovel-prose-logic.md",
   "世界推演规则/基础规则/plot-synopsis-guide.md",
   "世界推演规则/基础规则/settings-query-guide.md",
   "世界推演规则/基础规则/settings-revision-guide.md",
+  "世界推演规则/基础规则/discuss-creation-desk-workflow.md",
+  "世界推演规则/基础规则/batch-volume-deduction-plan.md",
+  "世界推演规则/Agent记忆/MEMORY.md",
 ])
 
 const IMMUTABLE_DIRECTORY_PATHS = new Set([
   "世界推演规则",
   "世界推演规则/基础规则",
   "世界推演规则/用户规则",
+  "世界推演规则/Agent记忆",
   "设定集",
   "参考文件",
   "章节正文",
@@ -40,6 +45,7 @@ const IMMUTABLE_DIRECTORY_PATHS = new Set([
   "表现输出/笔风规则",
   "表现输出/本作品描写",
   "暂存区",
+  "大纲",
 ])
 
 export type WorkspaceLockKind = "platform_readonly" | "immutable_scaffold" | "chapter_workflow"
@@ -138,6 +144,8 @@ export function lockTooltip(kind: WorkspaceLockKind): string {
 export const USER_WRITABLE_CREATE_ROOTS = [
   "设定集",
   "世界推演规则/用户规则",
+  "世界推演规则/Agent记忆",
+  "大纲",
   "参考文件",
   "表现输出/描写规则",
   "表现输出/笔风规则",

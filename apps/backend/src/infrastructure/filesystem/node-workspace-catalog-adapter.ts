@@ -68,6 +68,7 @@ function classifyRole(relativePath: string): WorkspaceCatalogEntry["role"] {
     case "章节正文": return "chapters"
     case "表现输出": return "presentation"
     case "暂存区": return "staging"
+    case "大纲": return "outline"
     default: throw new Error(`Unknown workspace catalog root: ${relativePath}`)
   }
 }

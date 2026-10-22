@@ -83,6 +83,7 @@ export interface PromptResourcePort {
   loadPlotSynopsisGuide(): Promise<PromptResource>
   loadSettingsQueryGuide(): Promise<PromptResource>
   loadSettingsRevisionGuide(): Promise<PromptResource>
+  loadDiscussCreationDeskWorkflow(): Promise<PromptResource>
   loadTurnSystemRules(): Promise<PromptResource>
   loadSynopsisDiscussSystemRules(): Promise<PromptResource>
   loadPhase(phase: AIPhase): Promise<PromptResource>
@@ -163,6 +164,8 @@ export type TurnPhaseInput = Readonly<{
     userEditedOutlineSinceAgent?: boolean
     currentWorkDisplayName?: string
     synopsisConfirmed?: boolean
+    /** ChapterPanel 批量推演：允许同轮写梗概+细纲并驱动工具链。 */
+    batchAutomation?: boolean
     titleAlignmentIssue?: Readonly<{
       chapterSequence: number
       bodyPath: string

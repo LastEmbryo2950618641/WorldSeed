@@ -314,6 +314,9 @@ export const synopsisConversationSetFocusPayloadSchema = projectSettingsReadPayl
   }
 })
 export type SynopsisConversationSetFocusPayload = z.infer<typeof synopsisConversationSetFocusPayloadSchema>
+export const synopsisConversationAutomationSchema = z.enum(["batch_chapter"])
+export type SynopsisConversationAutomation = z.infer<typeof synopsisConversationAutomationSchema>
+
 export const synopsisConversationSendPayloadSchema = projectSettingsReadPayloadSchema.extend({
   message: z.string().trim().min(1).max(8_000),
   presentation: turnStartPayloadSchema.shape.presentation,
@@ -325,6 +328,13 @@ export const synopsisConversationSendPayloadSchema = projectSettingsReadPayloadS
   focusLocked: z.boolean().optional(),
   lockedChapterSequence: z.number().int().positive().optional(),
   lockedFocusKind: discussFocusKindSchema.optional(),
+  /**
+   * Unattended chapter pipeline (ChapterPanel 批量推演):
+   * auto-confirm synopsis when a body is written so outline can land same/next turn.
+   */
+  automation: synopsisConversationAutomationSchema.optional(),
+  /** Claude Code–style discuss mode: auto (default) | plan | accept_edits. */
+  agentMode: z.enum(["auto", "plan", "accept_edits"]).optional(),
 })
 export const synopsisConversationRefreshChoicesPayloadSchema = projectSettingsReadPayloadSchema.extend({
   messageId: idSchema.optional(),
@@ -699,6 +709,7 @@ export const backendPayloadSchemas = {
   "turn.resume": turnResumePayloadSchema,
   "turn.recoverable.list": turnRecoverableTasksPayloadSchema,
   "turn.latest.get": turnLatestGetPayloadSchema,
+  "turn.list": turnRecoverableTasksPayloadSchema,
   "turn.pause": taskPayloadSchema,
   "turn.cancel": taskPayloadSchema,
   "turn.status": taskPayloadSchema,

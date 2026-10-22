@@ -5,8 +5,10 @@ import {
   DEFAULT_VOLUME_FOLDER_NAME,
   deriveOutlineMarkdownPath,
   deriveSynopsisMarkdownPath,
+  deriveRetiredChapterBodyPath,
   isChapterBodyMarkdownPath,
   isOutlineMarkdownPath,
+  isRetiredChapterBodyMarkdownPath,
   isSynopsisMarkdownPath,
   isSynopsisPlaceholderDocument,
   parseSynopsisMarkdownPath,
@@ -60,6 +62,11 @@ describe("synopsis path helpers", () => {
     expect(isChapterBodyMarkdownPath(`章节正文/${VOL}/第一章 世界种子.md`)).toBe(true)
     expect(isChapterBodyMarkdownPath(`章节正文/${VOL}/第二章 待命名 [剧情梗概].md`)).toBe(false)
     expect(isChapterBodyMarkdownPath(`章节正文/${VOL}/第二章 待命名 [剧情细纲].md`)).toBe(false)
+    expect(isRetiredChapterBodyMarkdownPath(`章节正文/${VOL}/第一章 世界种子 [已回退].md`)).toBe(true)
+    expect(resolveChapterMarkdownKind(`章节正文/${VOL}/第一章 世界种子 [已回退].md`)).toBeUndefined()
+    expect(isChapterBodyMarkdownPath(`章节正文/${VOL}/第一章 世界种子 [已回退].md`)).toBe(false)
+    expect(deriveRetiredChapterBodyPath(`章节正文/${VOL}/第一章 世界种子.md`))
+      .toBe(`章节正文/${VOL}/第一章 世界种子 [已回退].md`)
   })
 
   it("derives outline paths and siblings from synopsis", () => {

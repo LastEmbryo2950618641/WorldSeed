@@ -139,7 +139,7 @@ describe("chapter draft versions prototype", () => {
         isLatest: true,
       },
     ])
-    expect(versions[0]?.label).toBe("正文")
+    expect(versions[0]?.label).toBe("正式正文")
     expect(versions[1]?.label).toBe("v1 讨论agent 最新")
     expect(versions[1]?.body).toBe("Agent 草稿。")
   })
@@ -174,10 +174,10 @@ describe("chapter draft versions prototype", () => {
         isCurrentOfficial: true,
       },
     ])
-    expect(versions[0]?.label).toBe("历史正文")
+    expect(versions[0]?.label).toBe("正式正文")
     expect(versions[1]?.label).toBe("v2 讨论agent · 已覆盖正文")
     const split = splitChapterPickerVersions(versions)
-    expect(split.official.map((version) => version.label)).toEqual(["正文 · v1", "当前正文 · v2"])
+    expect(split.official.map((version) => version.label)).toEqual(["正式正文 · 当前"])
     expect(split.drafts.map((version) => version.label)).toEqual(["草稿 · v1 · 讨论agent · 已覆盖正文"])
   })
 
@@ -226,9 +226,9 @@ describe("chapter draft versions prototype", () => {
       },
     ])
     const split = splitChapterPickerVersions(versions)
-    expect(split.official.map((version) => version.label)).toEqual(["正文 · v1", "当前正文 · v2"])
+    expect(split.official.map((version) => version.label)).toEqual(["正式正文 · 当前"])
     expect(split.drafts.map((version) => version.label)).toEqual(["草稿 · v1 · 讨论agent", "草稿 · v2 · 讨论agent · 已覆盖正文"])
-    expect(split.official.map((version) => version.marks?.map((mark) => mark.kind))).toEqual([["ordinal"], ["current"]])
+    expect(split.official.map((version) => version.marks?.map((mark) => mark.kind))).toEqual([["current"]])
     expect(split.drafts[1]?.marks?.map((mark) => mark.text)).toEqual(["v2", "讨论agent", "已覆盖正文"])
     expect(preferredWorkingDraftId(split.drafts)).toBe(versions[1]?.versionId)
     expect(draftDisplayModeForSelection(split.drafts, versions[1]!.versionId)).toBe("view")
@@ -307,7 +307,7 @@ describe("chapter draft versions prototype", () => {
       },
     ])
     const split = splitChapterPickerVersions(versions)
-    expect(split.official.map((version) => version.label)).toEqual(["正文 · v1", "正文 · v2", "当前正文 · v3"])
+    expect(split.official.map((version) => version.label)).toEqual(["正式正文 · 当前"])
     expect(split.drafts.map((version) => version.label)).toEqual([
       "草稿 · v1 · 讨论agent",
       "草稿 · v2 · 讨论agent",

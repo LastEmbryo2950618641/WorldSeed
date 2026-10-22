@@ -59,7 +59,7 @@ export function RuntimeMonitor({ task, onResetMetrics }: {
       <span><strong>运行监控</strong></span>
       <em>{metrics.length === 0
         ? task?.status === "running" || task?.status === "waiting_for_model" || task?.status === "waiting_for_read"
-          ? "流程推理工具运行中"
+          ? "正文推演运行中"
           : "等待流程工具数据"
         : warningCount === 0 ? "指标正常" : `${String(warningCount)} 项需关注`}</em>
       <ChevronDown size={14} />
@@ -233,7 +233,7 @@ export function TaskCheckpointDialog({ task, project, onClose, onResume, onRollb
     <section className="checkpoint-dialog checkpoint-dialog--compact" role="dialog" aria-modal="true" aria-labelledby="checkpoint-dialog-title" data-testid="checkpoint-dialog">
       <header className="checkpoint-dialog-header">
         <span className="checkpoint-status-icon"><Pause size={17} /></span>
-        <div><strong id="checkpoint-dialog-title">{isSettingsReview ? "设定抽取待确认" : "流程推理工具已暂停"}</strong><small>{latestPhase}</small></div>
+        <div><strong id="checkpoint-dialog-title">{isSettingsReview ? "设定抽取待确认" : "正文推演已暂停"}</strong><small>{latestPhase}</small></div>
         <span className="checkpoint-state">{isSettingsReview ? "等待确认" : "等待决定"}</span>
         <button type="button" aria-label="关闭" data-testid="checkpoint-close" onClick={onClose}><X size={16} /></button>
       </header>
@@ -352,7 +352,7 @@ export function resolveCheckpointPauseReason(input: Readonly<{
   if (input.isSettingsReview) return "正文已生成，设定抽取提案待确认"
   if (input.blockedMetricCount > 0) return "本轮执行指标已达到上限"
   if (input.interruptionKind === "execution_error") return "本轮执行遇到可恢复错误"
-  return "流程推理工具执行被暂停"
+  return "正文推演执行被暂停"
 }
 
 function localizeCheckpointPauseReason(message: string): string {

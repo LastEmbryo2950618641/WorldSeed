@@ -1,9 +1,11 @@
 import type {
   SynopsisConversationStreamEdit,
+  SynopsisConversationStreamRun,
   SynopsisConversationStreamSearch,
   SynopsisConversationStreamSnapshot,
   SynopsisConversationStreamUsage,
   SynopsisConversationThinkingRound,
+  SynopsisConversationTodo,
 } from "@worldseed/contracts"
 
 type MutableSearch = {
@@ -22,6 +24,16 @@ type MutableEdit = {
   summary?: string | undefined
   opsApplied?: number | undefined
   opsAttempted?: number | undefined
+}
+
+type MutableRun = {
+  runId: string
+  name: string
+  action: SynopsisConversationStreamRun["action"]
+  arguments?: string | undefined
+  status: SynopsisConversationStreamRun["status"]
+  resultSummary?: string | undefined
+  round?: number | undefined
 }
 
 type MutableThinkingRound = {
@@ -47,6 +59,10 @@ type MutableSnapshot = {
   content: string
   searching: MutableSearch[]
   editing: MutableEdit[]
+  toolRuns: MutableRun[]
+  todos: SynopsisConversationTodo[]
+  /** Unfinished todos inherited from the previous send of the same session. */
+  carriedTodoIds: Set<string>
   /** Per-turn usage while a send is running. */
   usage: MutableUsage
   error?: string
@@ -107,6 +123,18 @@ function mapSearching(items: readonly MutableSearch[]): SynopsisConversationStre
   }))
 }
 
+function mapToolRuns(items: readonly MutableRun[]): SynopsisConversationStreamRun[] {
+  return items.map((item) => ({
+    runId: item.runId,
+    name: item.name,
+    action: item.action,
+    status: item.status,
+    ...(item.arguments === undefined ? {} : { arguments: item.arguments }),
+    ...(item.resultSummary === undefined ? {} : { resultSummary: item.resultSummary }),
+    ...(item.round === undefined ? {} : { round: item.round }),
+  }))
+}
+
 function mapThinkingRounds(items: readonly MutableThinkingRound[]): SynopsisConversationThinkingRound[] {
   return items
     .filter((item) => item.text.trim().length > 0)
@@ -127,6 +155,13 @@ export class SynopsisConversationStreamHub {
 
   public begin(projectId: string, sessionId: string, nowMs: number): void {
     this.ensureCumulative(projectId)
+    // Multi-turn work (Auto continuation, choice replies) must not lose the open plan between sends.
+    const previous = this.byProject.get(projectId)
+    const carried = previous?.sessionId === sessionId
+      ? previous.todos
+        .filter((item) => item.status === "pending" || item.status === "in_progress")
+        .map((item) => ({ ...item }))
+      : []
     this.byProject.set(projectId, {
       sessionId,
       projectId,
@@ -136,9 +171,19 @@ export class SynopsisConversationStreamHub {
       content: "",
       searching: [],
       editing: [],
+      toolRuns: [],
+      todos: carried,
+      carriedTodoIds: new Set(carried.map((item) => item.id)),
       usage: emptyUsage(),
       updatedAtMs: nowMs,
     })
+  }
+
+  /** Open todos carried into the current send from the previous one (same session). */
+  public carriedTodos(projectId: string): readonly SynopsisConversationTodo[] {
+    const current = this.byProject.get(projectId)
+    if (current === undefined) return []
+    return current.todos.filter((item) => current.carriedTodoIds.has(item.id))
   }
 
   public addUsage(
@@ -241,6 +286,44 @@ export class SynopsisConversationStreamHub {
     current.updatedAtMs = nowMs
   }
 
+  /** Upsert bash / Claude-style tool invocations shown as run(...). */
+  public upsertToolRun(projectId: string, run: MutableRun, nowMs: number): void {
+    const current = this.byProject.get(projectId)
+    if (current === undefined || current.status === "failed") return
+    const index = current.toolRuns.findIndex((item) => item.runId === run.runId)
+    if (index < 0) current.toolRuns.push({ ...run })
+    else current.toolRuns[index] = { ...current.toolRuns[index], ...run }
+    current.updatedAtMs = nowMs
+  }
+
+  /** Replace or merge Claude Code–style todos for the Todo panel. */
+  public setTodos(
+    projectId: string,
+    todos: readonly SynopsisConversationTodo[],
+    nowMs: number,
+    options?: Readonly<{ merge?: boolean }>,
+  ): void {
+    const current = this.byProject.get(projectId)
+    if (current === undefined || current.status === "failed") return
+    if (options?.merge === true) {
+      const byId = new Map(current.todos.map((item) => [item.id, item]))
+      for (const todo of todos) byId.set(todo.id, todo)
+      current.todos = [...byId.values()]
+    } else {
+      // A full replace may reorganize, but carried open items must be closed explicitly (cancelled).
+      const nextIds = new Set(todos.map((item) => item.id))
+      const nextContents = new Set(todos.map((item) => item.content.trim()))
+      const dropped = current.todos.filter((item) => (
+        current.carriedTodoIds.has(item.id)
+        && !nextIds.has(item.id)
+        && !nextContents.has(item.content.trim())
+        && (item.status === "pending" || item.status === "in_progress")
+      ))
+      current.todos = [...todos, ...dropped.map((item) => ({ ...item, status: "pending" as const }))]
+    }
+    current.updatedAtMs = nowMs
+  }
+
   public complete(projectId: string, nowMs: number, final?: Readonly<{ thinking?: string; content?: string }>): void {
     const current = this.byProject.get(projectId)
     if (current === undefined) return
@@ -266,6 +349,9 @@ export class SynopsisConversationStreamHub {
         content: "",
         searching: [],
         editing: [],
+        toolRuns: [],
+        todos: [],
+        carriedTodoIds: new Set(),
         usage: { ...this.ensureCumulative(projectId) },
         error,
         updatedAtMs: nowMs,
@@ -288,6 +374,8 @@ export class SynopsisConversationStreamHub {
         content: "",
         searching: [],
         editing: [],
+        toolRuns: [],
+        todos: [],
         ...(cumulative === undefined ? {} : { usage: cumulative }),
         updatedAtMs: 0,
       }
@@ -300,6 +388,8 @@ export class SynopsisConversationStreamHub {
         content: "",
         searching: [],
         editing: [],
+        toolRuns: [],
+        todos: [],
         ...(cumulative === undefined ? {} : { usage: cumulative }),
         updatedAtMs: 0,
       }
@@ -312,6 +402,8 @@ export class SynopsisConversationStreamHub {
       content: current.content,
       searching: mapSearching(current.searching),
       editing: mapEditing(current.editing),
+      toolRuns: mapToolRuns(current.toolRuns),
+      todos: current.todos.map((item) => ({ ...item })),
       ...(current.error === undefined ? {} : { error: current.error }),
       ...(cumulative === undefined ? {} : { usage: cumulative }),
       updatedAtMs: current.updatedAtMs,

@@ -2,6 +2,8 @@ export const SYNOPSIS_MARKDOWN_SUFFIX = "[剧情梗概]" as const
 export const SYNOPSIS_MARKDOWN_FILENAME_SUFFIX = ` ${SYNOPSIS_MARKDOWN_SUFFIX}` as const
 export const OUTLINE_MARKDOWN_SUFFIX = "[剧情细纲]" as const
 export const OUTLINE_MARKDOWN_FILENAME_SUFFIX = ` ${OUTLINE_MARKDOWN_SUFFIX}` as const
+export const RETIRED_BODY_MARKDOWN_SUFFIX = "[已回退]" as const
+export const RETIRED_BODY_MARKDOWN_FILENAME_SUFFIX = ` ${RETIRED_BODY_MARKDOWN_SUFFIX}` as const
 
 export type ChapterMarkdownKind = "chapter_body" | "plot_synopsis" | "plot_outline"
 
@@ -17,11 +19,18 @@ export function resolveChapterMarkdownKind(path: string): ChapterMarkdownKind | 
   if (!path.startsWith("章节正文/") || !path.endsWith(".md")) return undefined
   if (isSynopsisMarkdownPath(path)) return "plot_synopsis"
   if (isOutlineMarkdownPath(path)) return "plot_outline"
+  if (isRetiredChapterBodyMarkdownPath(path)) return undefined
   return "chapter_body"
 }
 
 export function isChapterBodyMarkdownPath(path: string): boolean {
   return resolveChapterMarkdownKind(path) === "chapter_body"
+}
+
+export function isRetiredChapterBodyMarkdownPath(path: string): boolean {
+  if (!path.startsWith("章节正文/") || !path.endsWith(".md")) return false
+  return path.endsWith(`${RETIRED_BODY_MARKDOWN_FILENAME_SUFFIX}.md`)
+    || path.endsWith(`${RETIRED_BODY_MARKDOWN_SUFFIX}.md`)
 }
 
 export function isSynopsisMarkdownPath(path: string): boolean {
@@ -212,15 +221,71 @@ function parseChineseChapterNumeral(value: string): number | undefined {
 export type DiscussFocusChapterOption = Readonly<{
   sequence: number
   label: string
+  /** Volume folder name under `章节正文/`, e.g. `第一卷 潮水退去时`. */
+  volumeFolderName?: string
   synopsisPath?: string
   outlinePath?: string
   bodyPath?: string
 }>
 
+export type DiscussFocusVolumeGroup = Readonly<{
+  volumeFolderName: string
+  volumeSequence: number | undefined
+  chapters: readonly DiscussFocusChapterOption[]
+}>
+
+const VOLUME_FOLDER_NAME_PATTERN = /^第(?:\d+|[零一二三四五六七八九十百]+)卷\s+\S.*$/u
+
+/** Extract `第一卷 标题` from `章节正文/第一卷 标题/第一章 ….md`. */
+export function extractVolumeFolderNameFromChapterPath(path: string): string | undefined {
+  const normalized = path.replaceAll("\\", "/")
+  if (!normalized.startsWith("章节正文/")) return undefined
+  const rest = normalized.slice("章节正文/".length)
+  const slash = rest.indexOf("/")
+  if (slash <= 0) return undefined
+  const folder = rest.slice(0, slash)
+  return VOLUME_FOLDER_NAME_PATTERN.test(folder) ? folder : undefined
+}
+
+export function groupChaptersByVolume(
+  chapters: readonly DiscussFocusChapterOption[],
+): readonly DiscussFocusVolumeGroup[] {
+  const groups = new Map<string, DiscussFocusChapterOption[]>()
+  for (const chapter of chapters) {
+    const key = chapter.volumeFolderName ?? "未分卷"
+    const list = groups.get(key)
+    if (list === undefined) groups.set(key, [chapter])
+    else list.push(chapter)
+  }
+  return [...groups.entries()]
+    .map(([volumeFolderName, grouped]) => ({
+      volumeFolderName,
+      volumeSequence: parseVolumeSequenceFromFolderName(volumeFolderName),
+      chapters: grouped,
+    }))
+    .sort((left, right) => {
+      const leftSequence = left.volumeSequence ?? Number.MAX_SAFE_INTEGER
+      const rightSequence = right.volumeSequence ?? Number.MAX_SAFE_INTEGER
+      if (leftSequence !== rightSequence) return leftSequence - rightSequence
+      return left.volumeFolderName.localeCompare(right.volumeFolderName, "zh-CN")
+    })
+}
+
+function parseVolumeSequenceFromFolderName(folderName: string): number | undefined {
+  if (folderName === "未分卷") return undefined
+  const match = folderName.match(/^第(\d+)卷/u) ?? folderName.match(/^第([零一二三四五六七八九十百]+)卷/u)
+  if (match === null) return undefined
+  const token = match[1]
+  if (token === undefined) return undefined
+  if (/^\d+$/u.test(token)) return Number(token)
+  return parseChineseChapterNumeral(token)
+}
+
 export function listDiscussFocusChapters(inventoryPaths: readonly string[]): DiscussFocusChapterOption[] {
   const bySequence = new Map<number, {
     sequence: number
     label: string
+    volumeFolderName?: string
     synopsisPath?: string
     outlinePath?: string
     bodyPath?: string
@@ -234,7 +299,9 @@ export function listDiscussFocusChapters(inventoryPaths: readonly string[]): Dis
     if (kind === undefined) continue
     const name = path.slice(path.lastIndexOf("/") + 1)
     const stem = stripPlanningFilenameSuffix(name.replace(/\.md$/u, ""))
+    const volumeFolderName = extractVolumeFolderNameFromChapterPath(path)
     const current = bySequence.get(sequence) ?? { sequence, label: stem }
+    if (volumeFolderName !== undefined) current.volumeFolderName = volumeFolderName
     if (kind === "plot_synopsis") current.synopsisPath = path
     if (kind === "plot_outline") current.outlinePath = path
     if (kind === "chapter_body") {

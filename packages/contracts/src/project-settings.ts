@@ -49,6 +49,20 @@ const creationDeskSettingsSchema = z.object({
    * (no manual 采纳). When false, proposals stay pending until the author approves.
    */
   autoApproveGoalProposals: z.boolean().default(true),
+  /**
+   * When true, active foreshadow/climax goals must have both plant and payoff
+   * chapter sequences; incomplete hooks block beginTurn / turn.start and are
+   * listed in the reconcile blocking checklist for the discuss Agent.
+   */
+  requireCompleteHookSchedules: z.boolean().default(true),
+  /**
+   * When true, discuss may use `chapter_workflow` (正文推演工具) and the composer
+   * exposes the start-turn control. Default false: Agent writes drafts via
+   * chapterDraftProposal instead.
+   */
+  chapterWorkflowEnabled: z.boolean().default(false),
+  /** Wall-time cap for one discuss Agent send, in minutes. 0 = unlimited. */
+  discussMaxWallTimeMinutes: z.number().int().min(0).max(1440).default(0),
 })
 
 export const projectSettingsSchema = z.object({
@@ -69,7 +83,12 @@ export const projectSettingsSchema = z.object({
   graph: graphSettingsSchema,
   history: historySettingsSchema.default({ retentionLimit: null }),
   staging: stagingSettingsSchema.default({ maxChars: 80_000 }),
-  creationDesk: creationDeskSettingsSchema.default({ autoApproveGoalProposals: true }),
+  creationDesk: creationDeskSettingsSchema.default({
+    autoApproveGoalProposals: true,
+    requireCompleteHookSchedules: true,
+    chapterWorkflowEnabled: false,
+    discussMaxWallTimeMinutes: 0,
+  }),
 }).superRefine(validateGraphSettings)
 
 export type ProjectSettings = z.infer<typeof projectSettingsSchema>

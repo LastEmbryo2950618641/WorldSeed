@@ -88,20 +88,20 @@ export function ChapterDraftVersionsPrototype(props: Props): React.JSX.Element {
 
   return <div className="chapter-draft-versions-prototype" data-testid="chapter-draft-versions-prototype" data-version-kind={official ? "official" : "draft"}>
     <div className="chapter-draft-versions-bar">
-      <span className="chapter-draft-versions-label"><History size={12} /> {official ? "正文版本" : "草稿版本"}</span>
+      <span className="chapter-draft-versions-label"><History size={12} /> {official ? "正式正文" : "草稿版本"}</span>
       <label className="chapter-draft-version-select" ref={rootRef}>
         <button
           type="button"
           className="chapter-draft-version-trigger"
           data-testid="chapter-draft-version-select"
           disabled={presented.length === 0}
-          aria-label={official ? "正文版本" : "草稿版本"}
+          aria-label={official ? "正式正文" : "草稿版本"}
           aria-haspopup="listbox"
           aria-expanded={open}
           onClick={() => { setOpen((current) => !current); }}
         >
           {selected === undefined
-            ? <span className="chapter-version-title">{official ? "暂无正文版本" : "暂无草稿"}</span>
+            ? <span className="chapter-version-title">{official ? "暂无正式正文" : "暂无草稿"}</span>
             : <VersionOptionLabel version={selected} />}
           <ChevronDown size={12} className="chapter-draft-version-select-icon" aria-hidden="true" />
         </button>

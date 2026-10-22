@@ -297,7 +297,7 @@ function LockBadge({ kind }: { kind: WorkspaceLockKind }): React.JSX.Element {
 /** Order-independent tree assembly: ensure parent directories exist before linking children. */
 export function buildTree(entries: readonly InventoryEntry[]): TreeNode[] {
   const rootOrder = new Map(
-    ["世界推演规则", "设定集", "设定沿革", "暂存区", "参考文件", "表现输出", "章节正文"]
+    ["世界推演规则", "设定集", "设定沿革", "大纲", "暂存区", "参考文件", "表现输出", "章节正文"]
       .map((path, index): readonly [string, number] => [path, index]),
   )
   const nodes = new Map<string, TreeNode>()

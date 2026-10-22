@@ -1249,4 +1249,13 @@ export const projectMigrations = Object.freeze([
     "ALTER TABLE revision_draft_versions_new RENAME TO revision_draft_versions",
     "CREATE INDEX revision_draft_versions_revision ON revision_draft_versions(revision_task_id, created_at_ms ASC)",
   ]),
+  defineSqlMigration<ProjectDatabase>(50, "050_synopsis_message_tool_runs", [
+    "ALTER TABLE synopsis_conversation_messages ADD COLUMN tool_runs_json TEXT",
+  ]),
+  defineSqlMigration<ProjectDatabase>(51, "051_synopsis_message_todos", [
+    "ALTER TABLE synopsis_conversation_messages ADD COLUMN todos_json TEXT",
+  ]),
+  defineSqlMigration<ProjectDatabase>(52, "052_synopsis_message_error", [
+    "ALTER TABLE synopsis_conversation_messages ADD COLUMN error_text TEXT",
+  ]),
 ])

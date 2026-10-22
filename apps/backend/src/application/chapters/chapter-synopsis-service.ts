@@ -401,6 +401,102 @@ export class ChapterSynopsisService {
     return "turn_input"
   }
 
+  /**
+   * Demote the focus chapter's workspace surface for discuss rewrite flows.
+   * - `synopsis`: clear confirm, remove outline, archive live body → cup falls back to 梗概
+   * - `outline`: archive live body only → cup falls back to 细纲 (or 梗概 if no outline)
+   * Graph/history checkout is intentionally not performed here.
+   */
+  public async restageChapter(input: Readonly<{
+    projectId: ProjectId
+    workspaceRootRef: string
+    chapterSequence: number
+    targetStage: "synopsis" | "outline"
+    reason: string
+  }>): Promise<Readonly<{
+    chapterSequence: number
+    targetStage: "synopsis" | "outline"
+    reason: string
+    synopsisConfirmedCleared: boolean
+    clearedOutlinePath?: string
+    archivedBodyPath?: string
+    retiredBodyPath?: string
+    focusKind: "plot_synopsis" | "plot_outline"
+    synopsisPath?: string
+    outlinePath?: string
+  }>> {
+    const reason = input.reason.trim()
+    if (reason.length === 0) throw new Error("restage reason 不能为空")
+
+    const planning = await this.listPlanningFilesForSequence(input.workspaceRootRef, input.chapterSequence)
+    const synopsis = planning.find((entry) => entry.kind === "synopsis")
+    const outline = planning.find((entry) => entry.kind === "outline")
+    const body = await this.findBodyForSequence(input.workspaceRootRef, input.chapterSequence)
+
+    let clearedOutlinePath: string | undefined
+    let archivedBodyPath: string | undefined
+    let retiredBodyPath: string | undefined
+
+    if (input.targetStage === "synopsis" && outline !== undefined) {
+      await this.dependencies.workspace.removeSynopsisMarkdown(input.workspaceRootRef, outline.path)
+      clearedOutlinePath = outline.path
+    }
+
+    if (body !== undefined) {
+      archivedBodyPath = body.path
+      retiredBodyPath = await this.dependencies.workspace.archivePublishedChapter(
+        input.workspaceRootRef,
+        body.path,
+      )
+    }
+
+    const session = await this.dependencies.conversation.findBySequence(input.projectId, input.chapterSequence)
+    let synopsisConfirmedCleared = false
+    const remainingOutline = input.targetStage === "synopsis" ? undefined : outline
+    const focusKind = remainingOutline !== undefined ? "plot_outline" as const : "plot_synopsis" as const
+    if (session !== undefined) {
+      synopsisConfirmedCleared = input.targetStage === "synopsis" && session.synopsisConfirmedAtMs !== undefined
+      await this.dependencies.conversation.updateSession({
+        sessionId: session.sessionId,
+        focusKind,
+        ...(synopsis?.path === undefined ? {} : { synopsisPath: synopsis.path }),
+        ...(input.targetStage === "synopsis" ? { synopsisConfirmedAtMs: null } : {}),
+        updatedAtMs: this.dependencies.now(),
+      })
+    }
+
+    runtimeLog("info", "chapter-synopsis", "restaged", {
+      projectId: input.projectId,
+      chapterSequence: input.chapterSequence,
+      targetStage: input.targetStage,
+      reason,
+      clearedOutlinePath,
+      archivedBodyPath,
+      retiredBodyPath,
+    })
+
+    return {
+      chapterSequence: input.chapterSequence,
+      targetStage: input.targetStage,
+      reason,
+      synopsisConfirmedCleared,
+      ...(clearedOutlinePath === undefined ? {} : { clearedOutlinePath }),
+      ...(archivedBodyPath === undefined ? {} : { archivedBodyPath }),
+      ...(retiredBodyPath === undefined ? {} : { retiredBodyPath }),
+      focusKind,
+      ...(synopsis?.path === undefined ? {} : { synopsisPath: synopsis.path }),
+      ...(remainingOutline?.path === undefined ? {} : { outlinePath: remainingOutline.path }),
+    }
+  }
+
+  /** On-disk 章节正文 file for the sequence, including imported bodies not yet in the chapter index. */
+  public async findBodyFile(input: Readonly<{
+    workspaceRootRef: string
+    chapterSequence: number
+  }>): Promise<Readonly<{ path: string; heading: string; volumeFolderName: string }> | undefined> {
+    return this.findBodyForSequence(input.workspaceRootRef, input.chapterSequence)
+  }
+
   private async findBodyForSequence(
     workspaceRootRef: string,
     chapterSequence: number,

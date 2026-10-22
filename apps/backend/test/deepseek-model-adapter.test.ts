@@ -85,6 +85,7 @@ describe("DeepSeekAiModelAdapter", () => {
         loadPlotSynopsisGuide: () => Promise.reject(new Error("unused")),
         loadSettingsQueryGuide: () => Promise.reject(new Error("unused")),
         loadSettingsRevisionGuide: () => Promise.reject(new Error("unused")),
+        loadDiscussCreationDeskWorkflow: () => Promise.reject(new Error("unused")),
         loadSynopsisDiscussSystemRules: () => Promise.reject(new Error("unused")),
         loadPhase: () => {
           promptReads.push("phase")

@@ -4,9 +4,15 @@ import {
   resolveChapterArtifactRelations,
   resolveChapterArtifactRelationsWithInventory,
   resolveChapterPathWithInventory,
+  resolveChapterSurfacePath,
   chapterArtifactStageLabel,
   listDiscussFocusChapters,
   discussFocusOpenLabel,
+  extractVolumeFolderNameFromChapterPath,
+  groupChaptersByVolume,
+  isChapterBodyMarkdownPath,
+  isRetiredChapterBodyMarkdownPath,
+  resolveChapterMarkdownKind,
 } from "../src/renderer/src/features/editor/synopsis-path.js"
 
 describe("chapter artifact relations", () => {
@@ -31,6 +37,17 @@ describe("chapter artifact relations", () => {
     expect(relations?.synopsisPath).toBe("章节正文/第一卷 王旗未立/第一章 潮水退去时 [剧情梗概].md")
     expect(relations?.outlinePath).toBe("章节正文/第一卷 王旗未立/第一章 潮水退去时 [剧情细纲].md")
     expect(relations?.kind).toBe("chapter_body")
+  })
+
+  it("excludes retired bodies from live surface and body kind", () => {
+    const retired = "章节正文/第一卷 王旗未立/第一章 潮水退去时 [已回退].md"
+    expect(isRetiredChapterBodyMarkdownPath(retired)).toBe(true)
+    expect(isChapterBodyMarkdownPath(retired)).toBe(false)
+    expect(resolveChapterMarkdownKind(retired)).toBeUndefined()
+    expect(resolveChapterSurfacePath([
+      retired,
+      "章节正文/第一卷 王旗未立/第一章 潮水退去时 [剧情梗概].md",
+    ])).toBe("章节正文/第一卷 王旗未立/第一章 潮水退去时 [剧情梗概].md")
   })
 
   it("falls back to same-sequence planning files when titles diverge", () => {
@@ -90,6 +107,7 @@ describe("discuss focus chapters", () => {
       {
         sequence: 1,
         label: "第一章 潮水退去时",
+        volumeFolderName: "第一卷 王旗未立",
         synopsisPath: "章节正文/第一卷 王旗未立/第一章 潮水退去时 [剧情梗概].md",
         outlinePath: "章节正文/第一卷 王旗未立/第一章 潮水退去时 [剧情细纲].md",
         bodyPath: "章节正文/第一卷 王旗未立/第一章 潮水退去时.md",
@@ -97,11 +115,40 @@ describe("discuss focus chapters", () => {
       {
         sequence: 2,
         label: "第二章 盐与账本",
+        volumeFolderName: "第一卷 王旗未立",
         synopsisPath: "章节正文/第一卷 王旗未立/第二章 盐与账本 [剧情梗概].md",
       },
     ])
     expect(discussFocusOpenLabel("plot_synopsis")).toBe("打开梗概文件")
     expect(discussFocusOpenLabel("plot_outline")).toBe("打开细纲文件")
     expect(discussFocusOpenLabel("chapter_body")).toBe("打开正文文件")
+  })
+
+  it("extracts volume folder names and groups chapters by volume", () => {
+    expect(extractVolumeFolderNameFromChapterPath(
+      "章节正文/第二卷 清河夜雨/第三章 清河会.md",
+    )).toBe("第二卷 清河夜雨")
+    const groups = groupChaptersByVolume([
+      {
+        sequence: 3,
+        label: "第三章 清河会",
+        volumeFolderName: "第二卷 清河夜雨",
+      },
+      {
+        sequence: 1,
+        label: "第一章 潮水",
+        volumeFolderName: "第一卷 王旗未立",
+      },
+      {
+        sequence: 2,
+        label: "第二章 账本",
+        volumeFolderName: "第一卷 王旗未立",
+      },
+    ])
+    expect(groups.map((group) => group.volumeFolderName)).toEqual([
+      "第一卷 王旗未立",
+      "第二卷 清河夜雨",
+    ])
+    expect(groups[0]?.chapters.map((chapter) => chapter.sequence)).toEqual([1, 2])
   })
 })

@@ -350,6 +350,54 @@ describe("shared contracts", () => {
     expect(result.success).toBe(true)
     if (result.success) {
       expect(result.data.execution.worldDivergenceMode).toBe("world_consistent")
+      expect(result.data.creationDesk.requireCompleteHookSchedules).toBe(true)
+    }
+  })
+
+  it("defaults requireCompleteHookSchedules to true and accepts explicit false", () => {
+    const base = {
+      version: 2 as const,
+      execution: {
+        maxModelCalls: 128,
+        contextCompactionThresholdRatio: 0.97,
+        contextCompressionTargetRatio: 0.5,
+        outputTokenLimitMode: "model" as const,
+        maxWallTimeMs: 3_600_000,
+        maxRetrievalRounds: 4,
+      },
+      retrieval: {
+        maxRequestsPerRound: 10,
+        maxCandidates: 20,
+        maxDepth: 2,
+        maxEvidenceTokens: 12_000,
+      },
+      graph: {
+        maxDirectOutDegree: 12,
+        maxDirectInDegree: 12,
+        mergeWarningThreshold: 10,
+        preferredExpansionDepth: 2,
+        maxExpansionDepth: 4,
+        maxVisitedNodes: 96,
+        maxVisitedLinks: 192,
+        layoutMode: "layered_collision_avoidance" as const,
+      },
+    }
+    const omitted = projectSettingsSchema.safeParse(base)
+    expect(omitted.success).toBe(true)
+    if (omitted.success) {
+      expect(omitted.data.creationDesk.requireCompleteHookSchedules).toBe(true)
+    }
+
+    const disabled = projectSettingsSchema.safeParse({
+      ...base,
+      creationDesk: {
+        autoApproveGoalProposals: true,
+        requireCompleteHookSchedules: false,
+      },
+    })
+    expect(disabled.success).toBe(true)
+    if (disabled.success) {
+      expect(disabled.data.creationDesk.requireCompleteHookSchedules).toBe(false)
     }
   })
 

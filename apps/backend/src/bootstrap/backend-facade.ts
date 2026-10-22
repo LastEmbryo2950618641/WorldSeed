@@ -590,6 +590,8 @@ export class BackendFacade {
             ? {}
             : { lockedChapterSequence: payload.lockedChapterSequence }),
           ...(payload.lockedFocusKind === undefined ? {} : { lockedFocusKind: payload.lockedFocusKind }),
+          ...(payload.automation === undefined ? {} : { automation: payload.automation }),
+          ...(payload.agentMode === undefined ? {} : { agentMode: payload.agentMode }),
         })
       }
       case "synopsis.conversation.refreshChoices": {
@@ -995,6 +997,11 @@ export class BackendFacade {
         const latest = await runtime.findLatestTask(payload.chapterSequence)
         if (latest === undefined) return null
         return this.readTask(latest.taskId)
+      }
+      case "turn.list": {
+        const payload = turnRecoverableTasksPayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.listDeductionTasks()
       }
       case "turn.pause": {
         const payload = taskPayloadSchema.parse(request.payload)

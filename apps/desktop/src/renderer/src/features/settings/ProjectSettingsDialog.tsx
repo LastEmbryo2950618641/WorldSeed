@@ -117,10 +117,13 @@ export function ProjectSettingsDialog({
     setDraft((current) => ({ ...current, execution: { ...current.execution, worldDivergenceMode } }))
     setSaveError(undefined)
   }
-  const updateAutoApproveGoalProposals = (autoApproveGoalProposals: boolean): void => {
+  const updateCreationDesk = <K extends keyof ProjectSettings["creationDesk"]>(
+    key: K,
+    value: ProjectSettings["creationDesk"][K],
+  ): void => {
     setDraft((current) => ({
       ...current,
-      creationDesk: { ...current.creationDesk, autoApproveGoalProposals },
+      creationDesk: { ...current.creationDesk, [key]: value },
     }))
     setSaveError(undefined)
   }
@@ -186,7 +189,7 @@ export function ProjectSettingsDialog({
             creationDesk={draft.creationDesk}
             onChange={updateExecution}
             onDivergenceModeChange={updateWorldDivergenceMode}
-            onCreationDeskChange={updateAutoApproveGoalProposals}
+            onCreationDeskChange={updateCreationDesk}
           /> : null}
           {section === "retrieval" ? <RetrievalSettings value={draft.retrieval} onChange={updateRetrieval} /> : null}
           {section === "graph" ? <GraphSettings value={draft.graph} onChange={updateGraph} /> : null}
@@ -224,7 +227,10 @@ function ExecutionSettings({ value, creationDesk, onChange, onDivergenceModeChan
   creationDesk: ProjectSettings["creationDesk"]
   onChange: (key: NumericExecutionSetting, value: number) => void
   onDivergenceModeChange: (mode: WorldDivergenceMode) => void
-  onCreationDeskChange: (autoApproveGoalProposals: boolean) => void
+  onCreationDeskChange: <K extends keyof ProjectSettings["creationDesk"]>(
+    key: K,
+    value: ProjectSettings["creationDesk"][K],
+  ) => void
 }): React.JSX.Element {
   return <SettingsPage icon={Gauge} title="推演执行" description="默认按每轮可能失败并保留约 30% 重试冗余计算。">
     <div className="settings-field-row">
@@ -266,7 +272,7 @@ function ExecutionSettings({ value, creationDesk, onChange, onDivergenceModeChan
           className={creationDesk.autoApproveGoalProposals ? "active" : ""}
           type="button"
           data-testid="settings-auto-approve-goals-on"
-          onClick={() => { onCreationDeskChange(true); }}
+          onClick={() => { onCreationDeskChange("autoApproveGoalProposals", true); }}
         >
           自动写入
         </button>
@@ -274,9 +280,57 @@ function ExecutionSettings({ value, creationDesk, onChange, onDivergenceModeChan
           className={creationDesk.autoApproveGoalProposals ? "" : "active"}
           type="button"
           data-testid="settings-auto-approve-goals-off"
-          onClick={() => { onCreationDeskChange(false); }}
+          onClick={() => { onCreationDeskChange("autoApproveGoalProposals", false); }}
         >
           需手动采纳
+        </button>
+      </div>
+    </div>
+    <div className="settings-field-row">
+      <span>
+        <strong>钩子时限强制完整</strong>
+        <small>开启后，活跃伏笔/高潮须同时填写起势章与兑现章才可开始推演；关闭则允许不确定钩子暂不填兑现章（Agent 能确定时仍应自己补齐）</small>
+      </span>
+      <div className="settings-segmented" role="group" aria-label="钩子时限强制完整">
+        <button
+          className={creationDesk.requireCompleteHookSchedules ? "active" : ""}
+          type="button"
+          data-testid="settings-require-hook-schedules-on"
+          onClick={() => { onCreationDeskChange("requireCompleteHookSchedules", true); }}
+        >
+          强制完整
+        </button>
+        <button
+          className={creationDesk.requireCompleteHookSchedules ? "" : "active"}
+          type="button"
+          data-testid="settings-require-hook-schedules-off"
+          onClick={() => { onCreationDeskChange("requireCompleteHookSchedules", false); }}
+        >
+          允许不完整
+        </button>
+      </div>
+    </div>
+    <div className="settings-field-row">
+      <span>
+        <strong>正文推演工具</strong>
+        <small>关闭时讨论 Agent 用 chapterDraftProposal 写草稿，创作台不显示「调用正文推演工具」；开启后才可走 chapter_workflow（批量可一次多章正文）</small>
+      </span>
+      <div className="settings-segmented" role="group" aria-label="正文推演工具">
+        <button
+          className={creationDesk.chapterWorkflowEnabled ? "active" : ""}
+          type="button"
+          data-testid="settings-chapter-workflow-on"
+          onClick={() => { onCreationDeskChange("chapterWorkflowEnabled", true); }}
+        >
+          启用
+        </button>
+        <button
+          className={creationDesk.chapterWorkflowEnabled ? "" : "active"}
+          type="button"
+          data-testid="settings-chapter-workflow-off"
+          onClick={() => { onCreationDeskChange("chapterWorkflowEnabled", false); }}
+        >
+          禁用
         </button>
       </div>
     </div>
@@ -297,6 +351,26 @@ function ExecutionSettings({ value, creationDesk, onChange, onDivergenceModeChan
       step={1}
       suffix="分钟"
       onChange={(next) => { onChange("backendRequestWaitTimeoutMs", next * 60_000); }}
+    />
+    <NumberSetting
+      label="讨论最长运行时间"
+      description="创作台 Agent 单次发送（检索 + 模型调用 + 工具）的墙钟上限；0 为无上限（默认），手动点停止即可中断"
+      value={creationDesk.discussMaxWallTimeMinutes}
+      min={0}
+      max={1440}
+      step={1}
+      suffix="分钟"
+      onChange={(next) => { onCreationDeskChange("discussMaxWallTimeMinutes", next); }}
+    />
+    <NumberSetting
+      label="讨论最长运行时间"
+      description="创作台 Agent 单次发送（检索 + 模型调用 + 工具）的墙钟上限；0 为无上限（默认），手动点停止即可中断"
+      value={creationDesk.discussMaxWallTimeMinutes}
+      min={0}
+      max={1440}
+      step={1}
+      suffix="分钟"
+      onChange={(next) => { onCreationDeskChange("discussMaxWallTimeMinutes", next); }}
     />
     <NumberSetting label="最长运行时间" description="墙钟时间上限，单位毫秒" value={value.maxWallTimeMs} min={1} max={7_200_000} step={1000} suffix="ms" onChange={(next) => { onChange("maxWallTimeMs", next); }} />
     <NumberSetting label="最大检索轮次" description="同一阶段允许模型补充读取资料的轮数" value={value.maxRetrievalRounds} min={1} max={10} onChange={(next) => { onChange("maxRetrievalRounds", next); }} />

@@ -51,6 +51,7 @@ import { WorkspaceTree } from "../features/workspace/WorkspaceTree.js"
 import { WorkspaceNameDialog } from "../features/workspace/WorkspaceNameDialog.js"
 import { AUTO_DESCRIPTION_RULE_PATH, canCreateFolderInDirectory, findDuplicateVolumeSequence, isValidVolumeFolderName, isChapterVolumeContainerPath, isVolumeDirectoryPath, resolveCreateDestination } from "../features/workspace/workspace-locks.js"
 import { EditorArea } from "../features/editor/EditorArea.js"
+import { ChapterBrowseDetailRail } from "../features/editor/ChapterBrowseDetailRail.js"
 import { SynopsisConversationComposer } from "../features/editor/SynopsisConversationComposer.js"
 import { useCreationDeskPresentationPreferences, reconcileSelectedRulePath } from "../features/editor/creation-desk-presentation-preferences.js"
 import { SettingsLineagePanel } from "../features/settings/SettingsLineagePanel.js"
@@ -58,6 +59,18 @@ import { ChapterWorkspaceRail } from "../features/editor/ChapterWorkspaceRail.js
 import type { RelatedChapterArtifact } from "../features/editor/ChapterArtifactRelatedRail.js"
 import { CreationDeskProgressReviewDialog } from "../features/editor/CreationDeskProgressReviewDialog.js"
 import { countPendingReviews } from "../features/editor/creation-desk-goals.js"
+import {
+  BATCH_CHAPTER_ONCE_USER_MESSAGE,
+  BATCH_CHAPTER_OUTLINE_FOLLOWUP,
+  BATCH_VOLUME_DRAFT_USER_MESSAGE,
+  BATCH_VOLUME_PLAN_USER_MESSAGE,
+  batchDeductionStatusLabel,
+  createIdleBatchStatus,
+  volumeChaptersHavePlans,
+  type BatchDeductionMode,
+  type BatchDeductionPhase,
+  type BatchDeductionStatus,
+} from "../features/editor/batch-chapter-deduction.js"
 import {
   isChapterBodyMarkdownPath,
   isChapterPlanningMarkdownPath,
@@ -67,6 +80,16 @@ import {
   resolveChapterMarkdownKind,
   resolveChapterSurfacePath,
 } from "../features/editor/synopsis-path.js"
+import { CreationDeskBatchControls } from "../features/editor/CreationDeskBatchControls.js"
+import {
+  BATCH_VOLUME_PLAN_DOC_PATH,
+  PUBLISHING_REVISION_STATUSES,
+  buildVolumeBatchProgress,
+  chaptersInVolume,
+  findFirstIncompleteVolume,
+  isVolumeOutlineReady,
+  volumeOutlinePath,
+} from "../features/editor/volume-batch-deduction.js"
 import { readPlanningFile } from "../features/editor/read-planning-file.js"
 import { shouldAutoEnsureChapterRevision } from "../features/editor/chapter-workspace-types.js"
 import { BackendWaitTimeoutDialog } from "../features/status/BackendWaitTimeoutDialog.js"
@@ -91,11 +114,16 @@ export function App(): React.JSX.Element {
   const [workspaceFilePaths, setWorkspaceFilePaths] = useState<readonly string[]>([])
   const [selectedPath, setSelectedPath] = useState<string>()
   const [lineageMode, setLineageMode] = useState(false)
+  const [browseChapters, setBrowseChapters] = useState(false)
+  const [browseChapterSequence, setBrowseChapterSequence] = useState<number>()
+  const [browseVolumeFolderName, setBrowseVolumeFolderName] = useState<string>()
+  const [batchStatus, setBatchStatus] = useState<BatchDeductionStatus>(() => createIdleBatchStatus())
   const [openedDocumentPath, setOpenedDocumentPath] = useState<string>()
   const [content, setContent] = useState("")
   const [chapterBody, setChapterBody] = useState("")
   const [savedContent, setSavedContent] = useState("")
   const [selectedChapter, setSelectedChapter] = useState<ChapterSummary>()
+  const [chapterSummaries, setChapterSummaries] = useState<readonly ChapterSummary[]>([])
   const [unpublishedDrafts, setUnpublishedDrafts] = useState<readonly ChapterRevisionReadResult[]>([])
   const [chapterRevision, setChapterRevision] = useState<ChapterRevision>()
   const [chapterRevisionContent, setChapterRevisionContent] = useState<string>()
@@ -114,9 +142,23 @@ export function App(): React.JSX.Element {
   const [pendingStagingPromotes, setPendingStagingPromotes] = useState<readonly SynopsisStagingPromoteProposal[]>([])
   const [synopsisStream, setSynopsisStream] = useState<SynopsisConversationStreamSnapshot>()
   const [synopsisUsage, setSynopsisUsage] = useState<SynopsisConversationStreamUsage>()
+  const synopsisStreamRef = useRef<SynopsisConversationStreamSnapshot | undefined>(undefined)
   const synopsisActiveRequestRef = useRef<string | null>(null)
   const synopsisStopDraftRef = useRef<string | null>(null)
   const synopsisSendInFlightRef = useRef(false)
+  const synopsisAutoContinueCountRef = useRef(0)
+  const [agentAutoChainActive, setAgentAutoChainActive] = useState(false)
+  const sendSynopsisMessageRef = useRef<((
+    message: string,
+    options?: Readonly<{ agentMode?: "auto" | "plan" | "accept_edits"; autoContinued?: boolean }>,
+  ) => Promise<boolean>) | undefined>(undefined)
+  const batchCancelRef = useRef(false)
+  const batchPauseRequestedRef = useRef(false)
+  const batchRunningRef = useRef(false)
+  const batchContextRef = useRef<Readonly<{
+    mode: BatchDeductionMode
+    volumeFolderName?: string
+  }>>({ mode: "volume_batch" })
   const discussHandoffWatchRef = useRef(0)
   const chapterDraftVersionRequestRef = useRef(0)
   const displayedRevisionRef = useRef<string | undefined>(undefined)
@@ -267,8 +309,8 @@ export function App(): React.JSX.Element {
     }
   }, [project])
 
-  const refreshWorkspace = useCallback(async (): Promise<void> => {
-    if (project === undefined) return
+  const refreshWorkspace = useCallback(async (): Promise<readonly string[]> => {
+    if (project === undefined) return []
     const [next, chapters, drafts] = await Promise.all([
       invokeBackend<WorkspaceReport>("workspace.list", { workspaceRootRef: project.workspaceRootRef }),
       invokeBackend<readonly ChapterSummary[]>("chapter.list", {
@@ -281,13 +323,18 @@ export function App(): React.JSX.Element {
       }),
     ])
     setUnpublishedDrafts(drafts)
+    setChapterSummaries(chapters)
     // Tree surfaces prefer body > outline > synopsis among same-chapter siblings.
     // Use on-disk files only — registered-but-missing publish paths must not hide
     // current 梗概/细纲 after titles were renamed (e.g. 第三章 秤与约 → 北地来的信使).
     const onDiskPaths = new Set(
       next.inventory.filter((entry) => entry.kind === "file").map((entry) => entry.path),
     )
-    setWorkspaceFilePaths([...onDiskPaths, ...drafts.flatMap((draft) => draft.publishPath === undefined ? [] : [draft.publishPath])])
+    const filePaths = [
+      ...onDiskPaths,
+      ...drafts.flatMap((draft) => draft.publishPath === undefined ? [] : [draft.publishPath]),
+    ]
+    setWorkspaceFilePaths(filePaths)
     const chapterFiles = [
       ...drafts.flatMap((draft) => draft.publishPath === undefined ? [] : [{ path: draft.publishPath, kind: "file" as const }]),
       ...next.inventory.filter((entry) => (
@@ -353,6 +400,7 @@ export function App(): React.JSX.Element {
     if (visibleIssues.length > 0) {
       setError(visibleIssues.map((issue) => `${issue.path}：${issue.message}`).join("\n"))
     }
+    return filePaths
   }, [project])
 
   useEffect(() => {
@@ -461,6 +509,70 @@ export function App(): React.JSX.Element {
     return [...listed, injected].sort((left, right) => left.sequence - right.sequence)
   }, [workspaceFilePaths, synopsisConversation.session])
 
+  const publishingSequences = useMemo(() => new Set(
+    unpublishedDrafts
+      .filter((draft) => PUBLISHING_REVISION_STATUSES.has(draft.status))
+      .map((draft) => draft.chapterSequence)
+      .filter((sequence): sequence is number => sequence !== undefined),
+  ), [unpublishedDrafts])
+
+  // Discuss Agent touching chapters (draft writes, publish/workflow tools, auto-continued chain).
+  const agentChapterActive = useMemo(() => {
+    if (batchStatus.running) return false
+    if (agentAutoChainActive) return true
+    if (!synopsisConversationBusy) return false
+    const stream = synopsisStream
+    if (stream === undefined) return false
+    return stream.toolRuns.some((run) => (
+      run.name === "publish_draft" || run.name === "chapter_workflow" || run.name === "restage_chapter"
+    )) || stream.editing.some((edit) => edit.kind === "draft")
+  }, [agentAutoChainActive, batchStatus.running, synopsisConversationBusy, synopsisStream])
+
+  const batchProgressRows = useMemo(() => {
+    const sessionVolume = discussFocusChapters
+      .find((chapter) => chapter.sequence === synopsisConversation.session?.chapterSequence)
+      ?.volumeFolderName
+    const volumeName = batchStatus.volumeFolderName
+      ?? (agentChapterActive ? sessionVolume : undefined)
+      ?? findFirstIncompleteVolume(discussFocusChapters)?.volumeFolderName
+    if (volumeName === undefined) return []
+    const volumeChapters = chaptersInVolume(discussFocusChapters, volumeName)
+    const draftSequences = new Set(
+      unpublishedDrafts
+        .filter((draft) => draft.proposedBody.trim().length > 0 && draft.status !== "completed")
+        .map((draft) => draft.chapterSequence)
+        .filter((sequence): sequence is number => sequence !== undefined),
+    )
+    return buildVolumeBatchProgress(volumeChapters, draftSequences, publishingSequences)
+  }, [
+    agentChapterActive,
+    batchStatus.volumeFolderName,
+    discussFocusChapters,
+    publishingSequences,
+    synopsisConversation.session?.chapterSequence,
+    unpublishedDrafts,
+  ])
+
+  // Keep chapter stages (draft → 图修订中 → 正文) live while the Agent works across chapters.
+  useEffect(() => {
+    if (!agentChapterActive && publishingSequences.size === 0) return
+    const timer = setInterval(() => { void refreshWorkspace().catch(() => undefined) }, 5_000)
+    return () => { clearInterval(timer) }
+  }, [agentChapterActive, publishingSequences.size, refreshWorkspace])
+
+  const agentChapterStatusLabel = useMemo(() => {
+    if (!agentChapterActive) return ""
+    const sequence = synopsisConversation.session?.chapterSequence
+    const publishing = [...publishingSequences].sort((left, right) => left - right)
+    if (publishing.length > 0) {
+      return `第${publishing.join("、")}章图修订中…`
+    }
+    if (synopsisConversationBusy) {
+      return sequence === undefined ? "Agent 推进中…" : `Agent 推进第${String(sequence)}章…`
+    }
+    return "等待自动续跑下一轮…"
+  }, [agentChapterActive, publishingSequences, synopsisConversation.session?.chapterSequence, synopsisConversationBusy])
+
   const loadHistoryGraph = useCallback(async (anchorIds: readonly string[]): Promise<void> => {
     if (project === undefined || anchorIds.length === 0) {
       setGraphSlice(undefined)
@@ -500,6 +612,9 @@ export function App(): React.JSX.Element {
 
   useEffect(() => { void refreshWorkspace() }, [refreshWorkspace])
   useEffect(() => { void refreshHistory() }, [refreshHistory])
+  useEffect(() => {
+    synopsisStreamRef.current = synopsisStream
+  }, [synopsisStream])
   useEffect(() => {
     if (project === undefined || selectedPath !== undefined) return
     void refreshSynopsisConversation()
@@ -589,36 +704,43 @@ export function App(): React.JSX.Element {
       projectId: project.projectId, workspaceRootRef: project.workspaceRootRef, revisionTaskId, includeChapterHistory: true,
     })
     chapterDraftVersionRequestRef.current += 1
+    const stayInBatch = batchRunningRef.current
     if (revision.isInitialPublication !== true || revision.status === "completed") {
       const current = await invokeBackend<ChapterSummary & { content: string; body: string }>("chapter.read", {
         projectId: project.projectId,
         workspaceRootRef: project.workspaceRootRef,
         chapterId: revision.chapterId,
       })
-      setSelectedPath(current.publishPath)
-      setOpenedDocumentPath(current.publishPath)
-      setSelectedChapter(current)
+      if (!stayInBatch) {
+        setSelectedPath(current.publishPath)
+        setOpenedDocumentPath(current.publishPath)
+        setSelectedChapter(current)
+        setContent(current.content)
+        setChapterBody(current.body)
+        setSavedContent(current.content)
+        void loadRelatedChapterArtifacts(current.publishPath)
+      }
       setChapterRevision(revision)
       setChapterRevisionContent(revision.proposedBody)
-      setContent(current.content)
-      setChapterBody(current.body)
-      setSavedContent(current.content)
       setChapterDraftVersions(drafts.versions)
-      void loadRelatedChapterArtifacts(current.publishPath)
       return
     }
-    setSelectedPath(revision.publishPath)
-    setOpenedDocumentPath(revision.publishPath)
-    setSelectedChapter(undefined)
+    if (!stayInBatch) {
+      setSelectedPath(revision.publishPath)
+      setOpenedDocumentPath(revision.publishPath)
+      setSelectedChapter(undefined)
+      setContent("")
+      setChapterBody("")
+      setSavedContent("")
+      setChapterSynopsis(undefined)
+      if (revision.publishPath !== undefined) void loadRelatedChapterArtifacts(revision.publishPath)
+    }
     setChapterRevision(revision)
     setChapterRevisionContent(revision.proposedBody)
-    setContent("")
-    setChapterBody("")
-    setSavedContent("")
-    setChapterSynopsis(undefined)
     setChapterDraftVersions(drafts.versions)
-    if (revision.publishPath !== undefined) void loadRelatedChapterArtifacts(revision.publishPath)
-    if (shouldMonitorChapterRevision(revision.graphSyncStatus)) void monitorChapterRevision(revisionTaskId)
+    if (!stayInBatch && shouldMonitorChapterRevision(revision.graphSyncStatus)) {
+      void monitorChapterRevision(revisionTaskId)
+    }
   }
 
   const openFile = async (path: string | undefined): Promise<void> => {
@@ -628,6 +750,8 @@ export function App(): React.JSX.Element {
     }
     // Highlight selection immediately; content fills in after IPC.
     setSelectedPath(path)
+    setBrowseChapters(false)
+    setBrowseChapterSequence(undefined)
     setLineageMode(false)
     setError(undefined)
     setRelatedChapterArtifacts([])
@@ -693,6 +817,23 @@ export function App(): React.JSX.Element {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
+  }
+
+  const openVolumeOutline = (volumeFolderName: string): void => {
+    if (project === undefined) return
+    const path = volumeOutlinePath(volumeFolderName)
+    void (async () => {
+      try {
+        await invokeBackend<{ content: string }>("workspace.read", {
+          projectId: project.projectId,
+          workspaceRootRef: project.workspaceRootRef,
+          relativePath: path,
+        })
+        await openFile(path)
+      } catch {
+        setError(`尚未找到卷大纲：${path}。可在创作台让 Agent 完善后写入该路径（文件名须与卷文件夹名一致）。`)
+      }
+    })()
   }
 
   const startChapterRevision = async (heading: string, body: string): Promise<ChapterRevision> => {
@@ -1090,7 +1231,7 @@ export function App(): React.JSX.Element {
         if (snapshot.result?.kind === "draft") {
           await refreshWorkspace()
           await openDraftWorkspace(snapshot.result.revisionTaskId)
-          setPostCommitNotice("流程推理工具已生成新草稿。")
+          setPostCommitNotice("正文推演工具已生成新草稿。")
           void refreshSynopsisConversation()
           return
         }
@@ -1140,19 +1281,35 @@ export function App(): React.JSX.Element {
 
   const sendSynopsisMessage = async (
     message: string,
-    options?: Readonly<{ focusLocked?: boolean; lockedChapterSequence?: number }>,
-  ): Promise<void> => {
+    options?: Readonly<{
+      focusLocked?: boolean
+      lockedChapterSequence?: number
+      automation?: "batch_chapter"
+      agentMode?: "auto" | "plan" | "accept_edits"
+      autoContinued?: boolean
+    }>,
+  ): Promise<boolean> => {
+    if (options?.autoContinued !== true) synopsisAutoContinueCountRef.current = 0
+    const trimmedChoice = message.trim()
+    if (options?.automation === undefined && /开始批量推演|批量推演本卷/u.test(trimmedChoice)) {
+      startBatchDeduction({ mode: "volume_batch" })
+      return true
+    }
+    if (options?.automation === undefined && /按章推演/u.test(trimmedChoice) && !/批量/u.test(trimmedChoice)) {
+      startChapterOnceDeduction()
+      return true
+    }
     if (project === undefined || activeModelProfile === undefined) {
       setError("模型配置尚未加载完成，请稍候再发送")
-      return
+      return false
     }
     if (!wordCountValid || parsedMinimumWordCount === undefined || parsedMaximumWordCount === undefined) {
       setError("请填写有效的正文字数范围（最少字数不能大于最多字数）")
-      return
+      return false
     }
     if (synopsisSendInFlightRef.current) {
       setError("上一轮回复仍在收尾，请稍候再发送")
-      return
+      return false
     }
     synopsisSendInFlightRef.current = true
     const optimisticId = crypto.randomUUID()
@@ -1177,6 +1334,8 @@ export function App(): React.JSX.Element {
       content: "",
       searching: [],
       editing: [],
+      toolRuns: [],
+      todos: [],
       updatedAtMs: Date.now(),
     })
     setError(undefined)
@@ -1275,6 +1434,8 @@ export function App(): React.JSX.Element {
         ...(options?.lockedChapterSequence === undefined
           ? {}
           : { lockedChapterSequence: options.lockedChapterSequence, lockedFocusKind: "chapter_body" as const }),
+        ...(options?.automation === undefined ? {} : { automation: options.automation }),
+        ...(options?.agentMode === undefined ? {} : { agentMode: options.agentMode }),
       }, {
         waitTimeoutMs: projectSettings?.execution.backendRequestWaitTimeoutMs
           ?? 600_000,
@@ -1282,6 +1443,11 @@ export function App(): React.JSX.Element {
           synopsisActiveRequestRef.current = requestId
         },
         onWaitTimeout: (info) => new Promise<"continue" | "abandon">((resolve) => {
+          // Auto runs unattended; the 停止 button remains the way to abandon it.
+          if (batchRunningRef.current || (options?.agentMode ?? "auto") === "auto") {
+            resolve("continue")
+            return
+          }
           setBackendWaitPrompt({ info, decide: resolve })
         }),
       })
@@ -1325,20 +1491,36 @@ export function App(): React.JSX.Element {
       setSynopsisStream(undefined)
       setSynopsisConversationBusy(false)
       void refreshWorkspace().catch(() => undefined)
+      // Process gate (e.g. previous chapter still publishing): keep going without asking the user.
+      // Runaway guard only; a multi-chapter Auto run legitimately needs dozens of continuations.
+      const willAutoContinue = sent.autoContinue !== undefined && synopsisAutoContinueCountRef.current < 40
+      setAgentAutoChainActive(willAutoContinue)
+      if (willAutoContinue && sent.autoContinue !== undefined) {
+        synopsisAutoContinueCountRef.current += 1
+        const continuation = sent.autoContinue.message
+        setTimeout(() => {
+          void sendSynopsisMessageRef.current?.(continuation, {
+            ...(options?.agentMode === undefined ? {} : { agentMode: options.agentMode }),
+            autoContinued: true,
+          })
+        }, 1_500)
+      }
+      return true
     } catch (cause) {
+      setAgentAutoChainActive(false)
       pollStopped = true
       setBackendWaitPrompt((current) => {
         current?.decide("continue")
         return undefined
       })
-      setSynopsisStream(undefined)
-      if (cause instanceof BackendRequestAbandonedError || isSynopsisSendCancelledError(cause)) {
-        setSynopsisConversation((current) => ({
-          ...current,
-          messages: current.messages.filter((entry) => entry.messageId !== optimisticId),
-        }))
-        setSynopsisDraftRestore({ text: message, token: Date.now() })
-        try {
+      const cancelled = cause instanceof BackendRequestAbandonedError || isSynopsisSendCancelledError(cause)
+      const errorLabel = cancelled
+        ? "用户停止对话"
+        : (cause instanceof Error ? cause.message : String(cause))
+      // Keep the latest turn visible: refresh from backend (partial assistant persisted)
+      // or fall back to freezing the last stream snapshot into messages.
+      try {
+        if (cancelled) {
           const discarded = await invokeBackend<SynopsisConversationListResult>(
             "synopsis.conversation.discardLastUserTurn",
             {
@@ -1350,20 +1532,42 @@ export function App(): React.JSX.Element {
             },
           )
           setSynopsisConversation(discarded)
-        } catch {
-          // Best-effort context rollback; draft is already restored locally.
+        } else {
+          const listed = await invokeBackend<SynopsisConversationListResult>(
+            "synopsis.conversation.list",
+            {
+              projectId: project.projectId,
+              workspaceRootRef: project.workspaceRootRef,
+            },
+          )
+          setSynopsisConversation(listed)
         }
-        return
+      } catch {
+        const frozen = freezeInterruptedSynopsisStream({
+          stream: synopsisStreamRef.current,
+          optimisticUser: optimisticMessage,
+          sessionId: synopsisConversation.session?.sessionId ?? optimisticMessage.sessionId,
+          projectId: project.projectId,
+          errorLabel,
+        })
+        if (frozen !== undefined) {
+          setSynopsisConversation((current) => ({
+            ...current,
+            messages: mergeInterruptedConversationMessages(current.messages, frozen),
+          }))
+        }
       }
-      setSynopsisConversation((current) => ({
-        ...current,
-        messages: current.messages.filter((entry) => entry.messageId !== optimisticId),
-      }))
+      setSynopsisStream(undefined)
+      if (cancelled) {
+        setSynopsisDraftRestore({ text: message, token: Date.now() })
+        return false
+      }
       if (isSynopsisBudgetError(cause)) {
         setSynopsisBudgetWarning(parseSynopsisBudgetError(cause))
-        return
+        return false
       }
-      setError(cause instanceof Error ? cause.message : String(cause))
+      setError(errorLabel)
+      return false
     } finally {
       pollStopped = true
       synopsisSendInFlightRef.current = false
@@ -1377,11 +1581,15 @@ export function App(): React.JSX.Element {
       void pollTask.catch(() => undefined)
     }
   }
+  sendSynopsisMessageRef.current = sendSynopsisMessage
 
   const stopSynopsisMessage = async (): Promise<void> => {
+    synopsisAutoContinueCountRef.current = Number.POSITIVE_INFINITY
+    setAgentAutoChainActive(false)
     if (project === undefined || !synopsisConversationBusy) return
     const requestId = synopsisActiveRequestRef.current
     const draftText = synopsisStopDraftRef.current
+    const streamSnapshot = synopsisStreamRef.current
     setError(undefined)
     setBackendWaitPrompt((current) => {
       current?.decide("abandon")
@@ -1400,7 +1608,19 @@ export function App(): React.JSX.Element {
       )
       setSynopsisConversation(discarded)
     } catch {
-      // discard is best-effort; abandon below still unblocks the UI.
+      const frozen = freezeInterruptedSynopsisStream({
+        stream: streamSnapshot,
+        optimisticUser: undefined,
+        sessionId: synopsisConversation.session?.sessionId ?? crypto.randomUUID(),
+        projectId: project.projectId,
+        errorLabel: "用户停止对话",
+      })
+      if (frozen !== undefined) {
+        setSynopsisConversation((current) => ({
+          ...current,
+          messages: mergeInterruptedConversationMessages(current.messages, frozen),
+        }))
+      }
     }
     if (requestId !== null) {
       await abandonBackendRequest(requestId).catch(() => undefined)
@@ -1595,6 +1815,602 @@ export function App(): React.JSX.Element {
         ? { status: "failed", error: { message: cause instanceof Error ? cause.message : String(cause) } }
         : { ...current, error: { message: cause instanceof Error ? cause.message : String(cause) } })
     }
+  }
+
+  const updateBatchStatus = (phase: BatchDeductionPhase, chapterSequence?: number): void => {
+    const { mode, volumeFolderName } = batchContextRef.current
+    setBatchStatus({
+      running: phase !== "idle" && phase !== "stopped",
+      phase,
+      mode,
+      ...(volumeFolderName === undefined ? {} : { volumeFolderName }),
+      ...(chapterSequence === undefined ? {} : { chapterSequence }),
+      label: batchDeductionStatusLabel(phase, chapterSequence, volumeFolderName),
+    })
+  }
+
+  const pauseBatch = (chapterSequence: number, reason: string): void => {
+    updateBatchStatus("paused", chapterSequence)
+    if (reason !== "用户暂停") {
+      setError(`批量推演已暂停（第 ${String(chapterSequence)} 章）：${reason}`)
+    }
+  }
+
+  const shouldAbortBatch = (sequence: number): "cancelled" | "paused" | undefined => {
+    if (batchCancelRef.current) return "cancelled"
+    if (batchPauseRequestedRef.current) {
+      pauseBatch(sequence, "用户暂停")
+      return "paused"
+    }
+    return undefined
+  }
+
+  const awaitBatchRevisionPublished = async (
+    revisionTaskId: string,
+  ): Promise<"completed" | "failed" | "cancelled"> => {
+    if (project === undefined) return "failed"
+    for (let attempt = 0; attempt < 1_200; attempt += 1) {
+      if (batchCancelRef.current) return "cancelled"
+      const current = await invokeBackend<ChapterRevisionReadResult>("chapter.readRevision", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        revisionTaskId,
+      })
+      setChapterRevision(current)
+      setChapterRevisionContent(current.proposedBody)
+      if (current.graphSyncStatus === "completed") {
+        await refreshWorkspace()
+        return "completed"
+      }
+      if (current.graphSyncStatus === "failed") return "failed"
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+    }
+    return "failed"
+  }
+
+  const runBatchDraftTurn = async (
+    sessionId: string | undefined,
+    chapterSequence: number,
+  ): Promise<"completed" | "blocked" | "failed" | "cancelled"> => {
+    if (project === undefined || activeModelProfile === undefined) return "failed"
+    if (!wordCountValid || parsedMinimumWordCount === undefined || parsedMaximumWordCount === undefined) {
+      return "failed"
+    }
+    try {
+      await setDiscussFocus(chapterSequence, "plot_synopsis")
+      const model = {
+        baseUrl: activeModelProfile.baseUrl,
+        model: activeModelProfile.model,
+        credentialRef: activeModelProfile.credentialRef,
+        apiProtocol: activeModelProfile.apiProtocol,
+        contextWindowTokens: activeModelProfile.contextWindowTokens,
+        thinkingModeEnabled: activeModelProfile.thinkingModeEnabled,
+        reasoningEffort: activeModelProfile.reasoningEffort,
+        jsonModeEnabled: activeModelProfile.jsonModeEnabled,
+        disableResponseStorage: activeModelProfile.disableResponseStorage,
+        serviceTier: activeModelProfile.serviceTier,
+      }
+      const presentation = {
+        ...(descriptionRule.length === 0 ? {} : { descriptionRulePath: descriptionRule }),
+        ...(proseRule.length === 0 ? {} : { proseStyleRulePath: proseRule }),
+        minimumWordCount: parsedMinimumWordCount,
+        maximumWordCount: parsedMaximumWordCount,
+      }
+      const started = await invokeBackend<{ taskId: string }>("synopsis.conversation.beginTurn", {
+        projectId: project.projectId,
+        workspaceRootRef: project.workspaceRootRef,
+        acknowledgeWarnings: true,
+        ...(sessionId === undefined ? {} : { sessionId }),
+        presentation,
+        chapterIntent: { boundaryPace, causalityFocus },
+        model,
+      })
+      setTask({ handle: { taskId: started.taskId, status: "running" }, status: "running" })
+      for (;;) {
+        if (batchCancelRef.current) return "cancelled"
+        const snapshot = await invokeBackend<TaskSnapshot>("turn.status", { taskId: started.taskId })
+        setTask(snapshot)
+        if (snapshot.status === "completed") {
+          await refreshWorkspace()
+          return "completed"
+        }
+        if (snapshot.status === "awaiting_user_decision" || snapshot.status === "waiting_for_review") {
+          return "blocked"
+        }
+        if (snapshot.status === "failed" || snapshot.status === "cancelled" || snapshot.status === "paused") {
+          return "failed"
+        }
+        await new Promise((resolve) => setTimeout(resolve, 350))
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      return "failed"
+    }
+  }
+
+  /** When正文推演 is enabled: produce drafts for all listed chapters before any graph publish. */
+  const runBatchMultiChapterDrafts = async (
+    sequences: readonly number[],
+    sessionId: string | undefined,
+  ): Promise<"completed" | "blocked" | "failed" | "cancelled"> => {
+    for (const chapterSequence of sequences) {
+      if (shouldAbortBatch(chapterSequence) !== undefined) {
+        return batchCancelRef.current ? "cancelled" : "failed"
+      }
+      updateBatchStatus("draft", chapterSequence)
+      const drafts = await invokeBackend<readonly ChapterRevisionReadResult[]>("chapter.draft.list", {
+        projectId: project!.projectId,
+        workspaceRootRef: project!.workspaceRootRef,
+      })
+      const existing = drafts.find((item) => (
+        item.chapterSequence === chapterSequence
+        && item.status !== "completed"
+        && item.proposedBody.trim().length > 0
+      ))
+      if (existing !== undefined) continue
+      const outcome = await runBatchDraftTurn(sessionId, chapterSequence)
+      if (outcome !== "completed") return outcome
+    }
+    return "completed"
+  }
+
+  const stopBatchDeduction = (): void => {
+    batchPauseRequestedRef.current = false
+    batchCancelRef.current = true
+    if (!batchRunningRef.current) {
+      updateBatchStatus("stopped", batchStatus.chapterSequence)
+      return
+    }
+    updateBatchStatus("stopped", batchStatus.chapterSequence)
+  }
+
+  const pauseBatchDeduction = (): void => {
+    if (!batchRunningRef.current) return
+    batchPauseRequestedRef.current = true
+  }
+
+  const startBatchDeduction = (options?: Readonly<{
+    mode?: BatchDeductionMode
+    resumeSequence?: number
+    volumeFolderName?: string
+    skipOutlineGate?: boolean
+  }>): void => {
+    if (project === undefined || batchRunningRef.current) return
+    if (activeModelProfile === undefined) {
+      setError("模型配置尚未加载完成，请稍候再开始推演")
+      return
+    }
+    if (!wordCountValid) {
+      setError("请填写有效的正文字数范围后再开始推演")
+      return
+    }
+    const mode = options?.mode ?? "volume_batch"
+    void (async () => {
+      const paths = await refreshWorkspace()
+      const allChapters = listDiscussFocusChapters(paths)
+      let volumeFolderName = options?.volumeFolderName
+      let volumeChapters = volumeFolderName === undefined
+        ? undefined
+        : chaptersInVolume(allChapters, volumeFolderName)
+      if (mode === "volume_batch") {
+        if (volumeChapters === undefined || volumeChapters.length === 0) {
+          const incomplete = findFirstIncompleteVolume(allChapters)
+          if (incomplete === undefined) {
+            setError("所有卷的章节正文均已完成，无需批量推演")
+            return
+          }
+          volumeFolderName = incomplete.volumeFolderName
+          volumeChapters = incomplete.chapters
+        }
+        if (options?.skipOutlineGate !== true) {
+          const outlineFile = volumeOutlinePath(volumeFolderName)
+          let outlineMarkdown = ""
+          try {
+            const read = await invokeBackend<{ content: string }>("workspace.read", {
+              projectId: project.projectId,
+              workspaceRootRef: project.workspaceRootRef,
+              relativePath: outlineFile,
+            })
+            outlineMarkdown = read.content
+          } catch {
+            outlineMarkdown = ""
+          }
+          if (!isVolumeOutlineReady(outlineMarkdown)) {
+            setError(`批量推演前请先完善卷大纲（至少含两章节点）：${outlineFile}`)
+            setBrowseChapters(false)
+            void sendSynopsisMessage([
+              "请先完善本卷大纲，再决定「开始批量推演」或「按章推演」。",
+              `目标路径：\`${outlineFile}\`（文件名须与章节正文下卷文件夹名完全一致）。`,
+              `规则说明见：\`${BATCH_VOLUME_PLAN_DOC_PATH}\``,
+              "用户可只给一句话或一段素材；请主动补齐卷大纲并写入上述路径，合格后在回复中给出互斥 choices：「开始批量推演」与「按章推演」。",
+            ].join("\n"))
+            return
+          }
+        }
+      }
+
+      const sequences = mode === "chapter_once"
+        ? [options?.resumeSequence ?? synopsisConversation.session?.chapterSequence ?? 1]
+        : (volumeChapters ?? allChapters).map((item) => item.sequence).sort((a, b) => a - b)
+      if (sequences.length === 0) {
+        setError("没有可推演的章节")
+        return
+      }
+      let sequence = options?.resumeSequence ?? sequences[0] ?? 1
+      if (!sequences.includes(sequence)) sequence = sequences[0] ?? 1
+
+      batchContextRef.current = {
+        mode,
+        ...(volumeFolderName === undefined ? {} : { volumeFolderName }),
+      }
+      batchCancelRef.current = false
+      batchPauseRequestedRef.current = false
+      batchRunningRef.current = true
+      setError(undefined)
+      setSelectedPath(undefined)
+      setBrowseChapters(true)
+      setBrowseVolumeFolderName(volumeFolderName)
+      setLineageMode(false)
+      let lastSequence = sequence
+      const chapterWorkflowEnabled = projectSettings?.creationDesk.chapterWorkflowEnabled === true
+
+      try {
+        if (mode === "volume_batch") {
+          setBrowseChapterSequence(sequence)
+          updateBatchStatus("focus", sequence)
+          try {
+            await setDiscussFocus(sequence, "plot_synopsis")
+          } catch (cause) {
+            pauseBatch(sequence, cause instanceof Error ? cause.message : String(cause))
+            return
+          }
+          let nextPaths = await refreshWorkspace()
+          let volumeChapterRows = chaptersInVolume(
+            listDiscussFocusChapters(nextPaths),
+            volumeFolderName ?? "",
+          )
+          if (!volumeChaptersHavePlans(volumeChapterRows)) {
+            updateBatchStatus("volume_plan", sequence)
+            const planned = await sendSynopsisMessage(BATCH_VOLUME_PLAN_USER_MESSAGE, {
+              automation: "batch_chapter",
+            })
+            if (!planned) {
+              pauseBatch(sequence, "卷规划讨论失败或被中断")
+              return
+            }
+            if (shouldAbortBatch(sequence) !== undefined) {
+              if (batchCancelRef.current) updateBatchStatus("stopped", sequence)
+              return
+            }
+            nextPaths = await refreshWorkspace()
+            volumeChapterRows = chaptersInVolume(
+              listDiscussFocusChapters(nextPaths),
+              volumeFolderName ?? "",
+            )
+            if (!volumeChaptersHavePlans(volumeChapterRows)) {
+              pauseBatch(sequence, "卷规划未写齐各章梗概与细纲（需 volumeChapterPlans）")
+              return
+            }
+          }
+
+          const publishSequences = volumeChapterRows
+            .filter((item) => item.bodyPath === undefined)
+            .map((item) => item.sequence)
+            .sort((left, right) => left - right)
+          if (publishSequences.length === 0) {
+            updateBatchStatus("stopped", sequence)
+            return
+          }
+
+          const listed = await invokeBackend<SynopsisConversationListResult>("synopsis.conversation.list", {
+            projectId: project.projectId,
+            workspaceRootRef: project.workspaceRootRef,
+          })
+          setSynopsisConversation(listed)
+          if (listed.usage !== undefined) setSynopsisUsage(listed.usage)
+          const sessionId = listed.session?.sessionId
+
+          let drafts = await invokeBackend<readonly ChapterRevisionReadResult[]>("chapter.draft.list", {
+            projectId: project.projectId,
+            workspaceRootRef: project.workspaceRootRef,
+          })
+          const missingDraftSequences = publishSequences.filter((chapterSequence) => (
+            !drafts.some((item) => (
+              item.chapterSequence === chapterSequence
+              && item.status !== "completed"
+              && item.proposedBody.trim().length > 0
+            ))
+          ))
+          if (missingDraftSequences.length > 0) {
+            updateBatchStatus("draft", missingDraftSequences[0])
+            if (chapterWorkflowEnabled) {
+              const draftOutcome = await runBatchMultiChapterDrafts(missingDraftSequences, sessionId)
+              if (draftOutcome === "cancelled") {
+                updateBatchStatus("stopped", lastSequence)
+                return
+              }
+              if (draftOutcome === "blocked") {
+                pauseBatch(missingDraftSequences[0]!, "草稿推演需要人工决策")
+                return
+              }
+              if (draftOutcome === "failed") {
+                pauseBatch(missingDraftSequences[0]!, "多章正文推演失败")
+                return
+              }
+            } else {
+              const drafted = await sendSynopsisMessage(BATCH_VOLUME_DRAFT_USER_MESSAGE, {
+                automation: "batch_chapter",
+              })
+              if (!drafted) {
+                pauseBatch(missingDraftSequences[0]!, "正文草稿讨论失败或被中断")
+                return
+              }
+            }
+            drafts = await invokeBackend<readonly ChapterRevisionReadResult[]>("chapter.draft.list", {
+              projectId: project.projectId,
+              workspaceRootRef: project.workspaceRootRef,
+            })
+          }
+
+          for (const chapterSequence of publishSequences) {
+            lastSequence = chapterSequence
+            if (shouldAbortBatch(chapterSequence) !== undefined) {
+              if (batchCancelRef.current) updateBatchStatus("stopped", chapterSequence)
+              return
+            }
+            setBrowseChapterSequence(chapterSequence)
+            const draft = drafts.find((item) => (
+              item.chapterSequence === chapterSequence
+              && item.status !== "completed"
+              && item.proposedBody.trim().length > 0
+            ))
+            if (draft === undefined) {
+              if (chapterWorkflowEnabled) {
+                const retry = await runBatchMultiChapterDrafts([chapterSequence], sessionId)
+                if (retry !== "completed") {
+                  pauseBatch(chapterSequence, retry === "blocked" ? "草稿推演需要人工决策" : "未找到可发布的草稿")
+                  return
+                }
+                drafts = await invokeBackend<readonly ChapterRevisionReadResult[]>("chapter.draft.list", {
+                  projectId: project.projectId,
+                  workspaceRootRef: project.workspaceRootRef,
+                })
+              }
+            }
+            const publishDraft = (await invokeBackend<readonly ChapterRevisionReadResult[]>("chapter.draft.list", {
+              projectId: project.projectId,
+              workspaceRootRef: project.workspaceRootRef,
+            })).find((item) => (
+              item.chapterSequence === chapterSequence
+              && item.status !== "completed"
+              && item.proposedBody.trim().length > 0
+            ))
+            if (publishDraft === undefined) {
+              pauseBatch(chapterSequence, "未找到可发布的草稿")
+              return
+            }
+            updateBatchStatus("publish", chapterSequence)
+            try {
+              const submitted = await invokeBackend<ChapterRevision>("chapter.submitRevision", {
+                projectId: project.projectId,
+                workspaceRootRef: project.workspaceRootRef,
+                revisionTaskId: publishDraft.revisionTaskId,
+                mode: "direct",
+                forced: true,
+                ...(activeModelProfile === undefined ? {} : { model: modelSelection(activeModelProfile) }),
+              })
+              setChapterRevision(submitted)
+              if (submitted.graphSyncStatus !== "completed") {
+                const publishOutcome = await awaitBatchRevisionPublished(submitted.revisionTaskId)
+                if (publishOutcome === "cancelled") {
+                  updateBatchStatus("stopped", chapterSequence)
+                  return
+                }
+                if (publishOutcome !== "completed") {
+                  pauseBatch(chapterSequence, "正文图修订失败")
+                  return
+                }
+              } else {
+                await refreshWorkspace()
+              }
+            } catch (cause) {
+              pauseBatch(chapterSequence, cause instanceof Error ? cause.message : String(cause))
+              return
+            }
+            const afterPaths = await refreshWorkspace()
+            const published = listDiscussFocusChapters(afterPaths).find((item) => item.sequence === chapterSequence)
+            if (published?.bodyPath === undefined) {
+              pauseBatch(chapterSequence, "正文尚未落盘，无法继续下一章")
+              return
+            }
+          }
+          updateBatchStatus("stopped", lastSequence)
+          return
+        }
+
+        // chapter_once: single-chapter discuss plan + draft (no default beginTurn)
+        for (;;) {
+          lastSequence = sequence
+          const abort = shouldAbortBatch(sequence)
+          if (abort === "cancelled") {
+            updateBatchStatus("stopped", sequence)
+            return
+          }
+          if (abort === "paused") return
+
+          setBrowseChapterSequence(sequence)
+          updateBatchStatus("focus", sequence)
+          try {
+            await setDiscussFocus(sequence, "plot_synopsis")
+          } catch (cause) {
+            pauseBatch(sequence, cause instanceof Error ? cause.message : String(cause))
+            return
+          }
+          if (shouldAbortBatch(sequence) !== undefined) {
+            if (batchCancelRef.current) updateBatchStatus("stopped", sequence)
+            return
+          }
+          const listed = await invokeBackend<SynopsisConversationListResult>("synopsis.conversation.list", {
+            projectId: project.projectId,
+            workspaceRootRef: project.workspaceRootRef,
+          })
+          setSynopsisConversation(listed)
+          if (listed.usage !== undefined) setSynopsisUsage(listed.usage)
+          const sessionId = listed.session?.sessionId
+
+          let nextPaths = await refreshWorkspace()
+          let chapter = listDiscussFocusChapters(nextPaths).find((item) => item.sequence === sequence)
+          if (chapter?.bodyPath === undefined) {
+            updateBatchStatus("synopsis", sequence)
+            const planned = await sendSynopsisMessage(BATCH_CHAPTER_ONCE_USER_MESSAGE, {
+              automation: "batch_chapter",
+            })
+            if (!planned) {
+              pauseBatch(sequence, "梗概讨论失败或被中断")
+              return
+            }
+            if (shouldAbortBatch(sequence) !== undefined) {
+              if (batchCancelRef.current) updateBatchStatus("stopped", sequence)
+              return
+            }
+            nextPaths = await refreshWorkspace()
+            chapter = listDiscussFocusChapters(nextPaths).find((item) => item.sequence === sequence)
+            if (chapter?.outlinePath === undefined) {
+              updateBatchStatus("outline", sequence)
+              const outlined = await sendSynopsisMessage(BATCH_CHAPTER_OUTLINE_FOLLOWUP, {
+                automation: "batch_chapter",
+              })
+              if (!outlined) {
+                pauseBatch(sequence, "细纲讨论失败或被中断")
+                return
+              }
+              nextPaths = await refreshWorkspace()
+              chapter = listDiscussFocusChapters(nextPaths).find((item) => item.sequence === sequence)
+            }
+          }
+
+          if (shouldAbortBatch(sequence) !== undefined) {
+            if (batchCancelRef.current) updateBatchStatus("stopped", sequence)
+            return
+          }
+          nextPaths = await refreshWorkspace()
+          chapter = listDiscussFocusChapters(nextPaths).find((item) => item.sequence === sequence)
+          if (chapter?.bodyPath !== undefined) {
+            updateBatchStatus("stopped", sequence)
+            return
+          }
+
+          let drafts = await invokeBackend<readonly ChapterRevisionReadResult[]>("chapter.draft.list", {
+            projectId: project.projectId,
+            workspaceRootRef: project.workspaceRootRef,
+          })
+          let draft = drafts.find((item) => (
+            item.chapterSequence === sequence
+            && item.status !== "completed"
+            && item.proposedBody.trim().length > 0
+          ))
+          if (draft === undefined) {
+            updateBatchStatus("draft", sequence)
+            if (chapterWorkflowEnabled) {
+              const draftOutcome = await runBatchDraftTurn(sessionId, sequence)
+              if (draftOutcome === "cancelled") {
+                updateBatchStatus("stopped", sequence)
+                return
+              }
+              if (draftOutcome === "blocked") {
+                pauseBatch(sequence, "草稿推演需要人工决策")
+                return
+              }
+              if (draftOutcome === "failed") {
+                pauseBatch(sequence, "草稿推演失败")
+                return
+              }
+            } else {
+              const drafted = await sendSynopsisMessage(
+                "【按章推演·正文草稿】请用 chapterDraftProposal 写出本章完整正文草稿；不要 publish_draft；不要优先 chapter_workflow。",
+                { automation: "batch_chapter" },
+              )
+              if (!drafted) {
+                pauseBatch(sequence, "正文草稿讨论失败或被中断")
+                return
+              }
+            }
+            drafts = await invokeBackend<readonly ChapterRevisionReadResult[]>("chapter.draft.list", {
+              projectId: project.projectId,
+              workspaceRootRef: project.workspaceRootRef,
+            })
+            draft = drafts.find((item) => (
+              item.chapterSequence === sequence
+              && item.status !== "completed"
+              && item.proposedBody.trim().length > 0
+            ))
+          }
+          if (draft === undefined) {
+            pauseBatch(sequence, "未找到可发布的草稿")
+            return
+          }
+
+          if (shouldAbortBatch(sequence) !== undefined) {
+            if (batchCancelRef.current) updateBatchStatus("stopped", sequence)
+            return
+          }
+          updateBatchStatus("publish", sequence)
+          try {
+            const submitted = await invokeBackend<ChapterRevision>("chapter.submitRevision", {
+              projectId: project.projectId,
+              workspaceRootRef: project.workspaceRootRef,
+              revisionTaskId: draft.revisionTaskId,
+              mode: "direct",
+              forced: true,
+              ...(activeModelProfile === undefined ? {} : { model: modelSelection(activeModelProfile) }),
+            })
+            setChapterRevision(submitted)
+            if (submitted.graphSyncStatus !== "completed") {
+              const publishOutcome = await awaitBatchRevisionPublished(submitted.revisionTaskId)
+              if (publishOutcome === "cancelled") {
+                updateBatchStatus("stopped", sequence)
+                return
+              }
+              if (publishOutcome !== "completed") {
+                pauseBatch(sequence, "正文图修订失败")
+                return
+              }
+            } else {
+              await refreshWorkspace()
+            }
+          } catch (cause) {
+            pauseBatch(sequence, cause instanceof Error ? cause.message : String(cause))
+            return
+          }
+          updateBatchStatus("stopped", sequence)
+          return
+        }
+      } finally {
+        batchRunningRef.current = false
+        if (batchCancelRef.current) {
+          updateBatchStatus("stopped", lastSequence)
+        }
+      }
+    })()
+  }
+
+  const continueBatchDeduction = (): void => {
+    if (batchStatus.phase !== "paused" || batchStatus.chapterSequence === undefined) return
+    startBatchDeduction({
+      mode: batchStatus.mode ?? "volume_batch",
+      resumeSequence: batchStatus.chapterSequence,
+      ...(batchStatus.volumeFolderName === undefined ? {} : { volumeFolderName: batchStatus.volumeFolderName }),
+      skipOutlineGate: true,
+    })
+  }
+
+  const startChapterOnceDeduction = (): void => {
+    startBatchDeduction({
+      mode: "chapter_once",
+      resumeSequence: synopsisConversation.session?.chapterSequence
+        ?? browseChapterSequence
+        ?? 1,
+    })
   }
 
   const resumeTask = async (mode: "continue" | "retry_phase"): Promise<void> => {
@@ -1892,17 +2708,33 @@ export function App(): React.JSX.Element {
 
   const openWorkspaceHome = (): void => {
     setSelectedPath(undefined)
+    setBrowseChapters(false)
+    setBrowseChapterSequence(undefined)
+    setBrowseVolumeFolderName(undefined)
     setLineageMode(false)
+  }
+
+  const openChapterPanel = (): void => {
+    setSelectedPath(undefined)
+    setBrowseChapters(true)
+    setLineageMode(false)
+    setError(undefined)
   }
 
   const openSettingsLineage = (): void => {
     setLineageMode(true)
+    setBrowseChapters(false)
+    setBrowseChapterSequence(undefined)
+    setBrowseVolumeFolderName(undefined)
     setSelectedPath(undefined)
     setError(undefined)
   }
 
   const reopenOpenedDocument = (): void => {
     if (openedDocumentPath === undefined) return
+    setBrowseChapters(false)
+    setBrowseChapterSequence(undefined)
+    setBrowseVolumeFolderName(undefined)
     setLineageMode(false)
     setSelectedPath(openedDocumentPath)
   }
@@ -1946,10 +2778,21 @@ export function App(): React.JSX.Element {
     ? undefined
     : resolveChapterMarkdownKind(selectedPath)
   const showChapterConversation = selectedPath?.startsWith("章节正文/") === true
+  const browseChapter = browseChapters && browseChapterSequence !== undefined
+    ? discussFocusChapters.find((item) => item.sequence === browseChapterSequence)
+    : undefined
+  const browseVolume = browseChapters && browseVolumeFolderName !== undefined
+    ? {
+      folderName: browseVolumeFolderName,
+      chapters: discussFocusChapters.filter((item) => item.volumeFolderName === browseVolumeFolderName),
+    }
+    : undefined
   const showRightPanel = !lineageMode && (
     selectedPath === undefined
     || showChapterConversation
+    || browseChapters
   )
+  const rightPanelChapterMode = showChapterConversation || browseChapters
   const relatedSynopsis = relatedChapterArtifacts.find((item) => item.kind === "plot_synopsis")
   const relatedOutline = relatedChapterArtifacts.find((item) => item.kind === "plot_outline")
   const railSynopsisMarkdown = selectedChapterKind === "plot_synopsis"
@@ -2118,6 +2961,49 @@ export function App(): React.JSX.Element {
           workspaceRootRef={project.workspaceRootRef}
           selectedPath={selectedPath}
           openedDocumentPath={openedDocumentPath}
+          browseChapters={browseChapters}
+          onBrowseChapters={openChapterPanel}
+          {...(browseChapterSequence === undefined ? {} : { browseChapterSequence })}
+          {...(browseVolumeFolderName === undefined ? {} : { browseVolumeFolderName })}
+          onSelectBrowseChapter={(chapter) => {
+            setBrowseChapterSequence(chapter.sequence)
+            setBrowseVolumeFolderName(undefined)
+          }}
+          onSelectBrowseVolume={(volumeFolderName) => {
+            setBrowseVolumeFolderName(volumeFolderName)
+            setBrowseChapterSequence(undefined)
+          }}
+          batchRunning={batchStatus.running}
+          batchPaused={batchStatus.phase === "paused"}
+          batchStatusLabel={batchStatus.label}
+          batchPhase={batchStatus.phase}
+          {...(batchStatus.chapterSequence === undefined ? {} : { batchChapterSequence: batchStatus.chapterSequence })}
+          onStartBatch={() => { startBatchDeduction({ mode: "volume_batch" }) }}
+          onStopBatch={stopBatchDeduction}
+          onPauseBatch={pauseBatchDeduction}
+          onContinueBatch={continueBatchDeduction}
+          onOpenVolumeOutline={openVolumeOutline}
+          batchPanel={<CreationDeskBatchControls
+            batchStatus={batchStatus}
+            progressRows={batchProgressRows}
+            agentActive={agentChapterActive || publishingSequences.size > 0}
+            {...(synopsisConversation.session?.chapterSequence === undefined
+              ? {}
+              : { agentChapterSequence: synopsisConversation.session.chapterSequence })}
+            agentStatusLabel={agentChapterStatusLabel || (publishingSequences.size > 0 ? "图修订进行中…" : "")}
+            onStopAgent={() => { void stopSynopsisMessage() }}
+            onPause={pauseBatchDeduction}
+            onContinue={continueBatchDeduction}
+            onStop={stopBatchDeduction}
+            onSelectChapter={(sequence) => {
+              setBrowseChapters(true)
+              setBrowseChapterSequence(sequence)
+              setBrowseVolumeFolderName(undefined)
+              void setDiscussFocus(sequence, "plot_synopsis")
+            }}
+          />}
+          chapterSummaries={chapterSummaries}
+          unpublishedDrafts={unpublishedDrafts}
           content={content}
           dirty={dirty}
           readOnly={readOnly}
@@ -2176,7 +3062,9 @@ export function App(): React.JSX.Element {
               : { contextWindowTokens: activeModelProfile.contextWindowTokens }),
           }}
           pendingStagingPromotes={pendingStagingPromotes}
-          onSynopsisSend={sendSynopsisMessage}
+          onSynopsisSend={async (message, options) => {
+            await sendSynopsisMessage(message, options)
+          }}
           onSynopsisStop={stopSynopsisMessage}
           onSynopsisRefreshChoices={refreshSynopsisChoices}
           onPromoteStaging={promoteStaging}
@@ -2186,6 +3074,8 @@ export function App(): React.JSX.Element {
           onSetFocus={(sequence, focusKind) => { void setDiscussFocus(sequence, focusKind); }}
           focusChapters={discussFocusChapters}
           onOpenSettingsLineage={openSettingsLineage}
+          requireCompleteHookSchedules={projectSettings?.creationDesk.requireCompleteHookSchedules !== false}
+          chapterWorkflowEnabled={projectSettings?.creationDesk.chapterWorkflowEnabled === true}
         />}
       </Panel>
       {showRightPanel
@@ -2193,8 +3083,16 @@ export function App(): React.JSX.Element {
       <PanelResizeHandle className="resize-handle"><PanelRightClose size={12} /></PanelResizeHandle>
             <Panel defaultSize={25} minSize={20} maxSize={38} collapsible className="workbench-right-panel">
               <RightPanelViewport
-                chapterMode={showChapterConversation}
-                chapterPanel={<ChapterWorkspaceRail
+                chapterMode={rightPanelChapterMode}
+                chapterPanel={browseChapters
+                  ? <ChapterBrowseDetailRail
+                      projectId={project.projectId}
+                      workspaceRootRef={project.workspaceRootRef}
+                      chapter={browseChapter}
+                      {...(browseVolume === undefined ? {} : { volume: browseVolume })}
+                      onOpenBody={(path) => { void openFile(path) }}
+                    />
+                  : <ChapterWorkspaceRail
                       key={selectedPath}
                       conversation={<SynopsisConversationComposer
                         layout="rail"
@@ -2210,7 +3108,7 @@ export function App(): React.JSX.Element {
                         {...(pendingStagingPromotes.length === 0
                           ? {}
                           : { pendingStagingPromotes })}
-                        onSend={async (message) => {
+                        onSend={async (message, sendOptions) => {
                           const lockedChapterSequence = selectedChapter?.sequence
                             ?? (selectedPath === undefined
                               ? undefined
@@ -2222,6 +3120,7 @@ export function App(): React.JSX.Element {
                           await sendSynopsisMessage(message, {
                             focusLocked: true,
                             lockedChapterSequence,
+                            ...(sendOptions?.agentMode === undefined ? {} : { agentMode: sendOptions.agentMode }),
                           })
                         }}
                         {...(stopSynopsisMessage === undefined ? {} : { onStop: stopSynopsisMessage })}
@@ -2232,6 +3131,8 @@ export function App(): React.JSX.Element {
                         onStartTurn={() => { startTurn(); }}
                         onOpenSynopsisFile={(path) => { void openFile(path); }}
                         onOpenSettingsLineage={openSettingsLineage}
+                        requireCompleteHookSchedules={projectSettings?.creationDesk.requireCompleteHookSchedules !== false}
+                        chapterWorkflowEnabled={projectSettings?.creationDesk.chapterWorkflowEnabled === true}
                         descriptionRule={descriptionRule}
                         proseRule={proseRule}
                         minimumWordCount={minimumWordCount}
@@ -2342,6 +3243,71 @@ function modelSelection(profile: ModelProfile) {
 
 export function shouldMonitorChapterRevision(status: ChapterRevision["graphSyncStatus"]): boolean {
   return status === "running"
+}
+
+/** Freeze a failed/stopped live stream into a durable assistant bubble for the chat. */
+function freezeInterruptedSynopsisStream(input: Readonly<{
+  stream: SynopsisConversationStreamSnapshot | undefined
+  optimisticUser: SynopsisConversationMessage | undefined
+  sessionId: string
+  projectId: string
+  errorLabel: string
+}>): SynopsisConversationMessage | undefined {
+  const stream = input.stream
+  const hasProgress = stream !== undefined && (
+    stream.thinking.trim().length > 0
+    || stream.content.trim().length > 0
+    || stream.thinkingRounds.length > 0
+    || stream.searching.length > 0
+    || stream.editing.length > 0
+    || stream.toolRuns.length > 0
+    || stream.todos.length > 0
+  )
+  if (!hasProgress && input.optimisticUser === undefined) return undefined
+  const content = (() => {
+    if (stream === undefined) return "（本轮回复未完成）"
+    const raw = stream.content.trim()
+    if (raw.length === 0) return "（本轮回复未完成）"
+    if (raw.startsWith("{")) return "（本轮回复未完成，结构化输出中断）"
+    return raw
+  })()
+  return {
+    messageId: crypto.randomUUID(),
+    sessionId: input.sessionId,
+    projectId: input.projectId,
+    role: "assistant",
+    content,
+    ...(stream?.thinking.trim().length
+      ? { reasoningContent: stream.thinking }
+      : {}),
+    ...(stream !== undefined && stream.thinkingRounds.length > 0
+      ? { thinkingRounds: stream.thinkingRounds }
+      : {}),
+    ...(stream !== undefined && stream.searching.length > 0 ? { searching: stream.searching } : {}),
+    ...(stream !== undefined && stream.editing.length > 0 ? { editing: stream.editing } : {}),
+    ...(stream !== undefined && stream.toolRuns.length > 0 ? { toolRuns: stream.toolRuns } : {}),
+    ...(stream !== undefined && stream.todos.length > 0 ? { todos: stream.todos } : {}),
+    error: input.errorLabel,
+    createdAtMs: Date.now(),
+  }
+}
+
+function mergeInterruptedConversationMessages(
+  current: readonly SynopsisConversationMessage[],
+  assistant: SynopsisConversationMessage,
+): SynopsisConversationMessage[] {
+  const last = current.at(-1)
+  if (last?.role === "assistant" && last.error !== undefined) {
+    return [
+      ...current.slice(0, -1),
+      {
+        ...assistant,
+        messageId: last.messageId,
+        createdAtMs: last.createdAtMs,
+      },
+    ]
+  }
+  return [...current, assistant]
 }
 
 function isSynopsisBudgetError(error: unknown): boolean {

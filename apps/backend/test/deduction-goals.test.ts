@@ -3,7 +3,12 @@ import { rmSync } from "node:fs"
 
 import { afterEach, describe, expect, it } from "vitest"
 
-import { PROTOCOL_VERSION, type DeductionGoalsSnapshot, type TurnDeductionGoalBundle } from "@worldseed/contracts"
+import {
+  PROTOCOL_VERSION,
+  type DeductionGoalsSnapshot,
+  type ProjectSettings,
+  type TurnDeductionGoalBundle,
+} from "@worldseed/contracts"
 
 import { openChapterHarness, type ChapterHarness } from "./helpers/chapter-coordination-harness.js"
 
@@ -159,6 +164,8 @@ describe("deduction goals", () => {
         content: "本章冲突：码头对峙",
         narrativeKind: "climax",
         scale: "short",
+        plantChapterSequence: 1,
+        payoffChapterSequence: 5,
       })
 
       const goalsService = (await harness.container.getRuntime(harness.projectId, harness.workspaceRootRef))
@@ -283,6 +290,84 @@ describe("deduction goals", () => {
       const missedCurrent = missed.progress.find((item) => item.goalId === goalId && item.status !== "superseded")
       expect(missedCurrent?.status).toBe("missed")
       expect(missedCurrent?.summary).toBe("未拿到登记簿")
+    })
+  })
+
+  it("rejects incomplete foreshadow create when requireCompleteHookSchedules is on", async () => {
+    await withHarness(async (harness) => {
+      const response = await harness.facade.handle({
+        protocolVersion: PROTOCOL_VERSION,
+        requestId: randomUUID(),
+        method: "deduction.goals.create",
+        payload: {
+          projectId: harness.projectId,
+          workspaceRootRef: harness.workspaceRootRef,
+          content: "只有起势的伏笔",
+          narrativeKind: "foreshadow",
+          scale: "medium",
+          plantChapterSequence: 1,
+        },
+      })
+      expect(response.ok).toBe(false)
+      expect(JSON.stringify(response.error)).toContain("钩子时限不完整")
+    })
+  })
+
+  it("blocks reconcile when incomplete hooks exist and allows when schedules are complete", async () => {
+    await withHarness(async (harness) => {
+      const base = {
+        projectId: harness.projectId,
+        workspaceRootRef: harness.workspaceRootRef,
+      }
+      const settings = await invoke<ProjectSettings>(harness, "project.settings.read", base)
+      const goalsService = (await harness.container.getRuntime(harness.projectId, harness.workspaceRootRef))
+        .createDeductionGoalsService()
+
+      await invoke(harness, "project.settings.save", {
+        ...base,
+        settings: {
+          ...settings,
+          creationDesk: { ...settings.creationDesk, requireCompleteHookSchedules: false },
+        },
+      })
+      await invoke<DeductionGoalsSnapshot>(harness, "deduction.goals.create", {
+        ...base,
+        content: "未排期伏笔",
+        narrativeKind: "foreshadow",
+        scale: "long",
+        plantChapterSequence: 1,
+      })
+
+      await invoke(harness, "project.settings.save", {
+        ...base,
+        settings: {
+          ...settings,
+          creationDesk: { ...settings.creationDesk, requireCompleteHookSchedules: true },
+        },
+      })
+      const blocked = await goalsService.reconcileForTurn({
+        projectId: harness.projectId,
+        chapterSequence: 1,
+        synopsisMarkdown: "本章码头对峙。",
+        requireCompleteHookSchedules: true,
+      })
+      expect(blocked.blocking.some((issue) => issue.code === "incomplete_hook_schedule")).toBe(true)
+
+      const incomplete = blocked.blocking.find((issue) => issue.code === "incomplete_hook_schedule")
+      const goalId = incomplete!.goalId!
+      await invoke(harness, "deduction.goals.update", {
+        ...base,
+        goalId,
+        action: "update_content",
+        payoffChapterSequence: 3,
+      })
+      const cleared = await goalsService.reconcileForTurn({
+        projectId: harness.projectId,
+        chapterSequence: 1,
+        synopsisMarkdown: "本章码头对峙。",
+        requireCompleteHookSchedules: true,
+      })
+      expect(cleared.blocking.some((issue) => issue.code === "incomplete_hook_schedule")).toBe(false)
     })
   })
 })

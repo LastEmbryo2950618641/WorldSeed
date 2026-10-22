@@ -50,7 +50,7 @@ export function fromPersistedDraftVersions(
 
 function draftSourceTag(source: DraftVersionSource | RevisionDraftVersion["source"]): string {
   if (source === "agent") return " 讨论agent"
-  if (source === "workflow") return " AI流程工具"
+  if (source === "workflow") return " 正文推演"
   if (source === "manual") return " 人工"
   if (source === "rollback") return " 回退"
   return ""
@@ -103,18 +103,15 @@ function sortByCreatedAt(versions: readonly PrototypeDraftVersion[]): PrototypeD
 }
 
 export function presentOfficialAxis(versions: readonly PrototypeDraftVersion[]): PrototypeDraftVersion[] {
+  // Formal body is a single current surface after graph governance — not a version history.
   const ordered = sortByCreatedAt(versions)
-  const currentId = ordered.find((version) => version.isCurrentOfficial === true)?.versionId
-    ?? ordered.at(-1)?.versionId
-  return ordered.map((version, index) => {
-    const sequenceNo = index + 1
-    const current = version.versionId === currentId
-    return withVersionPresentation(version, {
-      title: current ? "当前正文" : "正文",
-      sequenceNo,
-      marks: [{ kind: current ? "current" : "ordinal", text: `v${String(sequenceNo)}` }],
-    })
-  })
+  const current = ordered.find((version) => version.isCurrentOfficial === true) ?? ordered.at(-1)
+  if (current === undefined) return []
+  return [withVersionPresentation(current, {
+    title: "正式正文",
+    sequenceNo: 1,
+    marks: [{ kind: "current", text: "当前" }],
+  })]
 }
 
 export function presentDraftAxis(versions: readonly PrototypeDraftVersion[]): PrototypeDraftVersion[] {
@@ -124,7 +121,7 @@ export function presentDraftAxis(versions: readonly PrototypeDraftVersion[]): Pr
     const marks: VersionMark[] = [{ kind: "ordinal", text: `v${String(sequenceNo)}` }]
     const source = version.source === "rollback" ? "manual" : version.source
     if (source !== "baseline") {
-      marks.push({ kind: source, text: source === "agent" ? "讨论agent" : source === "workflow" ? "AI流程工具" : "人工" })
+      marks.push({ kind: source, text: source === "agent" ? "讨论agent" : source === "workflow" ? "正文推演" : "人工" })
     }
     if (isCoveringDraft(version)) marks.push({ kind: "covered", text: "已覆盖正文" })
     return withVersionPresentation(version, {
@@ -142,10 +139,7 @@ function displayPersistedDraftLabel(
   if (isCoveringDraft(version)) {
     return `${version.label}${draftSourceTag(version.source)} · 已覆盖正文`
   }
-  if (version.source === "baseline" && index === 0) {
-    return version.isCurrentOfficial === false ? "历史正文" : "正文"
-  }
-  if (version.source === "baseline") return `历史正文 ${String(index + 1)}`
+  if (version.source === "baseline") return "正式正文"
   return `${version.label}${draftSourceTag(version.source)}${version.isLatest ? " 最新" : ""}`
 }
 
@@ -157,7 +151,7 @@ export function buildPrototypeDraftVersions(input: Readonly<{
     versionId: COMMITTED_DRAFT_VERSION_ID,
     parentVersionId: undefined,
     source: "baseline",
-    label: "正文",
+    label: "正式正文",
     heading: input.committedHeading,
     body: input.committedBody,
     messageId: undefined,

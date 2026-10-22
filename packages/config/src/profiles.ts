@@ -196,6 +196,9 @@ export const defaultProjectSettings = Object.freeze(projectSettingsSchema.parse(
   },
   creationDesk: {
     autoApproveGoalProposals: true,
+    requireCompleteHookSchedules: true,
+    chapterWorkflowEnabled: false,
+    discussMaxWallTimeMinutes: 0,
   },
 }))
 

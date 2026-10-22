@@ -49,6 +49,8 @@ type Props = Readonly<{
   snapshot: DeductionGoalsSnapshot | undefined
   chapterSequence: number
   focusUnfilled?: boolean
+  /** When true, foreshadow/climax must include plant + payoff chapter numbers. */
+  requireCompleteHookSchedules?: boolean
   onClose(): void
   onAdd(content: string, taxonomy?: GoalTaxonomyInput): Promise<void>
   onUpdateGoal(goalId: string, patch: { content?: string } & GoalTaxonomyInput): Promise<void>
@@ -98,6 +100,20 @@ function taxonomyFromDraft(draft: TaxonomyDraft): GoalTaxonomyInput {
   }
 }
 
+export function validateHookScheduleTaxonomy(
+  taxonomy: GoalTaxonomyInput,
+  requireCompleteHookSchedules: boolean,
+): string | undefined {
+  if (!requireCompleteHookSchedules) return undefined
+  const kind = taxonomy.narrativeKind ?? "general"
+  if (kind !== "foreshadow" && kind !== "climax") return undefined
+  const missing: string[] = []
+  if (taxonomy.plantChapterSequence === undefined) missing.push("起势章")
+  if (taxonomy.payoffChapterSequence === undefined) missing.push("兑现章")
+  if (missing.length === 0) return undefined
+  return `钩子时限不完整：请填写${missing.join("与")}`
+}
+
 function draftFromGoal(goal: DeductionGoal): TaxonomyDraft {
   return {
     narrativeKind: goal.narrativeKind,
@@ -112,10 +128,12 @@ function draftFromGoal(goal: DeductionGoal): TaxonomyDraft {
 }
 
 export function CreationDeskGoalsPopover(props: Props): React.JSX.Element {
+  const requireCompleteHookSchedules = props.requireCompleteHookSchedules !== false
   const [scope, setScope] = useState<GoalRowScope>("chapter")
   const [adding, setAdding] = useState(false)
   const [addDraft, setAddDraft] = useState("")
   const [addTaxonomy, setAddTaxonomy] = useState<TaxonomyDraft>(defaultTaxonomyDraft)
+  const [addError, setAddError] = useState<string>()
   const [historyGoalId, setHistoryGoalId] = useState<string>()
   const [confirmRemoveGoalId, setConfirmRemoveGoalId] = useState<string>()
 
@@ -149,6 +167,12 @@ export function CreationDeskGoalsPopover(props: Props): React.JSX.Element {
     const content = addDraft.trim()
     if (content.length === 0) return
     const taxonomy = taxonomyFromDraft(addTaxonomy)
+    const scheduleError = validateHookScheduleTaxonomy(taxonomy, requireCompleteHookSchedules)
+    if (scheduleError !== undefined) {
+      setAddError(scheduleError)
+      return
+    }
+    setAddError(undefined)
     setAddDraft("")
     setAddTaxonomy(defaultTaxonomyDraft())
     setAdding(false)
@@ -240,6 +264,7 @@ export function CreationDeskGoalsPopover(props: Props): React.JSX.Element {
               void props.onRemove(goal.goalId)
             }}
             onUpdateGoal={(patch) => props.onUpdateGoal(goal.goalId, patch)}
+            requireCompleteHookSchedules={requireCompleteHookSchedules}
             onSetProgress={(summary) => props.onSetProgress(goal.goalId, props.chapterSequence, summary)}
             onReview={(status, summary) => {
               void props.onReviewProgress(goal.goalId, props.chapterSequence, status, summary)
@@ -255,7 +280,10 @@ export function CreationDeskGoalsPopover(props: Props): React.JSX.Element {
               value={addDraft}
               autoFocus
               placeholder="手动补一条目标…"
-              onChange={(event) => { setAddDraft(event.target.value); }}
+              onChange={(event) => {
+                setAddDraft(event.target.value)
+                setAddError(undefined)
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault()
@@ -265,6 +293,7 @@ export function CreationDeskGoalsPopover(props: Props): React.JSX.Element {
                   setAdding(false)
                   setAddDraft("")
                   setAddTaxonomy(defaultTaxonomyDraft())
+                  setAddError(undefined)
                 }
               }}
             />
@@ -272,8 +301,15 @@ export function CreationDeskGoalsPopover(props: Props): React.JSX.Element {
           </div>
           <GoalTaxonomyFields
             draft={addTaxonomy}
-            onChange={setAddTaxonomy}
+            requireCompleteHookSchedules={requireCompleteHookSchedules}
+            onChange={(next) => {
+              setAddTaxonomy(next)
+              setAddError(undefined)
+            }}
           />
+          {addError === undefined
+            ? null
+            : <p className="creation-desk-goals-add-error" role="alert">{addError}</p>}
         </div>
       : <div className="creation-desk-goals-secondary-actions">
           <button
@@ -291,9 +327,11 @@ export function CreationDeskGoalsPopover(props: Props): React.JSX.Element {
 
 function GoalTaxonomyFields(props: Readonly<{
   draft: TaxonomyDraft
+  requireCompleteHookSchedules?: boolean
   onChange(next: TaxonomyDraft): void
 }>): React.JSX.Element {
   const showWindow = props.draft.narrativeKind === "foreshadow" || props.draft.narrativeKind === "climax"
+  const required = props.requireCompleteHookSchedules !== false && showWindow
   return <div className="creation-desk-goals-taxonomy-row" data-testid="creation-desk-goals-taxonomy">
     <select
       aria-label="目标类型"
@@ -330,8 +368,9 @@ function GoalTaxonomyFields(props: Readonly<{
             min={1}
             step={1}
             inputMode="numeric"
-            aria-label="起势章"
-            placeholder="起势章"
+            required={required}
+            aria-label={required ? "起势章（必填）" : "起势章"}
+            placeholder={required ? "起势章*" : "起势章"}
             value={props.draft.plantChapterSequence}
             onChange={(event) => {
               props.onChange({ ...props.draft, plantChapterSequence: event.target.value })
@@ -342,8 +381,9 @@ function GoalTaxonomyFields(props: Readonly<{
             min={1}
             step={1}
             inputMode="numeric"
-            aria-label="兑现章"
-            placeholder="兑现章"
+            required={required}
+            aria-label={required ? "兑现章（必填）" : "兑现章"}
+            placeholder={required ? "兑现章*" : "兑现章"}
             value={props.draft.payoffChapterSequence}
             onChange={(event) => {
               props.onChange({ ...props.draft, payoffChapterSequence: event.target.value })
@@ -392,6 +432,7 @@ function CompactGoalRow(props: Readonly<{
   historyOpen: boolean
   confirmRemove: boolean
   history: readonly DeductionGoalProgress[]
+  requireCompleteHookSchedules: boolean
   onToggleHistory(): void
   onRequestRemove(): void
   onCancelRemove(): void
@@ -405,6 +446,7 @@ function CompactGoalRow(props: Readonly<{
   const [actionsOpen, setActionsOpen] = useState(false)
   const [draft, setDraft] = useState(props.goal.content)
   const [taxonomyDraft, setTaxonomyDraft] = useState<TaxonomyDraft>(() => draftFromGoal(props.goal))
+  const [editError, setEditError] = useState<string>()
   const rowRef = useRef<HTMLDivElement>(null)
   const status = resolveGoalRowStatus({
     goal: props.goal,
@@ -427,14 +469,22 @@ function CompactGoalRow(props: Readonly<{
   }
 
   const saveEdit = (): void => {
-    setEditing(false)
     const trimmed = draft.trim()
     if (trimmed.length === 0) return
     if (editChapter) {
+      setEditing(false)
+      setEditError(undefined)
       void props.onSetProgress(trimmed)
       return
     }
     const taxonomy = taxonomyFromDraft(taxonomyDraft)
+    const scheduleError = validateHookScheduleTaxonomy(taxonomy, props.requireCompleteHookSchedules)
+    if (scheduleError !== undefined) {
+      setEditError(scheduleError)
+      return
+    }
+    setEditError(undefined)
+    setEditing(false)
     const contentChanged = trimmed !== props.goal.content
     const taxonomyChanged = taxonomy.narrativeKind !== props.goal.narrativeKind
       || taxonomy.scale !== props.goal.scale
@@ -449,6 +499,7 @@ function CompactGoalRow(props: Readonly<{
 
   const cancelEdit = (): void => {
     setEditing(false)
+    setEditError(undefined)
     setDraft(editChapter ? (props.chapterProgress?.summary ?? props.goal.content) : props.goal.content)
     setTaxonomyDraft(draftFromGoal(props.goal))
   }
@@ -611,7 +662,17 @@ function CompactGoalRow(props: Readonly<{
                 />
                 {editChapter
                   ? null
-                  : <GoalTaxonomyFields draft={taxonomyDraft} onChange={setTaxonomyDraft} />}
+                  : <GoalTaxonomyFields
+                      draft={taxonomyDraft}
+                      requireCompleteHookSchedules={props.requireCompleteHookSchedules}
+                      onChange={(next) => {
+                        setTaxonomyDraft(next)
+                        setEditError(undefined)
+                      }}
+                    />}
+                {editError === undefined
+                  ? null
+                  : <p className="creation-desk-goals-add-error" role="alert">{editError}</p>}
                 <div className="creation-desk-goal-expand-actions">
                   <button type="button" className="creation-desk-goals-taxonomy-save" onClick={saveEdit}>
                     保存

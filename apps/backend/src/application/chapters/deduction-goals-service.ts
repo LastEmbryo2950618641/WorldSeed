@@ -12,7 +12,13 @@ import type {
   ProjectId,
   TurnDeductionGoalBundle,
 } from "@worldseed/contracts"
-import { goalProposalPayloadSchema, selectGoalsForChapterContext } from "@worldseed/contracts"
+import {
+  assertCompleteHookScheduleForKind,
+  buildHookScheduleAudit,
+  goalProposalPayloadSchema,
+  listIncompleteHookSchedules,
+  selectGoalsForChapterContext,
+} from "@worldseed/contracts"
 
 import type { SqliteDeductionGoalsRepository } from "../../infrastructure/sqlite/repositories/sqlite-deduction-goals-repository.js"
 
@@ -20,6 +26,8 @@ export type DeductionGoalsServiceDependencies = Readonly<{
   goals: SqliteDeductionGoalsRepository
   createId: () => string
   now: () => number
+  /** When omitted, defaults to true (product default). */
+  readRequireCompleteHookSchedules?: () => Promise<boolean>
 }>
 
 export class DeductionGoalsService {
@@ -55,6 +63,13 @@ export class DeductionGoalsService {
     payoffChapterSequence?: number
   }>): Promise<DeductionGoalsSnapshot> {
     assertPlantPayoffWindow(input.plantChapterSequence, input.payoffChapterSequence)
+    const narrativeKind = input.narrativeKind ?? "general"
+    assertCompleteHookScheduleForKind(
+      narrativeKind,
+      input.plantChapterSequence,
+      input.payoffChapterSequence,
+      await this.requireCompleteHookSchedules(),
+    )
     const now = this.dependencies.now()
     const goal: DeductionGoal = {
       goalId: this.dependencies.createId(),
@@ -62,7 +77,7 @@ export class DeductionGoalsService {
       content: input.content.trim(),
       source: "user",
       lifecycle: "active",
-      narrativeKind: input.narrativeKind ?? "general",
+      narrativeKind,
       scale: input.scale ?? "short",
       createdAtMs: now,
       updatedAtMs: now,
@@ -110,17 +125,18 @@ export class DeductionGoalsService {
       }
       const nextPlant = input.plantChapterSequence ?? goal.plantChapterSequence
       const nextPayoff = input.payoffChapterSequence ?? goal.payoffChapterSequence
-      if (
-        nextPlant !== undefined
-        && nextPayoff !== undefined
-        && nextPlant > nextPayoff
-      ) {
-        throw new Error("plantChapterSequence must be ≤ payoffChapterSequence")
-      }
+      const nextKind = input.narrativeKind ?? goal.narrativeKind
+      assertPlantPayoffWindow(nextPlant, nextPayoff)
+      assertCompleteHookScheduleForKind(
+        nextKind,
+        nextPlant,
+        nextPayoff,
+        await this.requireCompleteHookSchedules(),
+      )
       await this.dependencies.goals.updateGoal({
         ...goal,
         content: content !== undefined && content.length > 0 ? content : goal.content,
-        narrativeKind: input.narrativeKind ?? goal.narrativeKind,
+        narrativeKind: nextKind,
         scale: input.scale ?? goal.scale,
         updatedAtMs: now,
         ...(input.plantChapterSequence === undefined
@@ -240,6 +256,57 @@ export class DeductionGoalsService {
       await this.dependencies.goals.resolveProposal(proposalId, "approved", this.dependencies.now())
     }
     return this.list(input.projectId)
+  }
+
+  /**
+   * Approve what can be applied; proposals that violate a gate (e.g. hook schedule) stay pending
+   * instead of failing the whole discuss turn.
+   */
+  public async approveProposalsLenient(input: Readonly<{
+    projectId: ProjectId
+    proposalIds: readonly string[]
+  }>): Promise<Readonly<{ failed: readonly Readonly<{ proposalId: string; message: string }>[] }>> {
+    const failed: { proposalId: string; message: string }[] = []
+    for (const proposalId of input.proposalIds) {
+      try {
+        await this.approveProposals({ projectId: input.projectId, proposalIds: [proposalId] })
+      } catch (error) {
+        failed.push({ proposalId, message: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return { failed }
+  }
+
+  /**
+   * Same checks applyProposal enforces, without throwing — lets the discuss loop send the
+   * proposal back to the model for repair before the turn ends.
+   */
+  public async auditProposalSchedules(
+    projectId: ProjectId,
+    proposals: readonly Readonly<{ payload: GoalProposalPayload }>[],
+  ): Promise<readonly string[]> {
+    const requireComplete = await this.requireCompleteHookSchedules()
+    const issues: string[] = []
+    for (const { payload } of proposals) {
+      if (payload.kind !== "create" && payload.kind !== "update_content") continue
+      const existing = payload.kind === "create"
+        ? undefined
+        : await this.dependencies.goals.findGoal(payload.goalId)
+      if (payload.kind === "update_content" && (existing === undefined || existing.projectId !== projectId)) continue
+      const kind = payload.narrativeKind ?? existing?.narrativeKind ?? "general"
+      const plant = payload.plantChapterSequence ?? existing?.plantChapterSequence
+      const payoff = payload.payoffChapterSequence ?? existing?.payoffChapterSequence
+      const label = (payload.content ?? existing?.content ?? "").trim().slice(0, 40)
+      try {
+        assertPlantPayoffWindow(plant, payoff)
+        assertCompleteHookScheduleForKind(kind, plant, payoff, requireComplete)
+      } catch (error) {
+        issues.push(`「${label}」（${kind}${payload.kind === "update_content" ? `，goalId=${payload.goalId}` : ""}）：${
+          error instanceof Error ? error.message : String(error)
+        }`)
+      }
+    }
+    return issues
   }
 
   public async rejectProposals(input: Readonly<{
@@ -379,6 +446,7 @@ export class DeductionGoalsService {
     projectId: ProjectId
     chapterSequence: number
     synopsisMarkdown: string
+    requireCompleteHookSchedules?: boolean
   }>): Promise<DeductionGoalReconcileResult> {
     const snapshot = await this.list(input.projectId)
     const warnings: DeductionGoalReconcileIssue[] = []
@@ -388,6 +456,8 @@ export class DeductionGoalsService {
       (item) => item.chapterSequence === input.chapterSequence && item.status !== "superseded",
     )
     const progressByGoal = new Map(chapterProgress.map((item) => [item.goalId, item]))
+    const requireCompleteHookSchedules = input.requireCompleteHookSchedules
+      ?? await this.requireCompleteHookSchedules()
 
     if (snapshot.pendingProposals.length > 0) {
       warnings.push({
@@ -395,6 +465,20 @@ export class DeductionGoalsService {
         severity: "warning",
         message: `仍有 ${String(snapshot.pendingProposals.length)} 条 Agent 目标提案未处理，开始推演后仍可稍后采纳，但本轮不会自动生效`,
       })
+    }
+
+    if (requireCompleteHookSchedules) {
+      for (const incomplete of listIncompleteHookSchedules(snapshot.goals)) {
+        const missingLabels = incomplete.missing.map((field) => (
+          field === "plant" ? "起势章" : "兑现章"
+        ))
+        blocking.push({
+          code: "incomplete_hook_schedule",
+          severity: "blocking",
+          message: `钩子「${incomplete.content}」时限不完整，缺少${missingLabels.join("与")}`,
+          goalId: incomplete.goalId,
+        })
+      }
     }
 
     for (const goal of activeGoals) {
@@ -421,19 +505,31 @@ export class DeductionGoalsService {
     return { warnings, blocking }
   }
 
+  public async auditHookSchedules(projectId: ProjectId): Promise<ReturnType<typeof buildHookScheduleAudit>> {
+    const snapshot = await this.list(projectId)
+    return buildHookScheduleAudit(snapshot.goals, await this.requireCompleteHookSchedules())
+  }
+
   private async applyProposal(proposal: DeductionGoalProposal): Promise<void> {
     const now = this.dependencies.now()
     const payload = proposal.payload
 
     if (payload.kind === "create") {
       assertPlantPayoffWindow(payload.plantChapterSequence, payload.payoffChapterSequence)
+      const narrativeKind = payload.narrativeKind ?? "general"
+      assertCompleteHookScheduleForKind(
+        narrativeKind,
+        payload.plantChapterSequence,
+        payload.payoffChapterSequence,
+        await this.requireCompleteHookSchedules(),
+      )
       await this.dependencies.goals.insertGoal({
         goalId: this.dependencies.createId(),
         projectId: proposal.projectId,
         content: payload.content,
         source: "agent",
         lifecycle: "active",
-        narrativeKind: payload.narrativeKind ?? "general",
+        narrativeKind,
         scale: payload.scale ?? "short",
         createdAtMs: now,
         updatedAtMs: now,
@@ -452,11 +548,18 @@ export class DeductionGoalsService {
       const nextContent = payload.content?.trim()
       const nextPlant = payload.plantChapterSequence ?? goal.plantChapterSequence
       const nextPayoff = payload.payoffChapterSequence ?? goal.payoffChapterSequence
+      const nextKind = payload.narrativeKind ?? goal.narrativeKind
       assertPlantPayoffWindow(nextPlant, nextPayoff)
+      assertCompleteHookScheduleForKind(
+        nextKind,
+        nextPlant,
+        nextPayoff,
+        await this.requireCompleteHookSchedules(),
+      )
       await this.dependencies.goals.updateGoal({
         ...goal,
         content: nextContent !== undefined && nextContent.length > 0 ? nextContent : goal.content,
-        narrativeKind: payload.narrativeKind ?? goal.narrativeKind,
+        narrativeKind: nextKind,
         scale: payload.scale ?? goal.scale,
         updatedAtMs: now,
         ...(payload.plantChapterSequence === undefined
@@ -507,6 +610,11 @@ export class DeductionGoalsService {
       throw new Error(`goal not found: ${goalId}`)
     }
     return goal
+  }
+
+  private async requireCompleteHookSchedules(): Promise<boolean> {
+    if (this.dependencies.readRequireCompleteHookSchedules === undefined) return true
+    return await this.dependencies.readRequireCompleteHookSchedules()
   }
 
   private async isValidProposalPayload(

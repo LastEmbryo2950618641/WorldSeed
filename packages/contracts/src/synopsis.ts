@@ -29,7 +29,6 @@ export const synopsisConversationChoiceSchema = z.object({
     "confirm_synopsis",
     "set_focus",
     "promote_draft_to_body",
-    "restore_body_version",
   ]),
   chapterSequence: z.number().int().positive().optional(),
 })
@@ -147,6 +146,39 @@ export const synopsisConversationStreamEditSchema = z.object({
 })
 export type SynopsisConversationStreamEdit = z.infer<typeof synopsisConversationStreamEditSchema>
 
+/** Claude Code–style tool/bash invocations shown as run(command, args). */
+export const synopsisConversationStreamRunSchema = z.object({
+  runId: z.string().min(1),
+  name: z.string().min(1),
+  action: z.enum(["describe", "invoke"]),
+  arguments: z.string().optional(),
+  status: z.enum(["running", "completed", "failed"]),
+  resultSummary: z.string().max(2_000).optional(),
+  /** Aligns with thinking/search rounds when available. */
+  round: z.number().int().nonnegative().optional(),
+})
+export type SynopsisConversationStreamRun = z.infer<typeof synopsisConversationStreamRunSchema>
+
+/** Claude Code–style discuss agent mode (composer selector). */
+export const discussAgentModeSchema = z.enum(["auto", "plan", "accept_edits"])
+export type DiscussAgentMode = z.infer<typeof discussAgentModeSchema>
+
+/** Claude Code–style TodoWrite items for the creation desk Todo panel. */
+export const synopsisConversationTodoStatusSchema = z.enum([
+  "pending",
+  "in_progress",
+  "completed",
+  "cancelled",
+])
+export type SynopsisConversationTodoStatus = z.infer<typeof synopsisConversationTodoStatusSchema>
+
+export const synopsisConversationTodoSchema = z.object({
+  id: z.string().min(1).max(80),
+  content: z.string().min(1).max(500),
+  status: synopsisConversationTodoStatusSchema,
+})
+export type SynopsisConversationTodo = z.infer<typeof synopsisConversationTodoSchema>
+
 export const synopsisConversationMessageSchema = z.object({
   messageId: idSchema,
   sessionId: idSchema,
@@ -157,7 +189,11 @@ export const synopsisConversationMessageSchema = z.object({
   thinkingRounds: z.array(synopsisConversationThinkingRoundSchema).optional(),
   searching: z.array(synopsisConversationStreamSearchSchema).optional(),
   editing: z.array(synopsisConversationStreamEditSchema).optional(),
+  toolRuns: z.array(synopsisConversationStreamRunSchema).optional(),
+  todos: z.array(synopsisConversationTodoSchema).optional(),
   choices: z.array(synopsisConversationChoiceSchema).optional(),
+  /** Present when the turn failed, was stopped, or otherwise ended without a clean finish. */
+  error: z.string().min(1).optional(),
   hidden: z.boolean().optional(),
   createdAtMs: z.number().int().nonnegative(),
 })
@@ -187,6 +223,8 @@ export const synopsisConversationStreamSnapshotSchema = z.object({
   content: z.string().default(""),
   searching: z.array(synopsisConversationStreamSearchSchema).default([]),
   editing: z.array(synopsisConversationStreamEditSchema).default([]),
+  toolRuns: z.array(synopsisConversationStreamRunSchema).default([]),
+  todos: z.array(synopsisConversationTodoSchema).default([]),
   usage: synopsisConversationStreamUsageSchema.optional(),
   budgetAdvisory: synopsisConversationBudgetAdvisorySchema.optional(),
   error: z.string().optional(),
@@ -223,6 +261,10 @@ export const synopsisConversationSendResultSchema = z.object({
     chapterId: z.string().min(1),
     draftVersionId: idSchema,
     draftLabel: z.string().min(1),
+  }).optional(),
+  /** Process gate deferred work (e.g. waiting for previous chapter publication); client should auto-send this. */
+  autoContinue: z.object({
+    message: z.string().min(1).max(500),
   }).optional(),
 })
 export type SynopsisConversationSendResult = z.infer<typeof synopsisConversationSendResultSchema>

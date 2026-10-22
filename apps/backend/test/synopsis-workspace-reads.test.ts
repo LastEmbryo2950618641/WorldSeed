@@ -71,6 +71,22 @@ const catalog: WorkspaceCatalogSnapshot = {
       digest: "w1",
       size: 90,
     },
+    {
+      relativePath: "章节正文/第一卷 示例/第一章 开篇.md",
+      entryKind: "file",
+      role: "chapters",
+      version: 1,
+      digest: "ch1",
+      size: 400,
+    },
+    {
+      relativePath: "大纲/第一卷 示例.md",
+      entryKind: "file",
+      role: "outline",
+      version: 1,
+      digest: "o1",
+      size: 200,
+    },
   ],
 }
 
@@ -209,6 +225,44 @@ describe("synopsis workspace reads helpers", () => {
     expect(selected.map((entry) => entry.relativePath)).toEqual([
       "表现输出/笔风规则/默认笔风规则.md",
     ])
+  })
+
+  it("with allowWorkspaceChapterReads, selects any catalog role including chapters and outline", () => {
+    const chapters = selectSynopsisWorkspaceEntries(
+      catalog,
+      readRequest({
+        exactKeys: ["章节正文/第一卷 示例/第一章 开篇.md"],
+        sourceKinds: ["reference"],
+      }),
+      5,
+      true,
+    )
+    expect(chapters.map((entry) => entry.relativePath)).toEqual([
+      "章节正文/第一卷 示例/第一章 开篇.md",
+    ])
+    const outline = selectSynopsisWorkspaceEntries(
+      catalog,
+      readRequest({
+        exactKeys: ["大纲/第一卷 示例.md"],
+        sourceKinds: ["source"],
+      }),
+      5,
+      true,
+    )
+    expect(outline.map((entry) => entry.relativePath)).toEqual(["大纲/第一卷 示例.md"])
+  })
+
+  it("without allowWorkspaceChapterReads, keeps chapters closed", () => {
+    const selected = selectSynopsisWorkspaceEntries(
+      catalog,
+      readRequest({
+        exactKeys: ["章节正文/第一卷 示例/第一章 开篇.md"],
+        sourceKinds: ["source"],
+      }),
+      5,
+      false,
+    )
+    expect(selected).toEqual([])
   })
 
   it("lists nested user-rule markdown for discuss bootstrap", () => {

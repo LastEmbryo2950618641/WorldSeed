@@ -350,6 +350,86 @@ describe("synopsis conversation", () => {
     })
   })
 
+  it("batch_chapter automation auto-confirms synopsis and allows outline in the same turn", async () => {
+    await withHarness(async (harness) => {
+      const base = {
+        projectId: harness.projectId,
+        workspaceRootRef: harness.workspaceRootRef,
+      }
+      await invoke(harness, "synopsis.conversation.start", {
+        ...base,
+        title: "批量开端",
+      })
+      const sent = await invoke<{
+        session: { synopsisPath: string; synopsisConfirmedAtMs?: number }
+      }>(harness, "synopsis.conversation.send", {
+        ...base,
+        message: "【批量推演】请完成本章梗概与细纲",
+        automation: "batch_chapter",
+      })
+      expect(sent.session.synopsisConfirmedAtMs).toBeTypeOf("number")
+      const outlinePath = sent.session.synopsisPath.replace("[剧情梗概].md", "[剧情细纲].md")
+      const outline = readFileSync(join(harness.workspaceRootRef, outlinePath), "utf8")
+      expect(outline.length).toBeGreaterThan(40)
+      expect(outline).toContain("剧情细纲")
+    })
+  })
+
+  it("beginTurn blocks incomplete foreshadow schedules when requireCompleteHookSchedules is on", async () => {
+    await withHarness(async (harness) => {
+      const base = {
+        projectId: harness.projectId,
+        workspaceRootRef: harness.workspaceRootRef,
+      }
+      const settings = await invoke<ProjectSettings>(harness, "project.settings.read", base)
+      await invoke(harness, "project.settings.save", {
+        ...base,
+        settings: {
+          ...settings,
+          creationDesk: { ...settings.creationDesk, requireCompleteHookSchedules: false },
+        },
+      })
+      await invoke(harness, "synopsis.conversation.start", {
+        ...base,
+        title: "码头对峙",
+      })
+      const created = await invoke<{ goals: Array<{ goalId: string }> }>(harness, "deduction.goals.create", {
+        ...base,
+        content: "雨夜信使未归",
+        narrativeKind: "foreshadow",
+        scale: "long",
+        plantChapterSequence: 1,
+      })
+      await invoke(harness, "project.settings.save", {
+        ...base,
+        settings: {
+          ...settings,
+          creationDesk: { ...settings.creationDesk, requireCompleteHookSchedules: true },
+        },
+      })
+
+      const blocked = await harness.facade.handle({
+        protocolVersion: PROTOCOL_VERSION,
+        requestId: randomUUID(),
+        method: "synopsis.conversation.beginTurn",
+        payload: base,
+      })
+      expect(blocked.ok).toBe(false)
+      if (blocked.ok) return
+      expect(blocked.error.message).toContain("推演清单")
+      expect(blocked.error.message).toContain("钩子时限不完整")
+
+      await invoke(harness, "deduction.goals.update", {
+        ...base,
+        goalId: created.goals[0]!.goalId,
+        action: "update_content",
+        payoffChapterSequence: 3,
+      })
+      const begun = await invoke<{ taskId: string }>(harness, "synopsis.conversation.beginTurn", base)
+      expect(begun.taskId.length).toBeGreaterThan(0)
+    })
+  })
+
   it("runs a request_read round before finalizing synopsis discuss", async () => {
     await withHarness(async (harness) => {
       await invoke(harness, "synopsis.conversation.start", {

@@ -10,6 +10,7 @@ export const workspaceCatalogRoleValues = [
   "chapters",
   "presentation",
   "staging",
+  "outline",
 ] as const
 
 export const workspaceCatalogEntrySchema = z.object({

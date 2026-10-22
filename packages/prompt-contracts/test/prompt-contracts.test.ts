@@ -10,6 +10,7 @@ import {
   PLOT_SYNOPSIS_GUIDE_RESOURCE,
   SETTINGS_QUERY_GUIDE_RESOURCE,
   SETTINGS_REVISION_GUIDE_RESOURCE,
+  WEBNOVEL_PROSE_LOGIC_RESOURCE,
   assertFrontierSettlementCoversReview,
   assertGraphGovernanceReferenceContract,
   assertPhaseReferenceContract,
@@ -62,13 +63,14 @@ describe("prompt contracts", () => {
     const resources = [
       BASE_RULES_RESOURCE,
       CONTENT_HANDLING_RESOURCE,
+      WEBNOVEL_PROSE_LOGIC_RESOURCE,
       PLOT_SYNOPSIS_GUIDE_RESOURCE,
       SETTINGS_QUERY_GUIDE_RESOURCE,
       SETTINGS_REVISION_GUIDE_RESOURCE,
       ...aiPhaseValues.map((phase) => promptDefinitions[phase].resourcePath),
     ]
 
-    expect(new Set(resources).size).toBe(aiPhaseValues.length + 5)
+    expect(new Set(resources).size).toBe(aiPhaseValues.length + 6)
     for (const resource of resources) {
       const path = resolve(packageRoot, resource)
       expect(existsSync(path), resource).toBe(true)
@@ -152,8 +154,14 @@ describe("prompt contracts", () => {
     expect(sourceRetrieval).toContain("设定集默认查询规则")
     expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("设定集修订规则")
     expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("表现输出/本作品描写/*.md")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("开书作品风格（硬门槛，先于正文）")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("表现输出/本作品描写/作品风格.md")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("1→6 维全部定好写入")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("表现输出/笔风规则/")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("时代·科技·生活层")
     expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).not.toContain("presentationWrites 给出完整 Markdown、`relativePath`（仅 `表现输出/描写规则/*.md`")
     expect(readResource(PLOT_SYNOPSIS_GUIDE_RESOURCE)).toContain("表现输出/本作品描写/")
+    expect(readResource(PLOT_SYNOPSIS_GUIDE_RESOURCE)).toContain("作品风格.md")
     expect(ruleAssembly).toContain("本阶段没有正文或长文本字段")
     expect(ruleAssembly).toContain("不要为了表示“已完整阅读”而重复路径")
     expect(ruleAssembly).toContain("每个路径和冲突各只出现一次")
@@ -218,8 +226,13 @@ describe("prompt contracts", () => {
     expect(prompt).toContain("narrativeKind")
     expect(prompt).toContain("戏核")
     expect(prompt).toContain("维护主路径是你")
-    expect(prompt).toContain("人物性格")
-    expect(prompt).toContain("性格与背景")
+    expect(prompt).toContain("人物最小档案")
+    expect(prompt).toContain("姓名、性别、性格、背景")
+    expect(prompt).toContain("团体豁免")
+    expect(prompt).toContain("hookScheduleAudit")
+    expect(prompt).toContain("不确定的兑现章可以暂不填")
+    expect(prompt).toContain("钩子密度")
+    expect(prompt).toContain("批量推演模式")
   })
 
   it("requires outline-to-prose translation rules in the draft prompt", () => {
@@ -242,8 +255,12 @@ describe("prompt contracts", () => {
     )
     expect(revision).toContain("## 性格")
     expect(revision).toContain("## 背景")
+    expect(revision).toContain("姓名、性别、性格、背景")
     expect(draft).toContain("人物按性格行事")
+    expect(draft).toContain("姓名与最小档案")
     expect(extraction).toContain("## 性格")
+    expect(extraction).toContain("姓名")
+    expect(extraction).toContain("性别")
   })
 
   it("keeps rule assembly semantic and lets the runtime own its snapshot identity", () => {
@@ -667,5 +684,31 @@ describe("prompt contracts", () => {
     })
     expect(parsed.chapterDraftProposal?.body).toBe("雨还在下。")
     expect(parsed.choices?.[0]?.action).toBe("promote_draft_to_body")
+  })
+
+  it("accepts volumeChapterPlans and chapterDraftProposals for batch volume workflow", () => {
+    const parsed = synopsisDiscussArtifactSchema.parse({
+      assistantMessage: "本卷规划与草稿已齐。",
+      volumePlanMeta: { targetWordCount: 80_000, targetChapterCount: 2 },
+      volumeChapterPlans: [{
+        chapterSequence: 1,
+        chapterTitle: "抵达",
+        synopsisBody: "# 第一章 抵达\n\n主角到站。",
+        outlineBody: "# 第一章 抵达\n\n## 分场\n- 到站",
+      }, {
+        chapterSequence: 2,
+        synopsisBody: "# 第二章 离开\n\n主角离开。",
+        outlineBody: "# 第二章 离开\n\n## 分场\n- 离开",
+      }],
+      chapterDraftProposals: [{
+        chapterSequence: 1,
+        heading: "第一章 抵达",
+        body: "雨还在下。",
+      }],
+      finalSelfReview: "Batch fields valid.",
+    })
+    expect(parsed.volumeChapterPlans).toHaveLength(2)
+    expect(parsed.chapterDraftProposals?.[0]?.chapterSequence).toBe(1)
+    expect(parsed.volumePlanMeta?.targetChapterCount).toBe(2)
   })
 })

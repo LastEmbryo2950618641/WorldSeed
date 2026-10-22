@@ -329,8 +329,11 @@ export type SynopsisConversationMessageRow = {
   reasoning_content: string | null
   searching_json: string | null
   editing_json: string | null
+  tool_runs_json: string | null
+  todos_json: string | null
   thinking_rounds_json: string | null
   choices_json: string | null
+  error_text: string | null
   hidden: number
   created_at_ms: Timestamp
 }

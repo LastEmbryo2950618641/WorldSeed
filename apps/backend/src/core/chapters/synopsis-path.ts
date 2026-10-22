@@ -14,6 +14,9 @@ export const SYNOPSIS_MARKDOWN_SUFFIX = "[剧情梗概]" as const
 export const SYNOPSIS_MARKDOWN_FILENAME_SUFFIX = ` ${SYNOPSIS_MARKDOWN_SUFFIX}` as const
 export const OUTLINE_MARKDOWN_SUFFIX = "[剧情细纲]" as const
 export const OUTLINE_MARKDOWN_FILENAME_SUFFIX = ` ${OUTLINE_MARKDOWN_SUFFIX}` as const
+/** Archived published body — out of tree surface; not a live chapter_body. */
+export const RETIRED_BODY_MARKDOWN_SUFFIX = "[已回退]" as const
+export const RETIRED_BODY_MARKDOWN_FILENAME_SUFFIX = ` ${RETIRED_BODY_MARKDOWN_SUFFIX}` as const
 export const SYNOPSIS_PLACEHOLDER_TITLE = "待命名" as const
 
 export type ChapterMarkdownKind = "chapter_body" | "plot_synopsis" | "plot_outline"
@@ -22,11 +25,29 @@ export function resolveChapterMarkdownKind(path: string): ChapterMarkdownKind | 
   if (!path.startsWith("章节正文/") || !path.endsWith(".md")) return undefined
   if (isSynopsisMarkdownPath(path)) return "plot_synopsis"
   if (isOutlineMarkdownPath(path)) return "plot_outline"
+  if (isRetiredChapterBodyMarkdownPath(path)) return undefined
   return "chapter_body"
 }
 
 export function isChapterBodyMarkdownPath(path: string): boolean {
   return resolveChapterMarkdownKind(path) === "chapter_body"
+}
+
+/** Published body moved off the live surface after restage/rollback. */
+export function isRetiredChapterBodyMarkdownPath(path: string): boolean {
+  if (!path.startsWith("章节正文/") || !path.endsWith(".md")) return false
+  return path.endsWith(`${RETIRED_BODY_MARKDOWN_FILENAME_SUFFIX}.md`)
+    || path.endsWith(`${RETIRED_BODY_MARKDOWN_SUFFIX}.md`)
+}
+
+/** Rename live body path to the retired surface name (idempotent if already retired). */
+export function deriveRetiredChapterBodyPath(bodyPath: string): string {
+  const normalized = bodyPath.replaceAll("\\", "/")
+  if (isRetiredChapterBodyMarkdownPath(normalized)) return normalized
+  if (!isChapterBodyMarkdownPath(normalized)) {
+    throw new Error(`Not a live chapter body path: ${normalized}`)
+  }
+  return `${normalized.slice(0, -".md".length)}${RETIRED_BODY_MARKDOWN_FILENAME_SUFFIX}.md`
 }
 
 export function isSynopsisMarkdownPath(path: string): boolean {

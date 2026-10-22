@@ -1,8 +1,18 @@
 import { phaseResultEnvelopeSchema, type AIPhase, type PhaseResultEnvelope } from "@worldseed/contracts"
 
-import { phaseArtifactSchemas } from "./phase-schemas/artifacts.js"
+import {
+  coerceSynopsisDiscussToolExclusive,
+  phaseArtifactSchemas,
+  recordDiscussToolExclusiveStrip,
+} from "./phase-schemas/artifacts.js"
 
 export function parsePhaseArtifact(phase: AIPhase, input: unknown): unknown {
+  if (phase === "synopsis_discuss") {
+    const coerced = coerceSynopsisDiscussToolExclusive(input)
+    recordDiscussToolExclusiveStrip(coerced.strippedKeys)
+    return phaseArtifactSchemas[phase].parse(coerced.value)
+  }
+  recordDiscussToolExclusiveStrip([])
   return phaseArtifactSchemas[phase].parse(input)
 }
 

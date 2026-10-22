@@ -27,6 +27,7 @@ import {
 } from "../infrastructure/sqlite/index.js"
 import type { Kysely } from "kysely"
 import type { RegistryDatabase } from "../infrastructure/sqlite/database-types.js"
+import { AGENT_MEMORY_INDEX_DEFAULT } from "../application/chapters/agent-memory.js"
 import { ProjectRuntime } from "./project-runtime.js"
 import { SharedPresentationLibrary } from "../infrastructure/filesystem/shared-presentation-library.js"
 
@@ -187,19 +188,32 @@ export class BackendContainer {
   private async resolveWorkspaceDefaults(): Promise<WorkspaceDefaultDocuments> {
     if (this.workspaceDefaults !== undefined) return this.workspaceDefaults
     const prompts = new NodePromptResourceAdapter(this.promptPackageRoot)
-    const [baseRules, contentHandling, plotSynopsisGuide, settingsQueryGuide, settingsRevisionGuide] = await Promise.all([
+    const [
+      baseRules,
+      contentHandling,
+      webnovelProseLogic,
+      plotSynopsisGuide,
+      settingsQueryGuide,
+      settingsRevisionGuide,
+      discussCreationDeskWorkflow,
+    ] = await Promise.all([
       prompts.loadBaseRules(),
       prompts.loadContentHandling(),
+      prompts.loadWebnovelProseLogic(),
       prompts.loadPlotSynopsisGuide(),
       prompts.loadSettingsQueryGuide(),
       prompts.loadSettingsRevisionGuide(),
+      prompts.loadDiscussCreationDeskWorkflow(),
     ])
     return {
       baseRules: baseRules.text,
       contentHandling: contentHandling.text,
+      webnovelProseLogic: webnovelProseLogic.text,
       plotSynopsisGuide: plotSynopsisGuide.text,
       settingsQueryGuide: settingsQueryGuide.text,
       settingsRevisionGuide: settingsRevisionGuide.text,
+      discussCreationDeskWorkflow: discussCreationDeskWorkflow.text,
+      agentMemoryIndex: AGENT_MEMORY_INDEX_DEFAULT,
       settingsReadme: "# 设定集索引\n\n请在这里说明设定文件的内容、路径与适用条件，供 AI 按需选择读取。\n",
       referencesReadme: "# 参考文件索引\n\n请在这里说明参考资料的内容、路径与使用条件，供 AI 按需选择读取。\n",
       descriptionRules: "# 默认描写规则\n\n由用户在表现输出目录中继续定义。\n",

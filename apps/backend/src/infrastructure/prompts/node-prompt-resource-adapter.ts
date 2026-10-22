@@ -5,10 +5,12 @@ import type { AIPhase } from "@worldseed/contracts"
 import {
   BASE_RULES_RESOURCE,
   CONTENT_HANDLING_RESOURCE,
+  DISCUSS_CREATION_DESK_WORKFLOW_RESOURCE,
   PLOT_SYNOPSIS_GUIDE_RESOURCE,
   PROMPT_CONTRACT_VERSION,
   SETTINGS_QUERY_GUIDE_RESOURCE,
   SETTINGS_REVISION_GUIDE_RESOURCE,
+  WEBNOVEL_PROSE_LOGIC_RESOURCE,
   PLATFORM_BASE_RULE_RESOURCES,
   SYNOPSIS_DISCUSS_BASE_RULE_RESOURCES,
   resolvePromptDefinition,
@@ -28,6 +30,10 @@ export class NodePromptResourceAdapter implements PromptResourcePort {
     return this.load(CONTENT_HANDLING_RESOURCE)
   }
 
+  public async loadWebnovelProseLogic(): Promise<PromptResource> {
+    return this.load(WEBNOVEL_PROSE_LOGIC_RESOURCE)
+  }
+
   public async loadPlotSynopsisGuide(): Promise<PromptResource> {
     return this.load(PLOT_SYNOPSIS_GUIDE_RESOURCE)
   }
@@ -38,6 +44,10 @@ export class NodePromptResourceAdapter implements PromptResourcePort {
 
   public async loadSettingsRevisionGuide(): Promise<PromptResource> {
     return this.load(SETTINGS_REVISION_GUIDE_RESOURCE)
+  }
+
+  public async loadDiscussCreationDeskWorkflow(): Promise<PromptResource> {
+    return this.load(DISCUSS_CREATION_DESK_WORKFLOW_RESOURCE)
   }
 
   public async loadTurnSystemRules(): Promise<PromptResource> {

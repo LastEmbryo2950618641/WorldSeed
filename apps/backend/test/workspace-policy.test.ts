@@ -127,6 +127,8 @@ describe("workspace policy", () => {
 
   it("classifies lock kinds for UI", () => {
     expect(isPlatformLockedPath("世界推演规则/基础规则/plot-synopsis-guide.md")).toBe(true)
+    expect(isPlatformLockedPath("世界推演规则/基础规则/webnovel-prose-logic.md")).toBe(true)
+    expect(isPlatformLockedPath("世界推演规则/基础规则/discuss-creation-desk-workflow.md")).toBe(true)
     expect(resolveWorkspaceLockKind("设定集")).toBe("immutable_scaffold")
     expect(resolveWorkspaceLockKind("设定集/readme.md")).toBe("immutable_scaffold")
     expect(resolveWorkspaceLockKind("设定集/人物/顾青衡.md")).toBeUndefined()

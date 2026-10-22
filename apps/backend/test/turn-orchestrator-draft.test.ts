@@ -241,8 +241,8 @@ async function createFixture() {
   const created = await lifecycle.create({
     projectId, workspaceRootRef, displayName: "Draft output", nowMs: 1,
     defaults: {
-      baseRules: "# base\n", contentHandling: "# handling\n", plotSynopsisGuide: "# synopsis\n",
-      settingsQueryGuide: "# query\n", settingsRevisionGuide: "# revision\n", settingsReadme: "# settings\n",
+      baseRules: "# base\n", contentHandling: "# handling\n", webnovelProseLogic: "# prose logic\n", plotSynopsisGuide: "# synopsis\n",
+      settingsQueryGuide: "# query\n", settingsRevisionGuide: "# revision\n", discussCreationDeskWorkflow: "# workflow\n", agentMemoryIndex: "# memory\n", settingsReadme: "# settings\n",
       referencesReadme: "# references\n", descriptionRules: "# description\n", proseStyleRules: "# prose\n",
       stagingReadme: "# staging\n", stagingNotes: "# notes\n", stagingCharacters: "# characters\n",
       stagingWorld: "# world\n", stagingPromoteIndex: "# promote\n",

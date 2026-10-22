@@ -45,6 +45,8 @@ describe("current configuration", () => {
     })
     expect(defaultProjectSettings.history.retentionLimit).toBeNull()
     expect(defaultProjectSettings.creationDesk.autoApproveGoalProposals).toBe(true)
+    expect(defaultProjectSettings.creationDesk.requireCompleteHookSchedules).toBe(true)
+    expect(defaultProjectSettings.creationDesk.chapterWorkflowEnabled).toBe(false)
   })
 
   it("matches the documented autonomy scaling at the default value", () => {

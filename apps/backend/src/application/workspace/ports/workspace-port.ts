@@ -10,9 +10,12 @@ import type { ProjectRepository } from "../../projects/index.js"
 export type WorkspaceDefaultDocuments = Readonly<{
   baseRules: string
   contentHandling: string
+  webnovelProseLogic: string
   plotSynopsisGuide: string
   settingsQueryGuide: string
   settingsRevisionGuide: string
+  discussCreationDeskWorkflow: string
+  agentMemoryIndex: string
   settingsReadme: string
   referencesReadme: string
   descriptionRules: string
@@ -65,6 +68,11 @@ export interface WorkspacePort {
   saveSynopsisMarkdown(workspaceRootRef: string, relativePath: string, content: string): Promise<void>
   removeSynopsisMarkdown(workspaceRootRef: string, relativePath: string): Promise<void>
   publishChapter(workspaceRootRef: string, relativePath: string, content: string): Promise<void>
+  /**
+   * Move a live published chapter body off the tree surface by renaming to `… [已回退].md`.
+   * Returns the retired relative path. No-op path if already retired.
+   */
+  archivePublishedChapter(workspaceRootRef: string, relativePath: string): Promise<string>
   validatePublishedChapterReplacement(
     workspaceRootRef: string,
     currentRelativePath: string,

@@ -6,6 +6,7 @@ export type WorkspaceEntryRole =
   | "world_rules"
   | "base_rules"
   | "user_rules"
+  | "agent_memory"
   | "settings"
   | "references"
   | "chapters"
@@ -13,6 +14,7 @@ export type WorkspaceEntryRole =
   | "description_rules"
   | "prose_style_rules"
   | "staging"
+  | "outline"
 
 export type FixedWorkspaceEntry = Readonly<{
   key: string
@@ -79,6 +81,16 @@ export const fixedWorkspaceEntries: readonly FixedWorkspaceEntry[] = Object.free
     allowUserMarkdown: false,
   },
   {
+    key: "webnovel-prose-logic",
+    role: "base_rules",
+    relativePath: "世界推演规则/基础规则/webnovel-prose-logic.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: false,
+  },
+  {
     key: "plot-synopsis-guide",
     role: "base_rules",
     relativePath: "世界推演规则/基础规则/plot-synopsis-guide.md",
@@ -107,6 +119,46 @@ export const fixedWorkspaceEntries: readonly FixedWorkspaceEntry[] = Object.free
     allowedExtensions: [".md"],
     allowUserFolders: false,
     allowUserMarkdown: false,
+  },
+  {
+    key: "batch-volume-deduction-plan",
+    role: "base_rules",
+    relativePath: "世界推演规则/基础规则/batch-volume-deduction-plan.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: false,
+  },
+  {
+    key: "discuss-creation-desk-workflow",
+    role: "base_rules",
+    relativePath: "世界推演规则/基础规则/discuss-creation-desk-workflow.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: false,
+  },
+  {
+    key: "agent-memory",
+    role: "agent_memory",
+    relativePath: "世界推演规则/Agent记忆",
+    entryKind: "directory",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: true,
+  },
+  {
+    key: "agent-memory-index",
+    role: "agent_memory",
+    relativePath: "世界推演规则/Agent记忆/MEMORY.md",
+    entryKind: "file",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: true,
   },
   {
     key: "user-rules",
@@ -268,6 +320,16 @@ export const fixedWorkspaceEntries: readonly FixedWorkspaceEntry[] = Object.free
     allowUserFolders: false,
     allowUserMarkdown: true,
   },
+  {
+    key: "volume-outline",
+    role: "outline",
+    relativePath: "大纲",
+    entryKind: "directory",
+    immutablePath: true,
+    allowedExtensions: [".md"],
+    allowUserFolders: false,
+    allowUserMarkdown: true,
+  },
 ])
 
 export const fixedTopLevelDirectories = Object.freeze([
@@ -277,4 +339,5 @@ export const fixedTopLevelDirectories = Object.freeze([
   "章节正文",
   "表现输出",
   "暂存区",
+  "大纲",
 ] as const)

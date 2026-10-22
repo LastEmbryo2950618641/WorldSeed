@@ -1,11 +1,13 @@
 import { Editor, type Monaco } from "@monaco-editor/react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { editor } from "monaco-editor"
-import type { ChapterNarrativeIntent, ChapterRevision, DiscussFocusKind, RevisionDraftVersion, SynopsisConversationMessage, SynopsisConversationSession, SynopsisConversationStreamSnapshot, SynopsisStagingPromoteProposal } from "@worldseed/contracts"
+import type { ChapterNarrativeIntent, ChapterRevision, ChapterRevisionReadResult, ChapterSummary, DiscussFocusKind, RevisionDraftVersion, SynopsisConversationMessage, SynopsisConversationSession, SynopsisConversationStreamSnapshot, SynopsisStagingPromoteProposal } from "@worldseed/contracts"
 import { WORLDSEED_EDITOR_THEME, ensureWorldseedEditorTheme } from "../../monaco.js"
 import { SynopsisConversationComposer } from "./SynopsisConversationComposer.js"
+import type { BatchDeductionPhase } from "./batch-chapter-deduction.js"
+import { ChapterPanel } from "./ChapterPanel.js"
 import { isChapterPlanningMarkdownPath, type DiscussFocusChapterOption } from "./synopsis-path.js"
-import { AlertTriangle, BookOpenText, FilePlus2, RotateCcw, Save, Sparkles } from "lucide-react"
+import { AlertTriangle, BookOpenText, FilePlus2, LayoutList, RotateCcw, Save, Sparkles } from "lucide-react"
 import { ChapterDraftDiffView } from "./ChapterDraftDiffView.js"
 import { ChapterDraftVersionsPrototype, type DraftDisplayMode } from "./ChapterDraftVersionsPrototype.js"
 import { ChapterWorkspaceToolbar } from "./ChapterWorkspaceToolbar.js"
@@ -59,6 +61,25 @@ function syncChapterEditorWrap(
 type Props = Readonly<{
   selectedPath: string | undefined
   openedDocumentPath: string | undefined
+  browseChapters?: boolean
+  onBrowseChapters?(): void
+  browseChapterSequence?: number
+  browseVolumeFolderName?: string
+  onSelectBrowseChapter?(chapter: DiscussFocusChapterOption): void
+  onSelectBrowseVolume?(volumeFolderName: string): void
+  batchRunning?: boolean
+  batchPaused?: boolean
+  batchStatusLabel?: string
+  batchPhase?: BatchDeductionPhase
+  batchChapterSequence?: number
+  onStartBatch?(): void
+  onStopBatch?(): void
+  onPauseBatch?(): void
+  onContinueBatch?(): void
+  batchPanel?: React.ReactNode
+  onOpenVolumeOutline?(volumeFolderName: string): void
+  chapterSummaries?: readonly ChapterSummary[]
+  unpublishedDrafts?: readonly ChapterRevisionReadResult[]
   content: string
   dirty: boolean
   readOnly: boolean
@@ -120,7 +141,7 @@ type Props = Readonly<{
   synopsisStream?: SynopsisConversationStreamSnapshot | undefined
   synopsisDraftRestore?: { text: string; token: number } | undefined
   pendingStagingPromotes?: readonly SynopsisStagingPromoteProposal[]
-  onSynopsisSend(message: string): Promise<void>
+  onSynopsisSend(message: string, options?: Readonly<{ agentMode?: "auto" | "plan" | "accept_edits" }>): Promise<void>
   onSynopsisStop?(): Promise<void>
   onSynopsisRefreshChoices(messageId: string): Promise<void>
   onPromoteStaging(): Promise<void>
@@ -130,6 +151,8 @@ type Props = Readonly<{
   onSetFocus?(sequence: number, focusKind: DiscussFocusKind): void
   focusChapters?: readonly DiscussFocusChapterOption[]
   onOpenSettingsLineage?(): void
+  requireCompleteHookSchedules?: boolean
+  chapterWorkflowEnabled?: boolean
   synopsisTokenMetrics?: Readonly<{
     kvRate?: number
     totalTokens?: number
@@ -153,13 +176,15 @@ export function EditorArea(props: Props): React.JSX.Element {
     chapterSaveAvailableRef.current = available
     setChapterSaveAvailable(available)
   }, [])
-  const mode = props.selectedPath === undefined
-    ? "home"
-    : isChapterPlanningMarkdownPath(props.selectedPath)
-      ? "synopsis"
-    : props.selectedPath.startsWith("章节正文/")
-      ? "chapter"
-      : "markdown"
+  const mode = props.browseChapters === true && props.selectedPath === undefined
+    ? "chapters"
+    : props.selectedPath === undefined
+      ? "home"
+      : isChapterPlanningMarkdownPath(props.selectedPath)
+        ? "synopsis"
+        : props.selectedPath.startsWith("章节正文/")
+          ? "chapter"
+          : "markdown"
   const dockChapterToolbar = mode === "chapter"
   const canCreateFirstDraft = (mode === "home" || mode === "synopsis")
     && props.onCreateDraft !== undefined
@@ -177,8 +202,31 @@ export function EditorArea(props: Props): React.JSX.Element {
     }
   }
 
-  const documentPane = mode === "home"
-    ? <SynopsisConversationComposer
+  const documentPane = mode === "chapters"
+    ? <ChapterPanel
+        chapters={props.focusChapters ?? []}
+        chapterSummaries={props.chapterSummaries ?? []}
+        unpublishedDrafts={props.unpublishedDrafts ?? []}
+        workspaceRootRef={props.workspaceRootRef ?? ""}
+        selectedSequence={props.browseChapterSequence}
+        {...(props.browseVolumeFolderName === undefined
+          ? {}
+          : { selectedVolumeFolderName: props.browseVolumeFolderName })}
+        onSelectChapter={(chapter) => { props.onSelectBrowseChapter?.(chapter) }}
+        onSelectVolume={(volumeFolderName) => { props.onSelectBrowseVolume?.(volumeFolderName) }}
+        batchRunning={props.batchRunning === true}
+        batchPaused={props.batchPaused === true}
+        {...(props.batchStatusLabel === undefined ? {} : { batchStatusLabel: props.batchStatusLabel })}
+        {...(props.batchPhase === undefined ? {} : { batchPhase: props.batchPhase })}
+        {...(props.batchChapterSequence === undefined ? {} : { batchChapterSequence: props.batchChapterSequence })}
+        {...(props.onStartBatch === undefined ? {} : { onStartBatch: props.onStartBatch })}
+        {...(props.onStopBatch === undefined ? {} : { onStopBatch: props.onStopBatch })}
+        {...(props.onPauseBatch === undefined ? {} : { onPauseBatch: props.onPauseBatch })}
+        {...(props.onContinueBatch === undefined ? {} : { onContinueBatch: props.onContinueBatch })}
+        {...(props.onOpenVolumeOutline === undefined ? {} : { onOpenVolumeOutline: props.onOpenVolumeOutline })}
+      />
+    : mode === "home"
+      ? <SynopsisConversationComposer
         projectId={props.projectId}
         workspaceRootRef={props.workspaceRootRef}
         session={props.synopsisSession}
@@ -211,6 +259,9 @@ export function EditorArea(props: Props): React.JSX.Element {
         {...(props.onOpenSettingsLineage === undefined
           ? {}
           : { onOpenSettingsLineage: props.onOpenSettingsLineage })}
+        requireCompleteHookSchedules={props.requireCompleteHookSchedules !== false}
+        chapterWorkflowEnabled={props.chapterWorkflowEnabled === true}
+        {...(props.batchPanel === undefined ? {} : { batchPanel: props.batchPanel })}
         {...(props.synopsisTokenMetrics === undefined
           ? {}
           : { tokenMetrics: props.synopsisTokenMetrics })}
@@ -273,11 +324,19 @@ export function EditorArea(props: Props): React.JSX.Element {
 
   return <section className="editor-area">
     <div className="editor-tabs">
-      <button type="button" className={props.selectedPath === undefined ? "active" : ""} onClick={props.onHome}><BookOpenText size={15} /> 创作台</button>
+      <button type="button" className={mode === "home" ? "active" : ""} onClick={props.onHome}><BookOpenText size={15} /> 创作台</button>
+      {props.onBrowseChapters === undefined
+        ? null
+        : <button
+            type="button"
+            className={mode === "chapters" ? "active" : ""}
+            data-testid="editor-tab-chapters"
+            onClick={props.onBrowseChapters}
+          ><LayoutList size={15} /> 章节面板</button>}
       {props.openedDocumentPath === undefined ? null : (
         <button
           type="button"
-          className={props.selectedPath === props.openedDocumentPath ? "active" : ""}
+          className={props.selectedPath === props.openedDocumentPath && mode !== "chapters" ? "active" : ""}
           onClick={props.onOpenDocument}
         >
           <span>{props.openedDocumentPath.split("/").at(-1)}</span>

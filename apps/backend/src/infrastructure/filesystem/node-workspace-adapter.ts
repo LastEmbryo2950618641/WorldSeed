@@ -7,6 +7,7 @@ import {
   readdir,
   realpath,
   rename,
+  rm,
   rmdir,
   unlink,
   writeFile,
@@ -29,7 +30,9 @@ import {
   digest,
   deriveVolumeDirectoryPath,
   fixedWorkspaceEntries,
+  deriveRetiredChapterBodyPath,
   isChapterBodyMarkdownPath,
+  isRetiredChapterBodyMarkdownPath,
   isSharedPresentationPath,
   isChapterPlanningMarkdownPath,
   isVolumeDirectoryPath,
@@ -39,6 +42,7 @@ import {
   type WorkspaceInventoryEntry,
   type WorkspaceValidationIssue,
 } from "../../core/index.js"
+import { BATCH_VOLUME_DEDUCTION_PLAN_DEFAULT } from "../../core/workspace/batch-volume-deduction-plan-default.js"
 import type {
   WorkspaceDefaultDocuments,
   WorkspacePort,
@@ -82,6 +86,10 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       encoding: "utf8",
       flag: "wx",
     })
+    await writeFile(resolveInside(root, "世界推演规则/基础规则/webnovel-prose-logic.md"), defaults.webnovelProseLogic, {
+      encoding: "utf8",
+      flag: "wx",
+    })
     await writeFile(resolveInside(root, "世界推演规则/基础规则/plot-synopsis-guide.md"), defaults.plotSynopsisGuide, {
       encoding: "utf8",
       flag: "wx",
@@ -91,6 +99,20 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       flag: "wx",
     })
     await writeFile(resolveInside(root, "世界推演规则/基础规则/settings-revision-guide.md"), defaults.settingsRevisionGuide, {
+      encoding: "utf8",
+      flag: "wx",
+    })
+    await writeFile(
+      resolveInside(root, "世界推演规则/基础规则/discuss-creation-desk-workflow.md"),
+      defaults.discussCreationDeskWorkflow,
+      { encoding: "utf8", flag: "wx" },
+    )
+    await writeFile(
+      resolveInside(root, "世界推演规则/基础规则/batch-volume-deduction-plan.md"),
+      BATCH_VOLUME_DEDUCTION_PLAN_DEFAULT,
+      { encoding: "utf8", flag: "wx" },
+    )
+    await writeFile(resolveInside(root, "世界推演规则/Agent记忆/MEMORY.md"), defaults.agentMemoryIndex, {
       encoding: "utf8",
       flag: "wx",
     })
@@ -158,6 +180,10 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       defaults.contentHandling,
     )
     await writeFileIfMissing(
+      resolveInside(root, "世界推演规则/基础规则/webnovel-prose-logic.md"),
+      defaults.webnovelProseLogic,
+    )
+    await writeFileIfMissing(
       resolveInside(root, "世界推演规则/基础规则/plot-synopsis-guide.md"),
       defaults.plotSynopsisGuide,
     )
@@ -169,6 +195,20 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
       resolveInside(root, "世界推演规则/基础规则/settings-revision-guide.md"),
       defaults.settingsRevisionGuide,
     )
+    await writeFileIfMissing(
+      resolveInside(root, "世界推演规则/基础规则/discuss-creation-desk-workflow.md"),
+      defaults.discussCreationDeskWorkflow,
+    )
+    await writeFileIfMissing(
+      resolveInside(root, "世界推演规则/基础规则/batch-volume-deduction-plan.md"),
+      BATCH_VOLUME_DEDUCTION_PLAN_DEFAULT,
+    )
+    await mkdir(resolveInside(root, "世界推演规则/Agent记忆"), { recursive: true })
+    await writeFileIfMissing(
+      resolveInside(root, "世界推演规则/Agent记忆/MEMORY.md"),
+      defaults.agentMemoryIndex,
+    )
+    await mkdir(resolveInside(root, "大纲"), { recursive: true })
     await mkdir(resolveInside(root, "表现输出/本作品描写"), { recursive: true })
     if (this.sharedPresentationRoot === undefined) {
       await mkdir(resolveInside(root, "表现输出/描写规则"), { recursive: true })
@@ -185,6 +225,7 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     await writeFileIfMissing(resolveInside(root, "暂存区/人物草稿.md"), defaults.stagingCharacters)
     await writeFileIfMissing(resolveInside(root, "暂存区/世界与规则草稿.md"), defaults.stagingWorld)
     await writeFileIfMissing(resolveInside(root, "暂存区/待落盘清单.md"), defaults.stagingPromoteIndex)
+    await migrateLegacyWorldPlanFolder(root)
   }
 
   public async validate(workspaceRootRef: string): Promise<WorkspaceValidationReport> {
@@ -412,6 +453,38 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     }
   }
 
+  public async archivePublishedChapter(workspaceRootRef: string, relativePath: string): Promise<string> {
+    const root = await realpath(resolve(workspaceRootRef))
+    const normalized = normalizeWorkspacePath(relativePath)
+    if (isRetiredChapterBodyMarkdownPath(normalized)) return normalized
+    if (!isChapterBodyMarkdownPath(normalized)) {
+      throw new Error(`Only live published chapter bodies can be archived: ${normalized}`)
+    }
+    assertWorkspaceMutationAllowed(normalized, "file", "chapter_publisher")
+    const retiredRelative = deriveRetiredChapterBodyPath(normalized)
+    assertWorkspaceMutationAllowed(retiredRelative, "file", "chapter_publisher")
+    const currentPath = resolveInside(root, normalized)
+    const retiredPath = resolveInside(root, retiredRelative)
+    await assertParentChainContainsNoLinks(root, currentPath)
+    await assertParentChainContainsNoLinks(root, retiredPath)
+    try {
+      await lstat(currentPath)
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        throw new Error(`Published chapter body not found: ${normalized}`)
+      }
+      throw error
+    }
+    try {
+      await lstat(retiredPath)
+      throw new Error(`Retired chapter path already exists: ${retiredRelative}`)
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error
+    }
+    await rename(currentPath, retiredPath)
+    return retiredRelative
+  }
+
   public async replacePublishedChapter(
     workspaceRootRef: string,
     currentRelativePath: string,
@@ -571,6 +644,34 @@ async function writeFileIfMissing(path: string, content: string): Promise<void> 
     await writeFile(path, content, { encoding: "utf8", flag: "wx" })
   } catch (error) {
     if (!isAlreadyExistsError(error)) throw error
+  }
+}
+
+/** Move legacy `世界推演规划/{卷}/卷大纲.md` → `大纲/{卷}.md`, then remove the old root. */
+async function migrateLegacyWorldPlanFolder(root: string): Promise<void> {
+  const legacyRoot = resolveInside(root, "世界推演规划")
+  let names: string[]
+  try {
+    names = await readdir(legacyRoot)
+  } catch {
+    return
+  }
+  await mkdir(resolveInside(root, "大纲"), { recursive: true })
+  for (const name of names) {
+    if (name === "批量推演规划.md") continue
+    const source = join(legacyRoot, name, "卷大纲.md")
+    const target = resolveInside(root, `大纲/${name}.md`)
+    try {
+      const content = await readFile(source, "utf8")
+      await writeFileIfMissing(target, content)
+    } catch {
+      // missing outline — skip
+    }
+  }
+  try {
+    await rm(legacyRoot, { recursive: true, force: true })
+  } catch {
+    // best-effort cleanup
   }
 }
 

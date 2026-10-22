@@ -191,12 +191,83 @@ export const deductionGoalReconcileIssueSchema = z.object({
     "missing_chapter_progress",
     "pending_proposals",
     "synopsis_goal_mismatch",
+    "incomplete_hook_schedule",
   ]),
   severity: z.enum(["warning", "blocking"]),
   message: z.string().min(1),
   goalId: idSchema.optional(),
 })
 export type DeductionGoalReconcileIssue = z.infer<typeof deductionGoalReconcileIssueSchema>
+
+export type HookScheduleMissingField = "plant" | "payoff"
+
+export type HookScheduleIncomplete = Readonly<{
+  goalId: string
+  content: string
+  narrativeKind: DeductionGoalNarrativeKind
+  missing: readonly HookScheduleMissingField[]
+}>
+
+export type HookScheduleAudit = Readonly<{
+  requireCompleteHookSchedules: boolean
+  incompleteHooks: readonly HookScheduleIncomplete[]
+  completeCount: number
+  incompleteCount: number
+}>
+
+/** Active foreshadow/climax goals that still lack plant and/or payoff chapter windows. */
+export function listIncompleteHookSchedules(
+  goals: readonly DeductionGoal[],
+): readonly HookScheduleIncomplete[] {
+  const incomplete: HookScheduleIncomplete[] = []
+  for (const goal of goals) {
+    if (goal.lifecycle !== "active") continue
+    if (goal.narrativeKind !== "foreshadow" && goal.narrativeKind !== "climax") continue
+    const missing: HookScheduleMissingField[] = []
+    if (goal.plantChapterSequence === undefined) missing.push("plant")
+    if (goal.payoffChapterSequence === undefined) missing.push("payoff")
+    if (missing.length === 0) continue
+    incomplete.push({
+      goalId: goal.goalId,
+      content: goal.content,
+      narrativeKind: goal.narrativeKind,
+      missing,
+    })
+  }
+  return incomplete
+}
+
+export function buildHookScheduleAudit(
+  goals: readonly DeductionGoal[],
+  requireCompleteHookSchedules: boolean,
+): HookScheduleAudit {
+  const incompleteHooks = listIncompleteHookSchedules(goals)
+  const hookGoals = goals.filter((goal) => (
+    goal.lifecycle === "active"
+    && (goal.narrativeKind === "foreshadow" || goal.narrativeKind === "climax")
+  ))
+  return {
+    requireCompleteHookSchedules,
+    incompleteHooks,
+    completeCount: Math.max(0, hookGoals.length - incompleteHooks.length),
+    incompleteCount: incompleteHooks.length,
+  }
+}
+
+export function assertCompleteHookScheduleForKind(
+  narrativeKind: DeductionGoalNarrativeKind,
+  plantChapterSequence: number | undefined,
+  payoffChapterSequence: number | undefined,
+  requireCompleteHookSchedules: boolean,
+): void {
+  if (!requireCompleteHookSchedules) return
+  if (narrativeKind !== "foreshadow" && narrativeKind !== "climax") return
+  const missing: string[] = []
+  if (plantChapterSequence === undefined) missing.push("起势章")
+  if (payoffChapterSequence === undefined) missing.push("兑现章")
+  if (missing.length === 0) return
+  throw new Error(`钩子时限不完整：伏笔/高潮必须填写${missing.join("与")}`)
+}
 
 export const deductionGoalReconcileResultSchema = z.object({
   warnings: z.array(deductionGoalReconcileIssueSchema),

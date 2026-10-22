@@ -25,6 +25,7 @@ export const backendMethodValues = [
   "turn.resume",
   "turn.recoverable.list",
   "turn.latest.get",
+  "turn.list",
   "turn.pause",
   "turn.cancel",
   "turn.status",

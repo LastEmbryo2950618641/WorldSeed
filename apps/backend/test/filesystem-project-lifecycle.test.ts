@@ -32,9 +32,12 @@ const temporaryDirectories: string[] = []
 const defaults = {
   baseRules: "# Worldseed V1 基础规则\n\n平台只读规则。\n",
   contentHandling: "# 内容处理规则\n\n平台只读规则。\n",
+  webnovelProseLogic: "# 中文网文正文质量与逻辑\n\n平台只读规则。\n",
   plotSynopsisGuide: "# 剧情梗概讨论引导\n\n平台只读引导。\n",
   settingsQueryGuide: "# 设定集默认查询规则\n\n平台只读引导。\n",
   settingsRevisionGuide: "# 设定集修订规则\n\n平台只读引导。\n",
+  discussCreationDeskWorkflow: "# 创作台讨论工作流\n\n平台只读。\n",
+  agentMemoryIndex: "# Agent 记忆索引\n\n（尚无条目）\n",
   settingsReadme: "# 设定集索引\n",
   referencesReadme: "# 参考文件索引\n",
   descriptionRules: "# 默认描写规则\n\n自动选择描写方式。\n",
@@ -67,11 +70,18 @@ describe("Node workspace adapter", () => {
 
     expect(report.issues).toEqual([])
     expect(report.inventory.filter((entry) => !entry.path.includes("/") && entry.kind === "directory"))
-      .toHaveLength(6)
+      .toHaveLength(7)
     expect(await adapter.readMarkdown(workspaceRoot, "世界推演规则/基础规则/base-rules.md"))
       .toBe(defaults.baseRules)
+    expect(await adapter.readMarkdown(workspaceRoot, "世界推演规则/基础规则/batch-volume-deduction-plan.md"))
+      .toContain("卷粒度")
+    expect(report.inventory.some((entry) => entry.path === "大纲" && entry.kind === "directory")).toBe(true)
     expect(await adapter.readMarkdown(workspaceRoot, "世界推演规则/基础规则/content-handling.md"))
       .toBe(defaults.contentHandling)
+    expect(await adapter.readMarkdown(workspaceRoot, "世界推演规则/基础规则/discuss-creation-desk-workflow.md"))
+      .toBe(defaults.discussCreationDeskWorkflow)
+    expect(await adapter.readMarkdown(workspaceRoot, "世界推演规则/Agent记忆/MEMORY.md"))
+      .toBe(defaults.agentMemoryIndex)
     expect(await adapter.readMarkdown(workspaceRoot, "设定集/readme.md")).toBe(defaults.settingsReadme)
     expect(await adapter.readMarkdown(workspaceRoot, "参考文件/readme.md")).toBe(defaults.referencesReadme)
     expect(await adapter.readMarkdown(workspaceRoot, "暂存区/readme.md")).toBe(defaults.stagingReadme)
@@ -113,6 +123,11 @@ describe("Node workspace adapter", () => {
       "章节正文/第一卷 测试/第一章 开始.md",
       "overwrite",
     )).rejects.toThrow()
+    expect(await adapter.archivePublishedChapter(workspaceRoot, "章节正文/第一卷 测试/第一章 开始.md"))
+      .toBe("章节正文/第一卷 测试/第一章 开始 [已回退].md")
+    expect(existsSync(join(workspaceRoot, "章节正文", "第一卷 测试", "第一章 开始.md"))).toBe(false)
+    expect(readFileSync(join(workspaceRoot, "章节正文", "第一卷 测试", "第一章 开始 [已回退].md"), "utf8"))
+      .toContain("正文")
   })
 
   it("imports only Markdown files and validates the entire folder before copying", async () => {
@@ -269,9 +284,13 @@ describe("project lifecycle", () => {
       const manifest = (await session.repository.readManifest(projectId))!
       const legacyFixedEntries = manifest.fixedEntries.filter((entry) => (
         entry.key !== "content-handling"
+        && entry.key !== "webnovel-prose-logic"
         && entry.key !== "plot-synopsis-guide"
         && entry.key !== "settings-query-guide"
         && entry.key !== "settings-revision-guide"
+        && entry.key !== "discuss-creation-desk-workflow"
+        && entry.key !== "agent-memory"
+        && entry.key !== "agent-memory-index"
         && entry.key !== "work-description-rules"
       ))
       const legacyDigest = digest({
@@ -291,9 +310,13 @@ describe("project lifecycle", () => {
 
     // Simulate an older on-disk workspace that never received the new platform guides.
     unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "content-handling.md"))
+    unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "webnovel-prose-logic.md"))
     unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "plot-synopsis-guide.md"))
     unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "settings-query-guide.md"))
     unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "settings-revision-guide.md"))
+    unlinkSync(join(workspaceRoot, "世界推演规则", "基础规则", "discuss-creation-desk-workflow.md"))
+    unlinkSync(join(workspaceRoot, "世界推演规则", "Agent记忆", "MEMORY.md"))
+    rmdirSync(join(workspaceRoot, "世界推演规则", "Agent记忆"))
     rmdirSync(join(workspaceRoot, "表现输出", "本作品描写"))
     unlinkSync(join(workspaceRoot, "表现输出", "描写规则", "自动.md"))
     unlinkSync(join(workspaceRoot, "表现输出", "描写规则", "感官描写.md"))
@@ -303,9 +326,13 @@ describe("project lifecycle", () => {
 
     const opened = await lifecycle.openByWorkspace(workspaceRoot, 200, defaults)
     expect(opened.manifest.fixedEntries.some((entry) => entry.key === "content-handling")).toBe(true)
+    expect(opened.manifest.fixedEntries.some((entry) => entry.key === "webnovel-prose-logic")).toBe(true)
     expect(opened.manifest.fixedEntries.some((entry) => entry.key === "plot-synopsis-guide")).toBe(true)
     expect(opened.manifest.fixedEntries.some((entry) => entry.key === "settings-query-guide")).toBe(true)
     expect(opened.manifest.fixedEntries.some((entry) => entry.key === "settings-revision-guide")).toBe(true)
+    expect(opened.manifest.fixedEntries.some((entry) => entry.key === "discuss-creation-desk-workflow")).toBe(true)
+    expect(opened.manifest.fixedEntries.some((entry) => entry.key === "agent-memory")).toBe(true)
+    expect(opened.manifest.fixedEntries.some((entry) => entry.key === "agent-memory-index")).toBe(true)
     expect(opened.manifest.fixedEntries.some((entry) => entry.key === "work-description-rules")).toBe(true)
     expect(existsSync(join(workspaceRoot, "表现输出", "本作品描写"))).toBe(true)
     expect(existsSync(join(workspaceRoot, "表现输出", "描写规则", "自动.md"))).toBe(true)
@@ -321,10 +348,16 @@ describe("project lifecycle", () => {
       .toBe(defaults.proseStyleRules)
     expect(readFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "content-handling.md"), "utf8"))
       .toBe(defaults.contentHandling)
+    expect(readFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "webnovel-prose-logic.md"), "utf8"))
+      .toBe(defaults.webnovelProseLogic)
     expect(readFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "settings-query-guide.md"), "utf8"))
       .toBe(defaults.settingsQueryGuide)
     expect(readFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "settings-revision-guide.md"), "utf8"))
       .toBe(defaults.settingsRevisionGuide)
+    expect(readFileSync(join(workspaceRoot, "世界推演规则", "基础规则", "discuss-creation-desk-workflow.md"), "utf8"))
+      .toBe(defaults.discussCreationDeskWorkflow)
+    expect(readFileSync(join(workspaceRoot, "世界推演规则", "Agent记忆", "MEMORY.md"), "utf8"))
+      .toBe(defaults.agentMemoryIndex)
     await registryDatabase.destroy()
   })
 
@@ -345,7 +378,7 @@ describe("project lifecycle", () => {
     const internalStore = new NodeInternalStoreAdapter(appDataRoot)
     const store = await internalStore.prepareProject(projectId, workspaceRoot)
     const database = await openProjectDatabase(store.projectDatabaseRef)
-    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(49)
+    expect(await database.selectFrom("schema_migrations").selectAll().execute()).toHaveLength(52)
     await database.destroy()
   })
 })

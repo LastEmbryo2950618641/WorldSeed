@@ -4473,9 +4473,12 @@ async function createFixture() {
     defaults: {
       baseRules: "# base\n",
       contentHandling: "# content handling\n",
+      webnovelProseLogic: "# prose logic\n",
       plotSynopsisGuide: "# synopsis guide\n",
       settingsQueryGuide: "# settings query guide\n",
       settingsRevisionGuide: "# settings revision guide\n",
+      discussCreationDeskWorkflow: "# discuss workflow\n",
+      agentMemoryIndex: "# agent memory\n",
       settingsReadme: "# settings\n",
       referencesReadme: "# references\n",
       descriptionRules: "# description\n",

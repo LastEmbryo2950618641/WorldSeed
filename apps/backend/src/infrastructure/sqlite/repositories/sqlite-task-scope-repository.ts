@@ -102,6 +102,17 @@ export class SqliteTaskScopeRepository implements TaskScopeRepository {
     return rows.map(mapTask)
   }
 
+  public async listTurnTasks(projectId: ProjectId, limit = 50): Promise<readonly StoredTask[]> {
+    const rows = await this.database.selectFrom("tasks").selectAll()
+      .where("project_id", "=", projectId)
+      .where("kind", "=", "turn")
+      .orderBy("updated_at", "desc")
+      .orderBy("id", "desc")
+      .limit(Math.max(1, Math.min(200, limit)))
+      .execute()
+    return rows.map(mapTask)
+  }
+
   public async findLatestTask(projectId: ProjectId): Promise<StoredTask | undefined> {
     const row = await this.database.selectFrom("tasks").selectAll()
       .where("project_id", "=", projectId)

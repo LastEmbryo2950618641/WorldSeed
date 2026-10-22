@@ -52,4 +52,25 @@ describe("toAgentTimeline", () => {
     })
     expect(segments.map((item) => item.kind)).toEqual(["thinking", "searching", "final"])
   })
+
+  it("interleaves Claude-style tool runs with thinking by round", () => {
+    const segments = toAgentTimeline({
+      thinkingRounds: [{ round: 1, text: "先 bash" }],
+      toolRuns: [{
+        runId: "run-1",
+        name: "bash",
+        action: "invoke",
+        arguments: JSON.stringify({ command: "dir /b" }),
+        status: "completed",
+        round: 1,
+      }],
+      content: "正式回复",
+    })
+    expect(segments.map((item) => item.kind)).toEqual(["thinking", "running", "final"])
+    const run = segments[1]
+    expect(run?.kind).toBe("running")
+    if (run?.kind === "running") {
+      expect(run.items[0]?.name).toBe("bash")
+    }
+  })
 })

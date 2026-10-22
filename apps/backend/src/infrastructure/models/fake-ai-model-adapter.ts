@@ -700,7 +700,9 @@ export class FakeAiModelAdapter implements AIModelPort {
     const workDisplayName = shouldNameWork
       ? (chapterTitle === "世界种子" ? "潮声纪" : chapterTitle.slice(0, 200))
       : undefined
+    const batchAutomation = discuss?.batchAutomation === true
     const synopsisConfirmed = discuss?.synopsisConfirmed === true
+      || batchAutomation
       || /用这份梗概写细纲|确认(?:本章)?梗概|开始写细纲/u.test(userMessage)
     const existingOutline = discuss?.outlineMarkdown?.trim() ?? ""
     const hasExistingOutline = existingOutline.length > 0
@@ -789,12 +791,16 @@ export class FakeAiModelAdapter implements AIModelPort {
           : settingsIndexEvidence === undefined
             ? `我已更新「${synopsisHeading}」的剧情梗概。这是定本章方向，不是写入设定集；可选用这份梗概写细纲，或跳过细纲按梗概开推。`
             : `我已对照设定集索引整理「${synopsisHeading}」的剧情梗概。这是定本章方向，不是写入设定集；可选用这份梗概写细纲，或跳过细纲按梗概开推。`,
-      ...(discuss?.userEditedSinceAgent === true || wantsPromote || isHandoff || synopsisConfirmed || wantsBodyDraft
+      ...(batchAutomation && !wantsPromote && !isHandoff && !wantsBodyDraft
+        ? { chapterTitle, synopsisBody, outlineBody }
+        : discuss?.userEditedSinceAgent === true || wantsPromote || isHandoff || synopsisConfirmed || wantsBodyDraft
+          ? {}
+          : { chapterTitle, synopsisBody }),
+      ...(batchAutomation
         ? {}
-        : { chapterTitle, synopsisBody }),
-      ...(synopsisConfirmed && !wantsPromote && !isHandoff && !wantsArcPlan && !useBodyEdits && !wantsBodyDraft
-        ? { outlineBody }
-        : {}),
+        : synopsisConfirmed && !wantsPromote && !isHandoff && !wantsArcPlan && !useBodyEdits && !wantsBodyDraft
+          ? { outlineBody }
+          : {}),
       ...(bodyEdits === undefined || wantsBodyDraft ? {} : { bodyEdits }),
       ...(draftBody === undefined
         ? {}
