@@ -27,6 +27,8 @@ import {
   SENSORY_DESCRIPTION_RULE_PATH,
   DEAI_DESCRIPTION_RULE_MARKDOWN,
   DEAI_DESCRIPTION_RULE_PATH,
+  WORK_STYLE_RULE_PATH,
+  WORK_STYLE_SEED_MARKDOWN,
   digest,
   deriveVolumeDirectoryPath,
   fixedWorkspaceEntries,
@@ -210,6 +212,7 @@ export class NodeWorkspaceAdapter implements WorkspacePort {
     )
     await mkdir(resolveInside(root, "大纲"), { recursive: true })
     await mkdir(resolveInside(root, "表现输出/本作品描写"), { recursive: true })
+    await writeFileIfMissing(resolveInside(root, WORK_STYLE_RULE_PATH), WORK_STYLE_SEED_MARKDOWN)
     if (this.sharedPresentationRoot === undefined) {
       await mkdir(resolveInside(root, "表现输出/描写规则"), { recursive: true })
       await mkdir(resolveInside(root, "表现输出/笔风规则"), { recursive: true })

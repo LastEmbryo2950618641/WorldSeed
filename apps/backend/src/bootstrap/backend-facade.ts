@@ -60,6 +60,7 @@ import {
   synopsisConversationDiscardLastUserTurnPayloadSchema,
   synopsisConversationAcknowledgeBudgetPayloadSchema,
   synopsisConversationStreamPeekPayloadSchema,
+  synopsisConversationContextUsagePayloadSchema,
   synopsisResolveTurnInputPayloadSchema,
   synopsisBeginTurnPayloadSchema,
   chapterSynopsisGetPayloadSchema,
@@ -642,6 +643,18 @@ export class BackendFacade {
           payload.projectId,
           payload.sessionId,
         )
+      }
+      case "synopsis.conversation.contextUsage": {
+        const payload = synopsisConversationContextUsagePayloadSchema.parse(request.payload)
+        const runtime = await this.container.getRuntime(payload.projectId, payload.workspaceRootRef)
+        return runtime.createSynopsisConversationService().contextUsage({
+          projectId: payload.projectId,
+          workspaceRootRef: payload.workspaceRootRef,
+          ...(payload.sessionId === undefined ? {} : { sessionId: payload.sessionId }),
+          ...(payload.contextWindowTokens === undefined
+            ? {}
+            : { contextWindowTokens: payload.contextWindowTokens }),
+        })
       }
       case "synopsis.conversation.resolveTurnInput": {
         const payload = synopsisResolveTurnInputPayloadSchema.parse(request.payload)

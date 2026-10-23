@@ -85,6 +85,8 @@ export const DEAI_DESCRIPTION_RULE_MARKDOWN = [
   "# 去AI味",
   "",
   "> 职责：压掉机器腔与模板句，让正文读起来像人写的场面。不管题材腔、笔风词表；那些由笔风规则 / 本作品描写负责。",
+  ">",
+  "> **完整去味 / 对话 / 人味 / 情绪演出**：以平台 skill（`load_skill` / 阶段默认包）中的 `chinese-webnovel-skills` vendor 原文为准（MIT，WorldSeed 不擅自删改）。本文件是描写目录里的**短基线提醒**；冲突时以更具体的 skill 条款为准。",
   "",
   "## 本轮身份",
   "",
@@ -97,6 +99,7 @@ export const DEAI_DESCRIPTION_RULE_MARKDOWN = [
   "- **信任读者**：场面已经演出来的情绪/关系，禁止再跟一句作者总结（「他明白了」「这意味着」「真正重要的是」「从这一刻起」「你刚才说了三句话」）。",
   "- **落到具体**：关键情绪用动作、物件、声音、后果承载；禁止空挂「感到一丝XX」「涌起一股XX」「一种说不清的感觉」「他不是不敢他是怕」。",
   "- **对话像说话**：可打断、吞字、说偏一点；禁止人人出口成章、句句金句。",
+  "- **对话有功能**：禁止 A 半截话 → B「什么/担什么」→ A 再解释的乒乓球（详见 vendor dialogue）。",
   "- **句式要有起伏**：长短交错；禁止整段同长并列、三连排比感官清单当装饰。",
   "- **章末单一钩**：禁止对仗双「他知道…也知道…」升华收束；只留一个动作或一条具体信息。",
   "- **不要为去味而注水**：删套话后用当场证据补上，不要机械换同义词，也不要故意错字装人。",
@@ -114,6 +117,7 @@ export const DEAI_DESCRIPTION_RULE_MARKDOWN = [
   "- 「没有A，没有B」否定排比；「取而代之的是…」；「浑身散发着一股…气息/气场」；「命运/齿轮/棋局」收束升华",
   "- 连续堆砌「一丝 / 一抹 / 仿佛 / 似乎 / 显得有些 / 微微 / 淡淡 / 缓缓」",
   "- 人人出口成章、句句机锋；长段一次讲透的推理口播",
+  "- 对白乒乓球：「我要担。」「担什么？」——第二句若只搭台阶就删",
   "",
   "### 英文/翻译腔常见 AI tell（若正文出现英式转写也禁）",
   "",
@@ -143,8 +147,8 @@ export const AUTO_DESCRIPTION_RULE_MARKDOWN = [
   "",
   "## 本轮身份",
   "",
-  "创作台选「自动」时，同目录其他描写 `.md` 会一并注入，作为场面卡。",
-  "本文件只负责**何时切换**；切过去之后，按匹配到的那张场面卡执行切镜、密度、铺开顺序。",
+  "创作台选「自动」时，本轮只注入本文件 + 感官/去AI味基线；场面卡全文**不预载**。",
+  "本文件负责**何时切换**；需要某张卡细则时用 `request_read`（`sourceKinds:[\"rule\"]`）或请用户下拉锁定。",
   "`感官描写.md` 与 `去AI味.md` 是**始终生效的基线**，不是可切换场面卡；不要把它们当成「切到某种模式」。",
   "",
   "## 硬约束",
@@ -226,7 +230,7 @@ export function listDescriptionRuleFiles<T extends { relativePath: string; entry
 }
 
 /**
- * Auto: every 描写规则 file.
+ * Auto: only `自动.md` + always-on baselines (scene cards on demand via request_read / lock).
  * Locked: selected file + always-on baselines (`感官描写.md`, `去AI味.md`).
  */
 export function resolveDescriptionRulePaths(
@@ -240,13 +244,31 @@ export function resolveDescriptionRulePaths(
     }
     return ensureAlwaysOnDescriptionBaselines([selected])
   }
-  const all = listDescriptionRuleFiles(catalogEntries).map((entry) => (
-    normalizeWorkspaceRelativePath(entry.relativePath)
-  ))
-  if (all.length === 0) {
+  const catalogPaths = new Set(
+    listDescriptionRuleFiles(catalogEntries).map((entry) => normalizeWorkspaceRelativePath(entry.relativePath)),
+  )
+  if (!catalogPaths.has(AUTO_DESCRIPTION_RULE_PATH) && catalogPaths.size === 0) {
     throw new Error(`Selected presentation rule is missing: ${AUTO_DESCRIPTION_RULE_PATH}`)
   }
-  return ensureAlwaysOnDescriptionBaselines(all)
+  return ensureAlwaysOnDescriptionBaselines([AUTO_DESCRIPTION_RULE_PATH])
+}
+
+/** Scene cards under 描写规则 (excludes auto conductor + always-on baselines). */
+export function isDescriptionSceneCardPath(path: string): boolean {
+  const normalized = normalizeWorkspaceRelativePath(path)
+  if (!isDescriptionRuleMarkdownPath(normalized)) return false
+  if (normalized === AUTO_DESCRIPTION_RULE_PATH) return false
+  if ((ALWAYS_ON_DESCRIPTION_BASELINES as readonly string[]).includes(normalized)) return false
+  return true
+}
+
+/**
+ * Default left-tree filter: keep primary description surfaces; hide scene cards unless expanded.
+ */
+export function isPrimaryWorkspaceSkillPath(path: string): boolean {
+  const normalized = normalizeWorkspaceRelativePath(path)
+  if (isDescriptionSceneCardPath(normalized)) return false
+  return true
 }
 
 /** Keep always-on baselines after auto, before scene cards; force-include even if catalog omitted them. */
@@ -292,7 +314,8 @@ export function formatDescriptionRuleEvidence(
     if (path === AUTO_DESCRIPTION_RULE_PATH) {
       return [
         "【描写·自动调度】",
-        "同一章可以切换多种描写场面。按本文件决定何时启用其他描写文件。",
+        "本轮只注入本文件与感官/去AI味基线；场面卡全文不预载。",
+        "需要某场面卡细则时：`request_read` + `sourceKinds:[\"rule\"]` + exactKeys（如 `表现输出/描写规则/近景跟随.md`），或请用户在下拉锁定该卡。",
         "`感官描写.md` 与 `去AI味.md` 始终生效，不是可切换场面卡。",
         "",
         content,

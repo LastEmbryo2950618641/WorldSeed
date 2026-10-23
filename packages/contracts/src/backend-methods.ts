@@ -68,6 +68,7 @@ export const backendMethodValues = [
   "synopsis.conversation.discardLastUserTurn",
   "synopsis.conversation.acknowledgeBudget",
   "synopsis.conversation.streamPeek",
+  "synopsis.conversation.contextUsage",
   "synopsis.conversation.resolveTurnInput",
   "synopsis.conversation.beginTurn",
   "synopsis.staging.promote.list",

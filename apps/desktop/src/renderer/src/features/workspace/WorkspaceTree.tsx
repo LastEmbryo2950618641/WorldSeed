@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { FilePlus2, Folder, FolderOpen, FolderPlus, History, LockKeyhole, RefreshCw, Trash2 } from "lucide-react"
+import { Eye, EyeOff, FilePlus2, Folder, FolderOpen, FolderPlus, History, LockKeyhole, RefreshCw, Trash2 } from "lucide-react"
 
 import type { InventoryEntry } from "../../api/client.js"
 import { UiTooltip } from "../../components/UiTooltip.js"
@@ -12,6 +12,7 @@ import {
   resolveWorkspaceLockKind,
   type WorkspaceLockKind,
 } from "./workspace-locks.js"
+import { filterInventoryForSkillView } from "./skill-tree-filter.js"
 import { isChapterBodyMarkdownPath } from "../editor/synopsis-path.js"
 
 export const SETTINGS_LINEAGE_VIRTUAL_PATH = "__virtual__/设定沿革"
@@ -56,13 +57,28 @@ export function WorkspaceTree({
   onCreateDirectory,
   onDeletePath,
 }: Props): React.JSX.Element {
-  const tree = useMemo(() => buildTree(entries), [entries])
+  const [showSceneCards, setShowSceneCards] = useState(false)
+  const visibleEntries = useMemo(
+    () => filterInventoryForSkillView(entries, { showSceneCards }),
+    [entries, showSceneCards],
+  )
+  const tree = useMemo(() => buildTree(visibleEntries), [visibleEntries])
   const expandedBySelection = useMemo(() => ancestorDirectoryPaths(selectedPath), [selectedPath])
 
   return <aside className="workspace-tree">
     <div className="workspace-tree-header">
       <span className="workspace-tree-title">工作目录</span>
       <div className="workspace-tree-actions">
+        <UiTooltip label={showSceneCards ? "隐藏描写场面卡（Skill 过滤）" : "显示描写场面卡"}>
+          <button
+            type="button"
+            aria-label={showSceneCards ? "隐藏描写场面卡" : "显示描写场面卡"}
+            aria-pressed={showSceneCards}
+            onClick={() => { setShowSceneCards((value) => !value) }}
+          >
+            {showSceneCards ? <Eye size={15} /> : <EyeOff size={15} />}
+          </button>
+        </UiTooltip>
         <UiTooltip label="新建 Markdown（相对当前选中位置）">
           <button
             type="button"

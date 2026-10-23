@@ -371,6 +371,46 @@ export const synopsisConversationStreamPeekPayloadSchema = projectSettingsReadPa
   sessionId: idSchema.optional(),
 })
 export type SynopsisConversationStreamPeekPayload = z.infer<typeof synopsisConversationStreamPeekPayloadSchema>
+
+export const contextUsageCategoryIdSchema = z.enum([
+  "system_rules",
+  "skills",
+  "phase_prompt",
+  "tools",
+  "presentation_rules",
+  "memory",
+  "evidence",
+  "narrative",
+  "conversation",
+  "latest_delta",
+])
+export type ContextUsageCategoryId = z.infer<typeof contextUsageCategoryIdSchema>
+
+export const contextUsageCategorySchema = z.object({
+  id: contextUsageCategoryIdSchema,
+  label: z.string().min(1),
+  tokens: z.number().int().nonnegative(),
+  share: z.number().min(0).max(1),
+  compressible: z.boolean(),
+})
+export type ContextUsageCategory = z.infer<typeof contextUsageCategorySchema>
+
+export const synopsisConversationContextUsagePayloadSchema = projectSettingsReadPayloadSchema.extend({
+  sessionId: idSchema.optional(),
+  contextWindowTokens: z.number().int().positive().optional(),
+})
+export type SynopsisConversationContextUsagePayload = z.infer<typeof synopsisConversationContextUsagePayloadSchema>
+
+export const synopsisConversationContextUsageResultSchema = z.object({
+  sessionId: idSchema.optional(),
+  usedTokens: z.number().int().nonnegative(),
+  maxTokens: z.number().int().positive(),
+  percent: z.number().min(0).max(100),
+  categories: z.array(contextUsageCategorySchema),
+  compactionGeneration: z.number().int().nonnegative().optional(),
+  empty: z.boolean().default(false),
+})
+export type SynopsisConversationContextUsageResult = z.infer<typeof synopsisConversationContextUsageResultSchema>
 export const synopsisConversationAcknowledgeBudgetPayloadSchema = projectSettingsReadPayloadSchema
 export type SynopsisConversationAcknowledgeBudgetPayload = z.infer<
   typeof synopsisConversationAcknowledgeBudgetPayloadSchema
@@ -695,6 +735,7 @@ export const backendPayloadSchemas = {
   "synopsis.conversation.discardLastUserTurn": synopsisConversationDiscardLastUserTurnPayloadSchema,
   "synopsis.conversation.acknowledgeBudget": synopsisConversationAcknowledgeBudgetPayloadSchema,
   "synopsis.conversation.streamPeek": synopsisConversationStreamPeekPayloadSchema,
+  "synopsis.conversation.contextUsage": synopsisConversationContextUsagePayloadSchema,
   "synopsis.conversation.resolveTurnInput": synopsisResolveTurnInputPayloadSchema,
   "synopsis.conversation.beginTurn": synopsisBeginTurnPayloadSchema,
   "synopsis.staging.promote.list": synopsisStagingPromoteListPayloadSchema,

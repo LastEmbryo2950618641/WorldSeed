@@ -1028,6 +1028,14 @@ async function demoInvoke(method: BackendMethod, payload: unknown): Promise<unkn
       return { messages: [] }
     case "synopsis.conversation.acknowledgeBudget":
       return {}
+    case "synopsis.conversation.contextUsage":
+      return {
+        usedTokens: 0,
+        maxTokens: 1_000_000,
+        percent: 0,
+        categories: [],
+        empty: true,
+      }
     default:
       throw new Error(`Browser demo does not implement ${method}`)
   }

@@ -42,6 +42,7 @@ import {
   formatSynopsisToolRunCall,
   formatSynopsisToolRunStatus,
 } from "./tool-run-label.js"
+import { ContextUsagePanel } from "./ContextUsagePanel.js"
 import {
   DISCUSS_AGENT_MODE_OPTIONS,
   loadDiscussAgentMode,
@@ -562,6 +563,9 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
         <CreationDeskComposerInput
           compact={isRail}
           footerCollapse={isRail ? "full" : footerCollapse}
+          projectId={props.projectId}
+          workspaceRootRef={props.workspaceRootRef}
+          sessionId={props.session?.sessionId}
           busy={props.busy}
           running={props.running}
           showStop={showStop}
@@ -599,6 +603,9 @@ export function SynopsisConversationComposer(props: Props): React.JSX.Element {
 type ComposerInputProps = Readonly<{
   compact?: boolean
   footerCollapse?: CreationDeskFooterCollapse
+  projectId: string | undefined
+  workspaceRootRef: string | undefined
+  sessionId: string | undefined
   busy: boolean
   running: boolean
   showStop: boolean
@@ -631,6 +638,7 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
   const [draft, setDraft] = useState("")
   const [catalogModels, setCatalogModels] = useState<readonly string[]>([])
   const [catalogStatus, setCatalogStatus] = useState<"idle" | "loading" | "ready" | "error">("idle")
+  const [contextUsageOpen, setContextUsageOpen] = useState(false)
   const loadedCatalogSigRef = useRef("")
 
   useEffect(() => {
@@ -726,10 +734,33 @@ function CreationDeskComposerInput(props: ComposerInputProps): React.JSX.Element
   return <div className={`creation-desk-composer${props.compact === true ? " is-compact" : ""}${isMinimal ? " is-minimal" : ""}`}>
     {hideChrome
       ? null
-      : <div className="creation-desk-token-metrics" data-testid="creation-desk-token-metrics">
-          <span>KV <strong>{formatDeskKv(props.tokenMetrics?.kvRate)}</strong></span>
-          <span>Token <strong>{formatDeskTokens(props.tokenMetrics?.totalTokens)}</strong></span>
-          <span>上下文 <strong>{formatDeskContext(props.tokenMetrics?.currentContextTokens, props.tokenMetrics?.contextWindowTokens)}</strong></span>
+      : <div className="creation-desk-token-metrics-wrap">
+          <div className="creation-desk-token-metrics" data-testid="creation-desk-token-metrics">
+            <span>KV <strong>{formatDeskKv(props.tokenMetrics?.kvRate)}</strong></span>
+            <span>Token <strong>{formatDeskTokens(props.tokenMetrics?.totalTokens)}</strong></span>
+            <button
+              type="button"
+              className="creation-desk-context-usage-trigger"
+              data-context-usage-trigger=""
+              data-testid="creation-desk-context-usage-trigger"
+              aria-expanded={contextUsageOpen}
+              title="查看上下文分类占用"
+              onClick={() => { setContextUsageOpen((open) => !open) }}
+            >
+              上下文 <strong>{formatDeskContext(props.tokenMetrics?.currentContextTokens, props.tokenMetrics?.contextWindowTokens)}</strong>
+            </button>
+          </div>
+          <ContextUsagePanel
+            open={contextUsageOpen}
+            projectId={props.projectId}
+            workspaceRootRef={props.workspaceRootRef}
+            sessionId={props.sessionId}
+            refreshToken={props.busy || props.running ? "busy" : `idle:${props.tokenMetrics?.currentContextTokens ?? 0}`}
+            {...(props.tokenMetrics?.contextWindowTokens === undefined
+              ? {}
+              : { contextWindowTokens: props.tokenMetrics.contextWindowTokens })}
+            onClose={() => { setContextUsageOpen(false) }}
+          />
         </div>}
     <textarea
       value={draft}

@@ -31,7 +31,10 @@ import {
 import { defaultProjectSettings } from "@worldseed/config"
 
 import {
+  buildContextUsageBreakdown,
   executeWithContextCompaction,
+  filterNovelContextExchangeMessages,
+  findExactDuplicateStaticMessageIds,
 } from "../context/index.js"
 import {
   assembleSynopsisPlaceholderDocument,
@@ -63,7 +66,9 @@ import {
   assertWorkDescriptionWriteBatch,
   resolveDescriptionRulePaths,
   listWorkDescriptionRuleFiles,
+  WORK_STYLE_RULE_PATH,
 } from "../../core/index.js"
+import { applyColdStartStyleGate } from "./cold-start-style-gate.js"
 import type { GoalProposalPayload } from "@worldseed/contracts"
 import type { AIModelPort, PromptResourcePort, TurnReadEvidence, TurnRetrievalGap } from "../turns/ports/ai-model-port.js"
 import type { WorkspacePort, InternalStorePort } from "../workspace/index.js"
@@ -412,6 +417,61 @@ export class SynopsisConversationService {
       : { ...snapshot, budgetAdvisory }
   }
 
+  public async contextUsage(input: Readonly<{
+    projectId: ProjectId
+    workspaceRootRef: string
+    sessionId?: string
+    contextWindowTokens?: number
+  }>): Promise<Readonly<{
+    sessionId?: string
+    usedTokens: number
+    maxTokens: number
+    percent: number
+    categories: ReturnType<typeof buildContextUsageBreakdown>["categories"]
+    empty: boolean
+  }>> {
+    void input.workspaceRootRef
+    const session = input.sessionId === undefined
+      ? await this.dependencies.conversation.findActiveSession(input.projectId)
+      : await this.dependencies.conversation.findSession(input.sessionId)
+    const maxTokens = input.contextWindowTokens ?? 1_000_000
+    if (session === undefined || session.projectId !== input.projectId) {
+      return {
+        usedTokens: 0,
+        maxTokens,
+        percent: 0,
+        categories: [],
+        empty: true,
+      }
+    }
+    let messages = [...await this.dependencies.conversation.listDiscussContextMessages(session.sessionId)]
+    const duplicateStaticIds = findExactDuplicateStaticMessageIds(messages)
+    if (duplicateStaticIds.length > 0) {
+      await this.dependencies.conversation.hideDiscussContextMessages(
+        session.sessionId,
+        duplicateStaticIds,
+        this.dependencies.now(),
+      )
+      messages = messages.filter((message) => !duplicateStaticIds.includes(message.messageId))
+    }
+    const usage = await this.hydrateDiscussUsage(input.projectId)
+    const breakdown = buildContextUsageBreakdown({
+      messages,
+      contextWindowTokens: maxTokens,
+      ...(usage?.lastRequestInputTokens === undefined
+        ? {}
+        : { lastRequestInputTokens: usage.lastRequestInputTokens }),
+    })
+    return {
+      sessionId: session.sessionId,
+      usedTokens: breakdown.usedTokens,
+      maxTokens: breakdown.maxTokens,
+      percent: breakdown.percent,
+      categories: breakdown.categories,
+      empty: breakdown.empty,
+    }
+  }
+
   public acknowledgeBudget(input: Readonly<{ projectId: ProjectId }>): Readonly<{
     budgetAdvisory?: SynopsisConversationBudgetAdvisory
   }> {
@@ -530,7 +590,7 @@ export class SynopsisConversationService {
       const currentWorkDisplayName = this.dependencies.readDisplayName === undefined
         ? undefined
         : await this.dependencies.readDisplayName()
-      const assist = await this.runSynopsisDiscuss({
+      let assist = await this.runSynopsisDiscuss({
         projectId: input.projectId,
         workspaceRootRef: input.workspaceRootRef,
         sessionId: session.sessionId,
@@ -729,6 +789,22 @@ export class SynopsisConversationService {
         writeNotices.push(...aligned.notices)
       }
 
+      let styleDiskMarkdown: string | undefined
+      try {
+        styleDiskMarkdown = await this.dependencies.workspace.readMarkdown(
+          input.workspaceRootRef,
+          WORK_STYLE_RULE_PATH,
+        )
+      } catch {
+        styleDiskMarkdown = undefined
+      }
+      const styleGated = applyColdStartStyleGate({
+        assist,
+        diskStyleMarkdown: styleDiskMarkdown,
+      })
+      assist = styleGated.assist
+      if (styleGated.notices.length > 0) writeNotices.push(...styleGated.notices)
+
       if (assist.volumeChapterPlans !== undefined && assist.volumeChapterPlans.length > 0) {
         const planVolume = nextVolume
           ?? extractVolumeFolderNameFromPath(synopsisPath)
@@ -923,20 +999,24 @@ export class SynopsisConversationService {
               : "请先完成梗概确认并写细纲，或点「跳过细纲，按梗概开推」。",
           )
         }
+        const {
+          chapterDraftProposal: _blockedProposal,
+          chapterDraftProposals: _blockedProposals,
+          appendedDraft: _blockedAppended,
+          continueTurn: _blockedContinue,
+          focusChange: _blockedFocus,
+          ...assistWithoutBodyWrites
+        } = assist
         draftAssist = {
-          ...assist,
-          chapterDraftProposal: undefined,
-          chapterDraftProposals: undefined,
-          appendedDraft: undefined,
-          continueTurn: undefined,
-          focusChange: undefined,
+          ...assistWithoutBodyWrites,
           choices: (hasOutlineOnDisk || wroteOutlineThisTurn)
             ? mergeConfirmOutlineChoice(assist.choices)
             : assist.choices,
         }
       } else if (!autonomous && !batchAutomation) {
         // 逐步确认：禁止自动跳章
-        draftAssist = { ...assist, continueTurn: undefined, focusChange: undefined }
+        const { continueTurn: _stepContinue, focusChange: _stepFocus, ...assistWithoutJump } = assist
+        draftAssist = assistWithoutJump
       }
 
       const assistantMessageId = this.dependencies.createId()
@@ -1824,6 +1904,7 @@ export class SynopsisConversationService {
           digest: digest(`${basePhasePrompt.text}\n\n${appendix.join("\n\n")}`),
         }
     const systemRules = await this.dependencies.prompts.loadSynopsisDiscussSystemRules()
+    const defaultSkillPack = await this.dependencies.prompts.loadDefaultSkillPack("synopsis_discuss")
     const turnMonitor = this.dependencies.readTurnMonitor === undefined
       ? undefined
       : await this.dependencies.readTurnMonitor()
@@ -1864,13 +1945,57 @@ export class SynopsisConversationService {
         sessionId: input.sessionId,
         projectId: input.projectId,
         createdAtMs: nowMs,
-        messages: [{
-          role: "system",
-          kind: "system_rules",
-          content: systemRules.text,
-        }],
+        messages: [
+          {
+            role: "system",
+            kind: "system_rules",
+            content: systemRules.text,
+          },
+          {
+            role: "system",
+            kind: "phase_instruction",
+            content: defaultSkillPack.text,
+          },
+        ],
       })
       storedContext = [...await this.dependencies.conversation.listDiscussContextMessages(input.sessionId)]
+    } else {
+      const duplicateStaticIds = findExactDuplicateStaticMessageIds(storedContext)
+      if (duplicateStaticIds.length > 0) {
+        await this.dependencies.conversation.hideDiscussContextMessages(
+          input.sessionId,
+          duplicateStaticIds,
+          nowMs,
+        )
+        storedContext = storedContext.filter((message) => !duplicateStaticIds.includes(message.messageId))
+        runtimeLog("info", "synopsis-conversation", "context.static_duplicates_hidden", {
+          projectId: input.projectId,
+          sessionId: input.sessionId,
+          hiddenCount: duplicateStaticIds.length,
+        })
+      }
+      // Reused sessions (pre-skill era) may lack the default pack — inject once.
+      const hasSkillPack = storedContext.some((message) => {
+        const content = message.content ?? ""
+        return content.includes("【skill-pack:") || content.includes("synopsis-skills-v1")
+      })
+      if (!hasSkillPack) {
+        await this.dependencies.conversation.appendDiscussContextMessages({
+          sessionId: input.sessionId,
+          projectId: input.projectId,
+          createdAtMs: nowMs,
+          messages: [{
+            role: "system",
+            kind: "phase_instruction",
+            content: defaultSkillPack.text,
+          }],
+        })
+        storedContext = [...await this.dependencies.conversation.listDiscussContextMessages(input.sessionId)]
+        runtimeLog("info", "synopsis-conversation", "context.default_skill_pack_appended", {
+          projectId: input.projectId,
+          sessionId: input.sessionId,
+        })
+      }
     }
     const skipBootstrap = storedDigests.bootstrap === bootstrapDigest
     let readEvidence: TurnReadEvidence[] = skipBootstrap
@@ -1949,6 +2074,20 @@ export class SynopsisConversationService {
           ...(this.dependencies.writeMemory === undefined
             ? {}
             : { writeMemory: this.dependencies.writeMemory }),
+          loadSkill: async (skillInput) => {
+            const loaded = await this.dependencies.prompts.loadSkill(skillInput.skillId, {
+              includeReferences: skillInput.includeReferences === true,
+            })
+            const listed = await this.dependencies.prompts.listSkills()
+            const meta = listed.find((item) => item.id === loaded.skillId)
+            return {
+              skillId: loaded.skillId,
+              name: meta?.name ?? loaded.skillId,
+              includeReferences: loaded.includeReferences,
+              text: loaded.text,
+              digest: loaded.digest,
+            }
+          },
         }
 
     for (;;) {
@@ -2222,15 +2361,28 @@ export class SynopsisConversationService {
       }
       lastRequestInputTokens = execution.usage.lastRequestInputTokens
       if (execution.contextExchange !== undefined) {
-        await this.dependencies.conversation.appendDiscussContextMessages({
-          sessionId: input.sessionId,
-          projectId: input.projectId,
-          createdAtMs: this.dependencies.now(),
-          messages: [
-            ...execution.contextExchange.requestMessages,
-            execution.contextExchange.responseMessage,
-          ],
-        })
+        const duplicateStaticIds = findExactDuplicateStaticMessageIds(storedContext)
+        if (duplicateStaticIds.length > 0) {
+          await this.dependencies.conversation.hideDiscussContextMessages(
+            input.sessionId,
+            duplicateStaticIds,
+            this.dependencies.now(),
+          )
+          storedContext = storedContext.filter((message) => !duplicateStaticIds.includes(message.messageId))
+        }
+        const exchangeMessages = filterNovelContextExchangeMessages(storedContext, [
+          ...execution.contextExchange.requestMessages,
+          execution.contextExchange.responseMessage,
+        ])
+        if (exchangeMessages.length > 0) {
+          await this.dependencies.conversation.appendDiscussContextMessages({
+            sessionId: input.sessionId,
+            projectId: input.projectId,
+            createdAtMs: this.dependencies.now(),
+            messages: exchangeMessages,
+          })
+          storedContext = [...await this.dependencies.conversation.listDiscussContextMessages(input.sessionId)]
+        }
         await this.dependencies.conversation.saveDiscussContextDigests({
           sessionId: input.sessionId,
           synopsisDigest: digest(input.synopsisMarkdown),

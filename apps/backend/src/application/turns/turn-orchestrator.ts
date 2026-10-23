@@ -111,6 +111,8 @@ import {
   ContextWindowManager,
   executeWithContextCompaction,
   estimateModelMessageTokens,
+  filterNovelContextExchangeMessages,
+  findExactDuplicateStaticMessageIds,
   mergeEvidenceVersions,
 } from "../context/index.js"
 import {
@@ -2603,13 +2605,17 @@ export class TurnOrchestrator {
   private async executePhase(input: ExecutePhaseInput): Promise<ExecutePhaseResult> {
     throwIfExecutionCancelled(input.signal)
     const basePrompt = await this.dependencies.prompts.loadPhase(input.phase)
+    const skillPack = input.phase === "draft"
+      ? await this.dependencies.prompts.loadDefaultSkillPack("draft")
+      : undefined
     const appendices = [
       worldDivergencePhaseAppendix(
         resolveWorldDivergenceMode(input.input.projectSettings),
         input.phase,
       ),
       chapterNarrativeIntentPhaseAppendix(input.input.chapterIntent, input.phase),
-    ].filter((text): text is string => text !== undefined)
+      skillPack?.text,
+    ].filter((text): text is string => text !== undefined && text.trim().length > 0)
     const prompt = appendices.length === 0
       ? basePrompt
       : (() => {
@@ -2928,12 +2934,27 @@ export class TurnOrchestrator {
             : { modelReasoningKind: execution.usage.reasoningKind }),
         },
         usage: execution.usage,
-        ...(execution.contextExchange === undefined ? {} : {
-          contextMessages: [
-            ...execution.contextExchange.requestMessages,
-            execution.contextExchange.responseMessage,
-          ],
-        }),
+        ...await (async () => {
+          const exchange = execution.contextExchange
+          if (exchange === undefined) return {}
+          const existing = await this.dependencies.persistence.listModelContextMessages(input.modelContextChainId)
+          const duplicateStaticIds = findExactDuplicateStaticMessageIds(existing)
+          if (duplicateStaticIds.length > 0) {
+            await this.dependencies.persistence.hideModelContextMessages(
+              input.modelContextChainId,
+              duplicateStaticIds,
+              this.dependencies.now(),
+            )
+          }
+          const visibleExisting = duplicateStaticIds.length === 0
+            ? existing
+            : existing.filter((message) => !duplicateStaticIds.includes(message.messageId))
+          const contextMessages = filterNovelContextExchangeMessages(visibleExisting, [
+            ...exchange.requestMessages,
+            exchange.responseMessage,
+          ])
+          return contextMessages.length === 0 ? {} : { contextMessages }
+        })(),
         finishedAtMs: this.dependencies.now(),
       })
       await this.dependencies.persistence.saveContext(currentContext, this.dependencies.now())

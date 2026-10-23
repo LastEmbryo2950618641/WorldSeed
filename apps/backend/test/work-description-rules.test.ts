@@ -96,8 +96,6 @@ describe("work description overlay rules", () => {
       AUTO_DESCRIPTION_RULE_PATH,
       SENSORY_DESCRIPTION_RULE_PATH,
       DEAI_DESCRIPTION_RULE_PATH,
-      "表现输出/描写规则/过场白描.md",
-      "表现输出/描写规则/近景跟随.md",
     ])
     expect(resolveDescriptionRulePaths("表现输出/描写规则/近景跟随.md", catalog)).toEqual([
       SENSORY_DESCRIPTION_RULE_PATH,

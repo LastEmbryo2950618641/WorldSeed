@@ -2,13 +2,9 @@
 
 写正文草稿、正式推演正文、修订正文时必须遵守。梗概/细纲可简写，但不得用梗概腔冒充正文。
 
-> 平台硬约束由下列 **MIT** 开源实践浓缩改写，**不是**任一仓库全文拷贝：  
-> [zenstory-ai/oh-story-claudecode](https://github.com/zenstory-ai/oh-story-claudecode)（`story-deslop` / blocking 句式）·  
-> [op7418/Humanizer-zh](https://github.com/op7418/Humanizer-zh)（去空话与模板节奏）·  
-> [LifelongLazyLearner/qu-ai-wei](https://github.com/LifelongLazyLearner/qu-ai-wei)（保事实/保声口、禁止假人味）·  
-> [LAY-lgtm/novel-writing-framework](https://github.com/LAY-lgtm/novel-writing-framework)（番茄/起点节奏与章钩）·  
-> [tance-mang/chinese-webnovel-skills](https://github.com/tance-mang/chinese-webnovel-skills)（连贯八链与网文手感）。  
-> 无许可证仓库不纳入。
+> **去 AI 味 / 对话 / 人味 / 情绪演出 / 句式节奏**：以平台 Skill（阶段默认包或 `load_skill`）加载的 vendor 原文为准（`resources/vendor/chinese-webnovel-skills/`，[tance-mang/chinese-webnovel-skills](https://github.com/tance-mang/chinese-webnovel-skills) MIT）。系统规则只常驻短索引，不塞全文。本文件**不替代**那些 skill。  
+> **本文件专责**：WorldSeed 交付硬闸、冲突密度、章钩/连贯、平台特有约束（共体、标签、计数等）。  
+> 另参考（未全文 vendor）：[zenstory-ai/oh-story-claudecode](https://github.com/zenstory-ai/oh-story-claudecode)、[op7418/Humanizer-zh](https://github.com/op7418/Humanizer-zh)、[LifelongLazyLearner/qu-ai-wei](https://github.com/LifelongLazyLearner/qu-ai-wei)、[LAY-lgtm/novel-writing-framework](https://github.com/LAY-lgtm/novel-writing-framework)。无许可证仓库不纳入。
 
 ## 0. 交付硬闸（写完先自查，不过则改后再交）
 
@@ -26,6 +22,7 @@
 10. **标签勿漂移**：本章已定义的编号/职衔/规则名（类型码 vs 个体号、职位 vs 人名等）禁止混指；新含义须用新标签或当场改口并留下物证。
 11. **共体状态勿静默切换**：若已确立「多人共用一具身体 / 脑内声 / 抢控」，禁止无过程地写成两具身体并排行动；分体、借壳、外化须写清触发、代价与当场可观察后果。
 12. **计数口径勿混用**：身体数、名册位序、号牌数、在押人数等须各自命名；禁止用同一套数字在不同口径间偷换（如「点名到第 N」与「排位第 M」混为一谈）。
+13. **无意义对白乒乓**：禁止 A 抛半截话 → B「什么/担什么/什么意思」→ A 再解释给读者听。第二句若只为给第一句搭台阶，删掉第二句，让第一句一次说完，或改成动作打断。
 
 ## 1. 去 AI 味（写时即守）
 
@@ -38,6 +35,14 @@
 - **语域乱跳 / 无用修辞**：朴实文别硬塞典故；比喻不帮局面或爽感就删。
 - **弱化副词堆砌**：微微/淡淡/缓缓/轻轻 不要密铺。
 - **假人味**：禁止故意错字、乱加 emoji/烂梗、伪造「亲历细节」装真人（qu-ai-wei / Humanizer 共识）。
+
+### 对话怎么写（硬要求）
+
+- **一句一意图**：每句对白须推动拒绝/索取/威胁/试探/躲责中的一种；禁止只为「显得像对话」而多蹦一句。
+- **禁解释台阶**：勿写「我要担。」「担什么？」——改成「你在这儿嚷，回头板子算我的。」或李馥直接插牌、退半步，不靠对方追问。
+- **信息给够就停**：小吏不会把「一天挡三十个、挡错挨三十棍」讲成小作文；最多半句，其余用动作（插牌、抠漆、退进门框）。
+- **可不通顺，不可无功能**：吞字、打断、答非所问可以；无来由的反问接力不行。
+- **身份口吻**：门吏白话短句；禁戏剧腔半截悬念（「我要担」这种舞台台词）。
 
 ### 要求
 
@@ -89,9 +94,9 @@
 
 在 `selfReview` / `finalSelfReview` 用一两句写清：
 
-- 已清零的硬闸编号（如「0.2/0.11/0.12」与 §3.0 冲突密度/情绪优先、§3 前钩交账/一章一主峰/状态桥/谜团债）；
+- 已清零的硬闸编号（如「0.2/0.11/0.12/0.13」与 §3.0 冲突密度/情绪优先、§3 前钩交账/一章一主峰/状态桥/谜团债）；
 - 已核逻辑链（含共体状态、计数口径、性别称谓、章首因果）；
 - 本章兑现的变化 + 上章钩如何交账 + 章末唯一钩是什么 + 该钩与上章末是否不同；
-- 一句点明：删掉了哪些无意义过程、保留了哪几个触发细节砸情绪。
+- 一句点明：删掉了哪些无意义过程与对白乒乓、保留了哪几个触发细节砸情绪。
 
 禁止空话「已注意文笔」。

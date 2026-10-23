@@ -5862,6 +5862,9 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
   /* Visible so Todo / advanced menus can open above the composer chrome. */
   overflow: visible;
 }
+.creation-desk-token-metrics-wrap {
+  position: relative;
+}
 .creation-desk-token-metrics {
   display: flex;
   flex-wrap: wrap;
@@ -5873,6 +5876,136 @@ html, body, #root, .app-chrome, .app-shell, .launcher {
 .creation-desk-token-metrics strong {
   color: var(--text-secondary);
   font-weight: 600;
+}
+.creation-desk-context-usage-trigger {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.creation-desk-context-usage-trigger:hover strong,
+.creation-desk-context-usage-trigger[aria-expanded="true"] strong {
+  color: var(--accent);
+}
+.context-usage-panel {
+  position: absolute;
+  left: 14px;
+  bottom: calc(100% + 6px);
+  z-index: 40;
+  width: min(420px, calc(100vw - 48px));
+  padding: 12px 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  color: var(--text-secondary);
+}
+.context-usage-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.context-usage-panel-header strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+}
+.context-usage-panel-header small {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.context-usage-panel-close {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.context-usage-panel-error {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--danger-text);
+}
+.context-usage-panel-empty {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.context-usage-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg-sidebar);
+  margin-bottom: 10px;
+}
+.context-usage-bar-segment {
+  min-width: 2px;
+}
+.context-usage-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+}
+.context-usage-list li {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.context-usage-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+.context-usage-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.context-usage-tag {
+  margin-left: 6px;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.context-usage-tag--protected {
+  color: var(--accent);
+}
+.context-usage-tokens,
+.context-usage-share {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.context-usage-panel-tips {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+.context-usage-panel-tips p {
+  margin: 0 0 4px;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--text-faint);
+}
+.context-usage-panel-tips p:last-child {
+  margin-bottom: 0;
 }
 .creation-desk-composer textarea {
   width: 100%;

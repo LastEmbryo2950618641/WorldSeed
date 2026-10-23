@@ -11,6 +11,11 @@ import {
   SETTINGS_QUERY_GUIDE_RESOURCE,
   SETTINGS_REVISION_GUIDE_RESOURCE,
   WEBNOVEL_PROSE_LOGIC_RESOURCE,
+  WEBNOVEL_VENDOR_WRITE_RULE_RESOURCES,
+  SKILL_INDEX_RESOURCE,
+  PLATFORM_BASE_RULE_RESOURCES,
+  PLATFORM_SKILLS,
+  defaultSkillIdsForPhase,
   assertFrontierSettlementCoversReview,
   assertGraphGovernanceReferenceContract,
   assertPhaseReferenceContract,
@@ -67,14 +72,41 @@ describe("prompt contracts", () => {
       PLOT_SYNOPSIS_GUIDE_RESOURCE,
       SETTINGS_QUERY_GUIDE_RESOURCE,
       SETTINGS_REVISION_GUIDE_RESOURCE,
+      SKILL_INDEX_RESOURCE,
+      ...WEBNOVEL_VENDOR_WRITE_RULE_RESOURCES,
       ...aiPhaseValues.map((phase) => promptDefinitions[phase].resourcePath),
     ]
 
-    expect(new Set(resources).size).toBe(aiPhaseValues.length + 6)
+    expect(new Set(resources).size).toBe(aiPhaseValues.length + 7 + WEBNOVEL_VENDOR_WRITE_RULE_RESOURCES.length)
     for (const resource of resources) {
       const path = resolve(packageRoot, resource)
       expect(existsSync(path), resource).toBe(true)
       expect(readFileSync(path, "utf8").trim().length, resource).toBeGreaterThan(80)
+    }
+  })
+
+  it("keeps platform composites thin (no vendor fulltext; skill index only)", () => {
+    expect(PLATFORM_BASE_RULE_RESOURCES).toEqual([
+      BASE_RULES_RESOURCE,
+      CONTENT_HANDLING_RESOURCE,
+      WEBNOVEL_PROSE_LOGIC_RESOURCE,
+      SETTINGS_QUERY_GUIDE_RESOURCE,
+      SKILL_INDEX_RESOURCE,
+    ])
+    for (const vendor of WEBNOVEL_VENDOR_WRITE_RULE_RESOURCES) {
+      expect(PLATFORM_BASE_RULE_RESOURCES).not.toContain(vendor)
+    }
+    expect(defaultSkillIdsForPhase("draft")).toEqual(["webnovel-deslop", "webnovel-dialogue"])
+    expect(defaultSkillIdsForPhase("synopsis_discuss")).toContain("discuss-workflow")
+    expect(PLATFORM_SKILLS.length).toBeGreaterThanOrEqual(7)
+  })
+
+  it("ships chinese-webnovel-skills vendor write rules verbatim-ish (MIT attribution header)", () => {
+    const packageRoot = resolve(process.cwd(), "packages/prompt-contracts")
+    for (const resource of WEBNOVEL_VENDOR_WRITE_RULE_RESOURCES) {
+      const text = readFileSync(resolve(packageRoot, resource), "utf8")
+      expect(text).toContain("tance-mang/chinese-webnovel-skills")
+      expect(text).toContain("不改正文")
     }
   })
 
@@ -154,11 +186,12 @@ describe("prompt contracts", () => {
     expect(sourceRetrieval).toContain("设定集默认查询规则")
     expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("设定集修订规则")
     expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("表现输出/本作品描写/*.md")
-    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("开书作品风格（硬门槛，先于正文）")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("开书冷启动（硬门槛，先于卷大纲/正文）")
     expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("表现输出/本作品描写/作品风格.md")
-    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("1→6 维全部定好写入")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("1→8 维全部定好写入")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("人称指称")
     expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("表现输出/笔风规则/")
-    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("时代·科技·生活层")
+    expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).toContain("时代科技生活")
     expect(readResource(promptDefinitions.synopsis_discuss.resourcePath)).not.toContain("presentationWrites 给出完整 Markdown、`relativePath`（仅 `表现输出/描写规则/*.md`")
     expect(readResource(PLOT_SYNOPSIS_GUIDE_RESOURCE)).toContain("表现输出/本作品描写/")
     expect(readResource(PLOT_SYNOPSIS_GUIDE_RESOURCE)).toContain("作品风格.md")

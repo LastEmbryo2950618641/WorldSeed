@@ -1,4 +1,6 @@
 export * from "./context-window-manager.js"
 export * from "./context-compacting-execution.js"
+export * from "./context-usage-breakdown.js"
+export * from "./context-exchange-persistence.js"
 export * from "./evidence-version-key.js"
 export * from "./model-context-appender.js"

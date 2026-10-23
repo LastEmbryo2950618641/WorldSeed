@@ -99,6 +99,17 @@ export type SynopsisMemoryWriteResult = Readonly<{
   truncated: boolean
   byteLength: number
 }>
+export type SynopsisLoadSkillInput = SynopsisToolContext & Readonly<{
+  skillId: string
+  includeReferences?: boolean
+}>
+export type SynopsisLoadSkillResult = Readonly<{
+  skillId: string
+  name: string
+  includeReferences: boolean
+  text: string
+  digest: string
+}>
 export type SynopsisWorkflowToolCallbacks = Readonly<{
   executeWorkflowTool?: (input: SynopsisWorkflowToolInput) => Promise<SynopsisWorkflowToolResult>
   publishDraft?: (input: SynopsisPublishDraftInput) => Promise<SynopsisPublishDraftResult>
@@ -106,6 +117,7 @@ export type SynopsisWorkflowToolCallbacks = Readonly<{
   runBash?: (input: SynopsisBashInput) => Promise<SynopsisBashResult>
   writeTodos?: (input: SynopsisTodoWriteInput) => Promise<SynopsisTodoWriteResult>
   writeMemory?: (input: SynopsisMemoryWriteInput) => Promise<SynopsisMemoryWriteResult>
+  loadSkill?: (input: SynopsisLoadSkillInput) => Promise<SynopsisLoadSkillResult>
 }>
 export type SynopsisToolName =
   | "chapter_workflow"
@@ -114,6 +126,7 @@ export type SynopsisToolName =
   | "bash"
   | "todo_write"
   | "memory_write"
+  | "load_skill"
 export type SynopsisToolRequest = Readonly<{
   name: SynopsisToolName
   action: "describe" | "invoke"
@@ -181,6 +194,7 @@ const descriptions = {
       "失败时：把 exitCode/stderr 直接告诉用户，禁止默默改用工作区材料顶替本机路径内容。",
       "区分：工作区=整部项目根（含设定集/章节正文/大纲/暂存区等）；暂存区=工作区内的 `暂存区/` 中间态，不是设定集权威。",
       "command 为一条非交互命令；超长输出会被截断。详规见《创作台讨论工作流》。",
+      "平台 skill 只读校验（需已知绝对路径）：scan-template-tells.mjs / scan-dialogue-pingpong.mjs（见 skill-script-whitelist）。",
     ].join(""),
   },
   todo_write: {
@@ -210,6 +224,18 @@ const descriptions = {
       "勿把整章设定/正文塞进记忆；设定权威仍在设定集。Plan 模式也可用本工具。",
     ].join(""),
   },
+  load_skill: {
+    parameters: {
+      skillId: "string (required；见系统规则中的 Skill 索引)",
+      includeReferences: "boolean (optional；true 时附带 references 长文，默认 false)",
+    },
+    writingGuide: [
+      "【load_skill】按需加载平台写作/讨论 skill 全文（去味、对话、人味、情绪、工作流等）。",
+      "系统规则只含短索引；默认阶段包可能已挂主 skill，仍缺细则时再 load。",
+      "includeReferences=true 会明显增大上下文，仅在主正文不够用时开启。",
+      "描写场面卡不在本工具：用 request_read + sourceKinds:[\"rule\"] 读 表现输出/描写规则/。",
+    ].join(""),
+  },
 } as const
 
 function callbackForTool(
@@ -222,6 +248,7 @@ function callbackForTool(
   if (name === "bash") return callbacks.runBash as ((input: never) => Promise<unknown>) | undefined
   if (name === "todo_write") return callbacks.writeTodos as ((input: never) => Promise<unknown>) | undefined
   if (name === "memory_write") return callbacks.writeMemory as ((input: never) => Promise<unknown>) | undefined
+  if (name === "load_skill") return callbacks.loadSkill as ((input: never) => Promise<unknown>) | undefined
   return undefined
 }
 
@@ -268,6 +295,12 @@ export function synopsisToolCatalog(callbacks: SynopsisWorkflowToolCallbacks): s
         displayName: "Agent 记忆",
         definition: "写入跨讨论回合的 MEMORY.md 索引或主题记忆文件。",
         scenario: "用户要求记住偏好/纠错/约定，或需把稳定工作记忆落到 世界推演规则/Agent记忆/。",
+      }]),
+      ...(callbacks.loadSkill === undefined ? [] : [{
+        name: "load_skill",
+        displayName: "加载 Skill",
+        definition: "按需注入平台 skill 正文（去味/对话/人味/情绪/讨论指南等）。",
+        scenario: "索引不够、默认包未覆盖、或需要 references 细则时。",
       }]),
     ],
   })
@@ -465,6 +498,26 @@ export async function executeSynopsisTool(input: Readonly<{
       })
       context.signal?.throwIfAborted()
       return { ...envelope, status: "memory_written", result }
+    }
+    if (request.name === "load_skill") {
+      const args = parseArguments(request.arguments, ["skillId", "includeReferences"])
+      const skillId = requiredText(args, "skillId")
+      const includeReferences = args.includeReferences === undefined
+        ? false
+        : requiredBoolean(args, "includeReferences")
+      const result = await callbacks.loadSkill!({
+        ...context,
+        skillId,
+        includeReferences,
+      })
+      context.signal?.throwIfAborted()
+      return {
+        ...envelope,
+        status: "skill_loaded",
+        protocol: "synopsis-skills-v1",
+        skillId: result.skillId,
+        result,
+      }
     }
     const args = parseArguments(request.arguments, ["revisionTaskId", "draftVersionId"])
     const revisionTaskId = requiredText(args, "revisionTaskId")

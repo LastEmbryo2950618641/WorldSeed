@@ -77,6 +77,11 @@ export type PromptResource = Readonly<{
   text: string
 }>
 
+export type LoadedSkillResource = PromptResource & Readonly<{
+  skillId: string
+  includeReferences: boolean
+}>
+
 export interface PromptResourcePort {
   loadBaseRules(): Promise<PromptResource>
   loadContentHandling(): Promise<PromptResource>
@@ -87,6 +92,17 @@ export interface PromptResourcePort {
   loadTurnSystemRules(): Promise<PromptResource>
   loadSynopsisDiscussSystemRules(): Promise<PromptResource>
   loadPhase(phase: AIPhase): Promise<PromptResource>
+  /** Load one platform skill body (+ optional references). */
+  loadSkill(skillId: string, options?: Readonly<{ includeReferences?: boolean }>): Promise<LoadedSkillResource>
+  listSkills(): Promise<readonly Readonly<{
+    id: string
+    name: string
+    summary: string
+    injectPolicy: string
+    defaultPhases: readonly string[]
+  }>[]>
+  /** Default skill pack for a phase (compressible; not sticky system_rules). */
+  loadDefaultSkillPack(phase: AIPhase | "synopsis_discuss"): Promise<PromptResource>
 }
 
 export type TurnPhaseInput = Readonly<{

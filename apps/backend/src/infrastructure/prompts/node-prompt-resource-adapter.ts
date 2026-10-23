@@ -13,10 +13,15 @@ import {
   WEBNOVEL_PROSE_LOGIC_RESOURCE,
   PLATFORM_BASE_RULE_RESOURCES,
   SYNOPSIS_DISCUSS_BASE_RULE_RESOURCES,
+  defaultSkillIdsForPhase,
+  formatSkillEvidenceHeader,
+  listPlatformSkills,
   resolvePromptDefinition,
+  resolveSkillDefinition,
+  SYNOPSIS_SKILLS_PROTOCOL,
 } from "@worldseed/prompt-contracts"
 
-import type { PromptResource, PromptResourcePort } from "../../application/index.js"
+import type { LoadedSkillResource, PromptResource, PromptResourcePort } from "../../application/index.js"
 import { digest } from "../../core/index.js"
 
 export class NodePromptResourceAdapter implements PromptResourcePort {
@@ -60,6 +65,78 @@ export class NodePromptResourceAdapter implements PromptResourcePort {
 
   public async loadPhase(phase: AIPhase): Promise<PromptResource> {
     return this.load(resolvePromptDefinition(phase).resourcePath)
+  }
+
+  public async listSkills(): Promise<readonly Readonly<{
+    id: string
+    name: string
+    summary: string
+    injectPolicy: string
+    defaultPhases: readonly string[]
+  }>[]> {
+    return listPlatformSkills().map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      summary: skill.summary,
+      injectPolicy: skill.injectPolicy,
+      defaultPhases: [...skill.defaultPhases],
+    }))
+  }
+
+  public async loadSkill(
+    skillId: string,
+    options?: Readonly<{ includeReferences?: boolean }>,
+  ): Promise<LoadedSkillResource> {
+    const skill = resolveSkillDefinition(skillId)
+    if (skill === undefined) {
+      throw new Error(`Unknown skill: ${skillId}`)
+    }
+    const includeReferences = options?.includeReferences === true
+    const paths = includeReferences
+      ? [skill.primaryResource, ...skill.referenceResources]
+      : [skill.primaryResource]
+    const parts = await Promise.all(paths.map((resourcePath) => this.load(resourcePath)))
+    const header = formatSkillEvidenceHeader(skill.id, includeReferences)
+    const text = composePromptTexts([header, ...parts.map((part) => part.text)])
+    return {
+      skillId: skill.id,
+      includeReferences,
+      ref: `${PROMPT_CONTRACT_VERSION}:skill:${skill.id}${includeReferences ? "+refs" : ""}`,
+      version: PROMPT_CONTRACT_VERSION,
+      digest: digest(text),
+      text,
+    }
+  }
+
+  public async loadDefaultSkillPack(phase: AIPhase | "synopsis_discuss"): Promise<PromptResource> {
+    const skillIds = defaultSkillIdsForPhase(phase)
+    if (skillIds.length === 0) {
+      const empty = `${formatSkillEvidenceHeader("none", false)}\n（本阶段无默认 skill 包）\n`
+      return {
+        ref: `${PROMPT_CONTRACT_VERSION}:skill-pack:${phase}:empty`,
+        version: PROMPT_CONTRACT_VERSION,
+        digest: digest(empty),
+        text: empty,
+      }
+    }
+    const loaded = await Promise.all(skillIds.map((id) => this.loadSkill(id, { includeReferences: false })))
+    const envelope = JSON.stringify({
+      protocol: SYNOPSIS_SKILLS_PROTOCOL,
+      kind: "default_pack",
+      phase,
+      skillIds,
+    })
+    const text = composePromptTexts([
+      `【skill-pack:${phase}】默认挂载（不含 references；可用 load_skill 加深）`,
+      envelope,
+      ...loaded.map((part) => part.text),
+    ])
+    return {
+      ref: `${PROMPT_CONTRACT_VERSION}:skill-pack:${phase}`,
+      version: PROMPT_CONTRACT_VERSION,
+      digest: digest(text),
+      text,
+    }
   }
 
   private async load(resourcePath: string): Promise<PromptResource> {

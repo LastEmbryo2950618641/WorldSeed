@@ -57,6 +57,13 @@ function setup() {
       truncated: false,
       byteLength: input.markdown.length,
     })),
+    loadSkill: vi.fn(async (input) => ({
+      skillId: input.skillId,
+      name: input.skillId,
+      includeReferences: input.includeReferences === true,
+      text: `【skill:${input.skillId}】demo`,
+      digest: "skill-digest",
+    })),
   } satisfies SynopsisWorkflowToolCallbacks
   const visibleMessages: VisibleModelContextMessage[] = []
   const listDrafts = vi.fn(async () => [draft])
@@ -81,15 +88,33 @@ describe("synopsis workflow progressive disclosure", () => {
     expect(catalog).toContain("bash")
     expect(catalog).toContain("todo_write")
     expect(catalog).toContain("memory_write")
+    expect(catalog).toContain("load_skill")
     expect(catalog).toContain("正文推演工具")
     expect(catalog).toContain("图治理工具")
     expect(catalog).toContain("工作区 Bash")
     expect(catalog).toContain("Todo 清单")
     expect(catalog).toContain("Agent 记忆")
+    expect(catalog).toContain("加载 Skill")
     expect(catalog).not.toContain("userInput")
     expect(catalog).not.toContain("revisionTaskId")
     expect(catalog).not.toContain("writingGuide")
     expect(JSON.parse(synopsisToolCatalog({})).tools).toEqual([])
+  })
+
+  it("describes and invokes load_skill", async () => {
+    const { execute, callbacks, describeTool } = setup()
+    await describeTool("load_skill")
+    expect(await execute({
+      name: "load_skill",
+      action: "invoke",
+      arguments: JSON.stringify({ skillId: "webnovel-dialogue", includeReferences: false }),
+    })).toMatchObject({
+      status: "skill_loaded",
+      protocol: "synopsis-skills-v1",
+      skillId: "webnovel-dialogue",
+      result: { skillId: "webnovel-dialogue" },
+    })
+    expect(callbacks.loadSkill).toHaveBeenCalledOnce()
   })
 
   it("describes and invokes memory_write", async () => {
