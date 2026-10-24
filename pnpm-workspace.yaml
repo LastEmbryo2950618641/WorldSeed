@@ -1,5 +1,7 @@
 packages:
-  - apps/*
+  - apps/backend
+  - apps/desktop
+  # apps/mobile is a standalone Expo app (own install); see apps/mobile/README.md
   - packages/*
 # electron-builder → @electron/rebuild@3.x pulls git-hosted @electron/node-gyp.
 # Keep false so packaging deps can install under pnpm 11.

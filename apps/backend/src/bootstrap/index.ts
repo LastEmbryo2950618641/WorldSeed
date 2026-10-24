@@ -1,5 +1,6 @@
 export * from "./backend-facade.js"
 export * from "./container.js"
+export * from "./http-entry.js"
 export * from "./project-runtime.js"
 export * from "./standalone-entry.js"
 export * from "./utility-entry.js"
